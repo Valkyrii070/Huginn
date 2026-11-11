@@ -1,0 +1,19624 @@
+#!/usr/bin/env python3
+"""
+Huginn: a Safari-style desktop web browser for Windows (PySide6 + Qt WebEngine).
+
+Recreates the look of current macOS Safari:
+  * frameless window with traffic-light controls. On Windows it keeps the native
+    shadow, Aero Snap, edge resizing and minimize/maximize animations.
+  * toolbar buttons grouped in white capsules and a centred, pill-shaped address field
+    (site name when idle, full URL while editing, blue progress line while loading)
+  * rounded tab strip with a raised active tab (hidden while only one tab is open)
+  * tab overview grid, Bookmarks/History sidebar, and a Start Page with Favorites,
+    Frequently Visited and a Privacy Report fed by a built-in tracker blocker
+  * light and dark appearance (follows Windows, or choose it in the page menu)
+
+Privacy & Security (Ctrl+, opens the settings):
+  * Private Browsing windows: nothing kept, cookies and website data erased on close
+  * cross-site tracking prevention: tracker blocking plus third-party cookie blocking
+  * link tracking protection (utm_, fbclid, gclid... removed) and Global Privacy Control
+  * HTTPS upgrades with a fallback, certificate warnings, encrypted DNS (DoH)
+  * per-site permission prompts (camera, microphone, location, clipboard...), quiet
+    notification blocking, lookalike-domain (homograph) protection in the address field
+  * download warnings for apps and scripts, Windows "Mark of the Web" for SmartScreen
+  * dialog-loop protection, and Clear History with time ranges that removes site data too
+
+Ad blocking (built into the browser, so Chrome's Manifest V3 limits on extensions don't
+apply): EasyList + EasyPrivacy, auto-updated, for network blocking and element hiding; on
+YouTube, ad data is removed from the player's responses before it plays, leftovers are
+fast-forwarded, and the "ad blockers are not allowed" wall is taken down.
+
+Requirements:  Python 3.9+ and PySide6 6.8+     ->  pip install PySide6
+Run:           python safari_browser.py [url ...]
+
+Shortcuts:  Ctrl+T new tab · Ctrl+Shift+N private window · Ctrl+W close tab
+            Ctrl+Shift+T reopen closed tab · Ctrl+L address field · Ctrl+R/F5 reload
+            Alt+Left/Right back/forward · Ctrl+Shift+H Start Page · Ctrl+Tab/Ctrl+Shift+Tab
+            switch tabs · Ctrl+1..9 pick tab · Ctrl+Shift+\\ tab overview · Ctrl+Shift+L sidebar
+            Ctrl+D bookmark · Ctrl+= / Ctrl+- / Ctrl+0 zoom · Ctrl+, Privacy & Security
+            Ctrl+Shift+Delete clear history · F12 Web Inspector · Ctrl+Q quit
+"""
+from __future__ import annotations
+
+import base64
+import csv
+import hashlib
+import html
+import importlib.util
+import io
+import secrets
+import uuid
+import configparser
+import datetime
+import itertools
+import json
+import math
+import os
+import queue
+import random
+import re
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unicodedata
+from array import array
+from collections import Counter
+from functools import partial
+from html.parser import HTMLParser
+from string import Template
+from urllib.parse import quote, quote_plus, unquote
+
+from PySide6.QtCore import (
+    QBuffer, QByteArray, QEasingCurve, QEvent, QFileInfo, QIODevice, QMimeData, QObject, QPoint, QPointF, QRect,
+    QLocale, QRectF, QSettings, QSize, QStandardPaths, Qt, QTime, QTimer, QUrl, QUrlQuery, QVariantAnimation, Signal,
+    Slot,
+)
+from PySide6.QtGui import (
+    QAction, QActionGroup, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QFontMetricsF, QGuiApplication,
+    QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+    QPolygonF, QShortcut, QWindow,
+)
+from PySide6.QtNetwork import QLocalServer, QLocalSocket, QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineCore import (
+    QWebEngineDownloadRequest, QWebEngineLoadingInfo, QWebEnginePage, QWebEnginePermission,
+    QWebEngineProfile, QWebEngineScript, QWebEngineSettings, QWebEngineUrlRequestInfo,
+    QWebEngineUrlRequestInterceptor, QWebEngineUrlRequestJob, QWebEngineUrlScheme,
+    QWebEngineUrlSchemeHandler,
+)
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import (
+    QAbstractButton, QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+    QFileDialog, QFileIconProvider, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMenu, QProgressBar, QProxyStyle, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyleFactory,
+    QPlainTextEdit, QSizeGrip, QSplitter, QTimeEdit, QStyleOptionMenuItem, QStyleOptionTab, QStyleOptionViewItem, QStyledItemDelegate, QTabBar, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget, QWidgetAction,
+)
+
+try:
+    from PySide6.QtWebEngineCore import qWebEngineChromiumSecurityPatchVersion, qWebEngineVersion
+except ImportError:                                    # pragma: no cover - older Qt
+    qWebEngineChromiumSecurityPatchVersion = qWebEngineVersion = None
+
+try:                                                   # Qt 6.7+: encrypted DNS (DNS over HTTPS)
+    from PySide6.QtWebEngineCore import QWebEngineGlobalSettings
+except ImportError:                                    # pragma: no cover - older Qt
+    QWebEngineGlobalSettings = None
+
+# --------------------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------------------
+BROWSER_NAME = "Huginn"                   # its name on screen (Odin's raven, who flies out over the world)
+# Storage names - the registry key, the profile folder, the password vault - keep the
+# browser's first name, so settings, history, cookies and passwords stay where they are.
+APP_NAME = "SafariQt"
+ORG_NAME = "SafariQt"
+START_SCHEME = "safariqt"                 # internal scheme that serves the Start Page
+START_URL = f"{START_SCHEME}:start"
+HOME_URL = START_URL                      # e.g. "https://www.apple.com" for a classic homepage
+SEARCH_URL = "https://www.google.com/search?q={}"
+
+TOOLBAR_HEIGHT = 50
+CAPSULE_HEIGHT = 32
+TAB_TRACK_HEIGHT = 30                     # the rounded tab strip
+TAB_ROW_HEIGHT = TAB_TRACK_HEIGHT + 7     # strip + gap above the page
+TAB_SIDE_INSET = 10
+TAB_MIN_WIDTH = 120
+CARD_MARGIN = 8                           # gap around the rounded page card (Arc-style)
+CARD_RADIUS = 10
+SIDEBAR_WIDTH = 250
+RESIZE_MARGIN = 8                         # px band along the window edge that resizes
+MAX_HISTORY = 5000
+# Tab sleeping: background tabs are frozen (no scripts or timers run) after a few idle
+# minutes and unloaded from memory after an hour; they come back when you click them.
+TAB_FREEZE_AFTER = 5 * 60
+TAB_DISCARD_AFTER = 60 * 60
+TAB_SLEEP_CHECK_MS = 30_000
+SESSION_SAVE_MS = 1500                    # open tabs are written down this long after a change
+DICTIONARIES_DIR = "dictionaries"         # spell-check dictionaries (Chromium .bdic), next to this file
+SPELL_LANGUAGES = ["en-US"]
+DARK_WEBSITE_MODES = {"off": "Their Own Colours", "auto": "Dark When Huginn Is Dark", "always": "Always Dark"}
+RAM_CHECK_MS = 20_000                     # how often the RAM limit is checked
+# Whether a page has text typed into it that isn't saved anywhere (counted, never read out).
+EDITED_FIELDS_JS = r"""(function () {
+  var n = 0;
+  document.querySelectorAll('input, textarea, select').forEach(function (e) {
+    try {
+      if (e.tagName === 'SELECT') {
+        for (var i = 0; i < e.options.length; i++)
+          if (e.options[i].selected !== e.options[i].defaultSelected) { n++; break; }
+      } else if (e.type === 'checkbox' || e.type === 'radio') {
+        if (e.checked !== e.defaultChecked) n++;
+      } else if (e.type !== 'hidden' && e.value !== e.defaultValue) n++;
+    } catch (x) {}
+  });
+  document.querySelectorAll('[contenteditable=""], [contenteditable="true"]').forEach(function (e) {
+    if ((e.textContent || '').trim()) n++;
+  });
+  return n;
+})()"""
+ZOOM_LEVELS = (0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+WEEK = 7 * 24 * 3600
+
+IS_WINDOWS = sys.platform == "win32"
+IS_WIN11 = IS_WINDOWS and sys.getwindowsversion().build >= 22000
+
+DEFAULT_BOOKMARKS = [
+    {"title": "Apple", "url": "https://www.apple.com/"},
+    {"title": "Google", "url": "https://www.google.com/"},
+    {"title": "YouTube", "url": "https://www.youtube.com/"},
+    {"title": "Wikipedia", "url": "https://www.wikipedia.org/"},
+    {"title": "GitHub", "url": "https://github.com/"},
+    {"title": "Reddit", "url": "https://www.reddit.com/"},
+]
+
+# Third-party advertising/analytics hosts blocked by "Prevent Cross-Site Tracking".
+# Kept deliberately conservative so ordinary sites keep working.
+TRACKER_DOMAINS = frozenset({
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com", "google-analytics.com",
+    "googletagservices.com", "adservice.google.com", "scorecardresearch.com", "quantserve.com",
+    "quantcount.com", "hotjar.com", "hotjar.io", "criteo.com", "criteo.net", "taboola.com",
+    "outbrain.com", "adnxs.com", "rubiconproject.com", "pubmatic.com", "casalemedia.com",
+    "openx.net", "moatads.com", "amazon-adsystem.com", "adsrvr.org", "bidswitch.net",
+    "smartadserver.com", "bat.bing.com", "ads-twitter.com", "analytics.twitter.com",
+    "ads.linkedin.com", "analytics.tiktok.com", "clarity.ms", "mc.yandex.ru", "chartbeat.com",
+    "chartbeat.net", "mathtag.com", "demdex.net", "everesttech.net", "krxd.net", "bluekai.com",
+    "agkn.com", "rlcdn.com", "tapad.com",
+})
+
+# --------------------------------------------------------------------------------------
+# Privacy & Security configuration
+# --------------------------------------------------------------------------------------
+# Link Tracking Protection (like Safari 17): query parameters that only identify a click,
+# removed from addresses before they load. Matched case-insensitively.
+TRACKING_PARAMS = frozenset({
+    "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "msclkid", "yclid", "twclid", "ttclid",
+    "igshid", "li_fat_id", "mc_eid", "_hsenc", "_hsmi", "__hssc", "__hstc", "__hsfp", "hsctatracking",
+    "mkt_tok", "oly_anon_id", "oly_enc_id", "vero_id", "vero_conv", "wickedid", "_openstat",
+    "srsltid", "epik", "sccid", "irclickid", "rb_clickid", "_gl",
+})
+TRACKING_PREFIXES = ("utm_",)
+
+# Files that run code when opened: downloading one asks first (and gets Mark of the Web).
+DANGEROUS_EXTENSIONS = frozenset({
+    "exe", "msi", "msix", "msixbundle", "appx", "appxbundle", "appinstaller", "bat", "cmd", "com",
+    "cpl", "scr", "pif", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "lnk",
+    "reg", "dll", "sys", "application", "appref-ms", "gadget", "msc", "msp", "mst", "inf", "chm",
+    "iso", "img", "vhd", "vhdx", "url", "scf", "xll", "py", "pyw",
+})
+
+# Encrypted DNS providers (DNS over HTTPS). Quad9 also refuses to resolve known malware sites.
+SECURE_DNS_PROVIDERS = {
+    "quad9": ("Quad9 (blocks malicious sites)", "https://dns.quad9.net/dns-query"),
+    "cloudflare": ("Cloudflare", "https://cloudflare-dns.com/dns-query"),
+    "google": ("Google", "https://dns.google/dns-query"),
+    "off": ("Off (use system DNS)", ""),
+}
+HTTPS_UPGRADE_TIMEOUT_MS = 6000          # no response to the https:// attempt by then: fall back
+HTTPS_MODES = {
+    "upgrade": "Upgrade automatically",          # try https://, quietly fall back if unsupported
+    "strict": "Warn before insecure sites",      # try https://, ask before falling back
+    "off": "Off",
+}
+# Search engines for the address field ({} is where the search words go).
+SEARCH_ENGINES = {
+    "google": ("Google", "https://www.google.com/search?q={}"),
+    "duckduckgo": ("DuckDuckGo", "https://duckduckgo.com/?q={}"),
+    "bing": ("Bing", "https://www.bing.com/search?q={}"),
+    "brave": ("Brave Search", "https://search.brave.com/search?q={}"),
+    "startpage": ("Startpage", "https://www.startpage.com/sp/search?query={}"),
+    "ecosia": ("Ecosia", "https://www.ecosia.org/search?q={}"),
+    "qwant": ("Qwant", "https://www.qwant.com/?q={}"),
+    "kagi": ("Kagi", "https://kagi.com/search?q={}"),
+    "custom": ("Custom…", ""),
+}
+PRIVACY_DEFAULTS = {
+    "preventTracking": True, "stripTrackingParams": True, "globalPrivacyControl": True,
+    "httpsMode": "upgrade", "secureDns": "quad9", "warnDownloads": True, "blockAds": True,
+    "searchEngine": "google", "searchCustomUrl": "",
+    "rejectCookieBanners": True, "fingerprintProtection": True, "clearCookiesOnQuit": False,
+    "searchSuggestions": False, "rememberPages": True,
+}
+
+# Permission prompts: (glyph, "Allow “site” to ...?" wording, short label for settings).
+PERMISSION_INFO = {
+    "Geolocation": ("location", "use your current location", "Location"),
+    "MediaAudioCapture": ("mic", "use your microphone", "Microphone"),
+    "MediaVideoCapture": ("camera", "use your camera", "Camera"),
+    "MediaAudioVideoCapture": ("camera", "use your camera and microphone", "Camera & Microphone"),
+    "DesktopVideoCapture": ("screen", "see your screen", "Screen Sharing"),
+    "DesktopAudioVideoCapture": ("screen", "see your screen and hear its audio", "Screen Sharing"),
+    "ClipboardReadWrite": ("clipboard", "see text and images you copy", "Clipboard"),
+    "LocalFontsAccess": ("fonts", "use the fonts installed on your computer", "Fonts"),
+    "MouseLock": ("pointer", "hide and lock your pointer", "Pointer Lock"),
+}
+
+# Hosts that never get an automatic https:// upgrade (intranet / test names).
+_LOCAL_SUFFIXES = (".local", ".lan", ".home", ".internal", ".intranet", ".corp", ".test",
+                   ".localhost", ".invalid", ".example", ".home.arpa")
+
+# Profile files and folders that hold website data (removed by "Clear History: all history"
+# on the next launch, when nothing has them open).
+SITE_DATA_ENTRIES = ("IndexedDB", "Local Storage", "Session Storage", "Service Worker", "File System",
+                     "databases", "WebStorage", "blob_storage", "Shared Dictionary", "History",
+                     "History-journal", "Favicons", "Favicons-journal", "Visited Links", "Trust Tokens",
+                     "Trust Tokens-journal")
+
+# Global Privacy Control's JavaScript half (the Sec-GPC header is the other).
+GPC_SCRIPT_NAME = "safariqt-gpc"
+GPC_SCRIPT = ("Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', "
+              "{get: () => true, configurable: true, enumerable: true});")
+
+# --------------------------------------------------------------------------------------
+# Ad blocking configuration
+# --------------------------------------------------------------------------------------
+# Filter lists (Adblock Plus format), refreshed every few days. Mirrors are tried in order.
+FILTER_LISTS = {
+    "easylist": ("EasyList", ("https://easylist.to/easylist/easylist.txt",
+                              "https://raw.githubusercontent.com/easylist/easylist/gh-pages/easylist.txt")),
+    "easyprivacy": ("EasyPrivacy", ("https://easylist.to/easylist/easyprivacy.txt",
+                                    "https://raw.githubusercontent.com/easylist/easylist/gh-pages/easyprivacy.txt")),
+}
+FILTER_MAX_AGE = 4 * 24 * 3600
+# Always on, even before the lists have downloaded: the big ad networks, YouTube's ad
+# endpoints, and YouTube's ad slots.
+BUILTIN_FILTERS = """\
+! SafariQt built-in rules
+||doubleclick.net^
+||googlesyndication.com^
+||googleadservices.com^
+||adservice.google.com^
+||2mdn.net^
+||adnxs.com^
+||amazon-adsystem.com^
+||taboola.com^
+||outbrain.com^
+||criteo.com^
+||criteo.net^
+||pubmatic.com^
+||rubiconproject.com^
+||openx.net^
+||adsrvr.org^
+||moatads.com^
+||casalemedia.com^
+||smartadserver.com^
+||adform.net^
+||teads.tv^
+||popads.net^
+||propellerads.com^
+||youtube.com/pagead/
+||youtube.com/api/stats/ads
+||youtube.com/get_midroll_
+||youtube.com/pcs/activeview
+||youtube.com/ptracking
+youtube.com,youtube-nocookie.com###masthead-ad
+youtube.com###player-ads
+youtube.com##ytd-ad-slot-renderer
+youtube.com##ytd-rich-item-renderer:has(ytd-ad-slot-renderer)
+youtube.com##ytd-in-feed-ad-layout-renderer
+youtube.com##ytd-banner-promo-renderer
+youtube.com##ytd-statement-banner-renderer
+youtube.com##ytd-video-masthead-ad-v3-renderer
+youtube.com##ytd-primetime-promo-renderer
+youtube.com##.ytd-player-legacy-desktop-watch-ads-renderer
+youtube.com##ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"]
+youtube.com##ytd-companion-slot-renderer
+youtube.com##ytd-action-companion-ad-renderer
+youtube.com##ytd-promoted-sparkles-web-renderer
+youtube.com##ytd-promoted-video-renderer
+youtube.com##ytd-search-pyv-renderer
+youtube.com##ytd-display-ad-renderer
+youtube.com##ytd-reel-video-renderer:has(ytd-ad-slot-renderer)
+youtube.com##.ytp-ad-overlay-container
+youtube.com##.ytp-ad-message-container
+youtube.com##ad-slot-renderer
+youtube.com##ytm-companion-ad-renderer
+youtube.com##tp-yt-paper-dialog:has(ytd-enforcement-message-view-model)
+"""
+ADBLOCK_COSMETIC_NAME = "safariqt-cosmetic"
+ADBLOCK_YOUTUBE_NAME = "safariqt-youtube"
+YOUTUBE_EVENT = "\u2063safariqt:yt:"         # prefix of the YouTube script's console reports
+# Element hiding, run at the very start of every page (isolated world, so pages can't see
+# or tamper with it): picks the site's rules from the data, skips sites where ad blocking
+# is off or that the lists exempt, and adds one style sheet.
+COSMETIC_SCRIPT = """(function () {
+  // Element hiding. Built to cost a page almost nothing at the start: the generic style sheet
+  // arrives as finished CSS, and sites with rules of their own are found in a plain-text index
+  // with indexOf (no JSON to parse, no objects to build). The CSS is parsed once.
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+  var parts = location.hostname.toLowerCase().split('.'), names = [];
+  for (var i = 0; i < parts.length; i++) names.push(parts.slice(i).join('.'));
+  var off = __OFF__;
+  for (var i = 0; i < names.length; i++) if (off.indexOf(names[i]) >= 0) return;
+  var MAP = __MAP__, flags = 0, specific = [], except = null;
+  for (var i = 0; i < names.length; i++) {
+    var at = MAP.indexOf('\\n' + names[i] + '\\t');
+    if (at < 0) continue;
+    var f = MAP.slice(at + 1, MAP.indexOf('\\n', at + 1)).split('\\t');
+    flags |= +f[1];
+    if (f[2]) specific.push.apply(specific, f[2].split('\\x1f'));
+    if (f[3]) { except = except || {}; f[3].split('\\x1f').forEach(function (s) { except[s] = true; }); }
+  }
+  if (flags & 3) return;
+  var END = '{display:none!important}', rules = [];
+  specific.forEach(function (item) {
+    var bits = item.split('\\x1e'), sel = bits[0];
+    if (except && except[sel]) return;
+    if (bits[1] && bits[1].split('\\x1d').some(function (x) { return names.indexOf(x) >= 0; })) return;
+    rules.push(sel + END);
+  });
+  var css = rules.join('\\n');
+  if (!(flags & 4)) {
+    var generic = __GENERIC__;
+    if (except) {                       // this site turns some generic rules off: leave those out
+      generic = generic.split('\\n').map(function (line, i) {
+        if (!line) return line;
+        var sels = i < __SIMPLE_LINES__ ? line.slice(0, -END.length).split(',') : [line.slice(0, -END.length)];
+        sels = sels.filter(function (s) { return !except[s]; });
+        return sels.length ? sels.join(',') + END : '';
+      }).join('\\n');
+    }
+    css = css ? css + '\\n' + generic : generic;
+  }
+  if (!css) return;
+  var style = null, sheet = null;
+  var addStyle = function () {          // fallback: a <style> element
+    if (style) return true;
+    var root = document.documentElement;
+    if (!root) return false;
+    style = document.createElement('style');
+    style.textContent = css;
+    (document.head || root).appendChild(style);
+    return true;
+  };
+  try {                                 // not subject to the page's style CSP
+    sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    document.adoptedStyleSheets = document.adoptedStyleSheets.concat([sheet]);
+  } catch (e) { sheet = null; }
+  if (sheet) {
+    // A page that replaces document.adoptedStyleSheets drops ours: put it back, and add the
+    // <style> as well from then on.
+    var keep = function () {
+      try {
+        if (document.adoptedStyleSheets.indexOf(sheet) < 0) {
+          document.adoptedStyleSheets = document.adoptedStyleSheets.concat([sheet]);
+          addStyle();
+        }
+      } catch (e) {}
+    };
+    document.addEventListener('DOMContentLoaded', keep);
+    addEventListener('load', keep);
+    return;
+  }
+  if (!addStyle()) new MutationObserver(function (m, o) { if (addStyle()) o.disconnect(); }).observe(document, {childList: true});
+})();"""
+# YouTube: strips ad data from the player's responses before it reads them, fast-forwards
+# any ad that still plays, and removes the "ad blockers are not allowed" wall.
+YOUTUBE_SCRIPT = r"""(function () {
+  'use strict';
+  // SafariQt's YouTube ad defence. Runs in the page's own world before YouTube's scripts.
+  if (!/(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(location.hostname)) return;
+  if (window.__safariqtYouTube) return;
+  try { Object.defineProperty(window, '__safariqtYouTube', { value: true }); } catch (e) { return; }
+
+  var debug = console.debug.bind(console);                 // before YouTube can wrap console
+  var report = function (what) { try { debug('\u2063safariqt:yt:' + what); } catch (e) {} };
+  var AD_KEYS = ['adPlacements', 'playerAds', 'adSlots', 'adBreakHeartbeatParams'];
+  var AD_API = /\/youtubei\/v1\/(player|next|get_watch|reel\/)|\/get_watch\b|\/watch\?|\/player\?/;
+
+  // 1. Take the ads out of the player's data before the player sees it. With no ad
+  //    placements there is nothing to play, so nothing for YouTube to see being blocked.
+  var strip = function (o) {
+    if (!o || typeof o !== 'object') return false;
+    var hit = false;
+    for (var i = 0; i < AD_KEYS.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(o, AD_KEYS[i])) { delete o[AD_KEYS[i]]; hit = true; }
+    }
+    var ui = o.auxiliaryUi && o.auxiliaryUi.messageRenderers;
+    if (ui && ui.enforcementMessageViewModel) { delete ui.enforcementMessageViewModel; report('wall'); }
+    return hit;
+  };
+  var prune = function (data) {
+    try {
+      var hit = false;
+      var visit = function (o) {
+        if (!o || typeof o !== 'object') return;
+        hit = strip(o) || hit;
+        if (o.playerResponse) hit = strip(o.playerResponse) || hit;
+        if (o.response && o.response.playerResponse) hit = strip(o.response.playerResponse) || hit;
+      };
+      if (Array.isArray(data)) { for (var i = 0; i < data.length && i < 16; i++) visit(data[i]); }
+      else visit(data);
+      if (hit) report('pruned');
+    } catch (e) {}
+    return data;
+  };
+  var neuter = function (text) {                            // raw JSON text: rename the ad keys
+    if (typeof text !== 'string' || !/"(adPlacements|playerAds|adSlots)"/.test(text)) return text;
+    report('pruned');
+    return text.replace(/"(adPlacements|playerAds|adSlots)"/g, '"no_$1"');
+  };
+  // Proxies keep the patched functions looking native (Function.prototype.toString).
+  var wrap = function (owner, name, make) {
+    try { owner[name] = new Proxy(owner[name], { apply: make }); } catch (e) {}
+  };
+
+  wrap(JSON, 'parse', function (target, self, args) { return prune(Reflect.apply(target, self, args)); });
+  wrap(Response.prototype, 'json', function (target, self, args) {
+    var result = Reflect.apply(target, self, args);
+    return AD_API.test(self.url || '') ? result.then(prune) : result;
+  });
+  wrap(Response.prototype, 'text', function (target, self, args) {
+    var result = Reflect.apply(target, self, args);
+    return AD_API.test(self.url || '') ? result.then(neuter) : result;
+  });
+  var xhrUrls = new WeakMap();
+  wrap(XMLHttpRequest.prototype, 'open', function (target, self, args) {
+    try { xhrUrls.set(self, String(args[1])); } catch (e) {}
+    return Reflect.apply(target, self, args);
+  });
+
+  // 1b. Ask for the video "with no ad" in the first place. When YouTube decides you block ads
+  //     it otherwise answers with a stream that holds back the start by ~80% of the ad's
+  //     length ("fake buffering": 12 s for a 15 s ad). Marking the player request as inline
+  //     playback without an ad gets a stream that starts at once.
+  var PLAYER_API = /\/youtubei\/v1\/player(\?|$)/;
+  var noAd = function (text) {
+    try {
+      var body = JSON.parse(text);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return text;
+      var context = body.playbackContext = body.playbackContext || {};
+      var content = context.contentPlaybackContext = context.contentPlaybackContext || {};
+      content.isInlinePlaybackNoAd = true;
+      report('noad');
+      return JSON.stringify(body);
+    } catch (e) { return text; }
+  };
+  wrap(window, 'fetch', function (target, self, args) {
+    try {
+      var input = args[0], init = args[1];
+      var url = typeof input === 'string' ? input : (input && input.url) || String(input || '');
+      if (PLAYER_API.test(url)) {
+        if (init && typeof init.body === 'string') {
+          args = [input, Object.assign({}, init, { body: noAd(init.body) })];
+        } else if (typeof Request !== 'undefined' && input instanceof Request && !init) {
+          return input.clone().text().then(function (text) {
+            return Reflect.apply(target, self, [new Request(input, { body: noAd(text) })]);
+          });
+        }
+      }
+    } catch (e) {}
+    return Reflect.apply(target, self, args);
+  });
+  wrap(XMLHttpRequest.prototype, 'send', function (target, self, args) {
+    try {
+      if (typeof args[0] === 'string' && PLAYER_API.test(xhrUrls.get(self) || '')) args = [noAd(args[0])];
+    } catch (e) {}
+    return Reflect.apply(target, self, args);
+  });
+  ['responseText', 'response'].forEach(function (prop) {
+    var desc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, prop);
+    if (!desc || !desc.get) return;
+    Object.defineProperty(XMLHttpRequest.prototype, prop, {
+      configurable: true, enumerable: desc.enumerable,
+      get: new Proxy(desc.get, { apply: function (target, self, args) {
+        var value = Reflect.apply(target, self, args);
+        if (self.readyState !== 4 || !AD_API.test(xhrUrls.get(self) || '')) return value;
+        if (typeof value === 'string') return neuter(value);
+        if (value && typeof value === 'object' && !(value instanceof ArrayBuffer) && !(value instanceof Blob)) return prune(value);
+        return value;
+      } })
+    });
+  });
+  // The first video's data arrives inline: var ytInitialPlayerResponse = {...};
+  // A video opened from a link has its player data built into the page, stream and all, so
+  // the no-ad request above can't help it. COLD says what to do when that data came with ads
+  // (so possibly with a held-back stream): 'keep' it, drop its 'stream' so the player asks
+  // again (with the no-ad mark), or 'drop' the whole player data so the player asks again.
+  var COLD = '__COLD__';
+  var hasAds = function (o) {
+    if (!o || typeof o !== 'object') return false;
+    for (var i = 0; i < AD_KEYS.length; i++) if (Object.prototype.hasOwnProperty.call(o, AD_KEYS[i])) return true;
+    return false;
+  };
+  ['ytInitialPlayerResponse', 'ytInitialReelWatchSequenceResponse'].forEach(function (name) {
+    var value;
+    try {
+      Object.defineProperty(window, name, {
+        configurable: true,
+        get: function () { return value; },
+        set: function (v) {
+          var ads = name === 'ytInitialPlayerResponse' && hasAds(v);
+          value = prune(v);
+          if (ads && COLD === 'stream' && value && value.streamingData) { delete value.streamingData; report('cold:stream'); }
+          else if (ads && COLD === 'drop') { value = undefined; report('cold:drop'); }
+        }
+      });
+    } catch (e) {}
+  });
+
+  // 2. Fallback for anything that still gets through: fast-forward the ad muted and press
+  //    Skip, then put the volume and speed back the moment the video returns.
+  var saved = null;
+  var check = function () {
+    var player = document.getElementById('movie_player');
+    var video = player && player.querySelector('video');
+    var ad = !!(player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting')));
+    if (ad && video) {
+      if (!saved) { saved = { muted: video.muted, rate: video.playbackRate }; report('skipped'); }
+      video.muted = true;
+      if (video.playbackRate !== 16) video.playbackRate = 16;
+      var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button-slot button');
+      if (skip) skip.click();
+    } else if (saved && video) {
+      video.muted = saved.muted;
+      video.playbackRate = saved.rate;
+      saved = null;
+    }
+    // 3. The "Ad blockers are not allowed" wall: remove it and resume the video.
+    var wall = document.querySelector('ytd-enforcement-message-view-model');
+    if (wall) {
+      var dialog = wall.closest('tp-yt-paper-dialog') || wall;
+      dialog.remove();
+      document.querySelectorAll('tp-yt-iron-overlay-backdrop').forEach(function (b) { b.remove(); });
+      if (video && video.paused) { try { video.play(); } catch (e) {} }
+      report('wall');
+    }
+  };
+  var observing = null;
+  var watch = function () {
+    var player = document.getElementById('movie_player');
+    if (player && player !== observing) {
+      observing = player;
+      new MutationObserver(check).observe(player, { attributes: true, attributeFilter: ['class'] });
+    }
+    check();
+  };
+  setInterval(watch, 400);
+})();"""
+
+# Homograph protection: Cyrillic/Greek letters that pass for Latin ones, Latin look-alikes,
+# and characters that imitate URL punctuation or are invisible.
+_LOOKALIKE_LETTERS = frozenset("асԁеһіјӏорԛѕԝхуъьҽпгѵѡүαικνορυχ")
+_LATIN_LOOKALIKES = frozenset("ıȷɑɡɩɪʟʀꜱᴏᴄᴜᴠᴡᴢ")
+_SPOOF_CHARS = frozenset("⁄∕／⧸̸‐‑‒–—―˗"
+                         "−ー​‌‍⁠﻿­")
+_CJK_SCRIPTS = ({"LATIN", "CJK", "HIRAGANA", "KATAKANA"}, {"LATIN", "CJK", "HANGUL"},
+                {"LATIN", "CJK", "BOPOMOFO"})
+
+# --------------------------------------------------------------------------------------
+# Themes: a neutral light/dark base, tinted by one of four "realms" (Arc-style themes)
+# --------------------------------------------------------------------------------------
+BASE_LIGHT = {
+    "dark": False, "content": "#FFFFFF",
+    # Light mode is built to hold up on bright and HDR screens, where pale greys melt into
+    # white: every surface has a visible edge, and secondary text stays a real grey.
+    "capsule": "rgba(255, 255, 255, 242)", "capsule_border": "rgba(20, 30, 40, 56)",
+    "capsule_shadow": "rgba(20, 40, 60, 46)", "divider": "rgba(20, 30, 40, 58)",
+    "text": "#101317", "text_secondary": "#464D57", "text_tertiary": "#6E767F",
+    "icon": "#23282E", "icon_disabled": "#A0A7AF",
+    "hover": "rgba(20, 30, 40, 24)", "pressed": "rgba(20, 30, 40, 40)",
+    "track": "rgba(255, 255, 255, 115)", "tab_active": "rgba(255, 255, 255, 254)",
+    "tab_border": "rgba(20, 30, 40, 48)", "tab_shadow": "rgba(20, 40, 60, 41)",
+    "tab_hover": "rgba(255, 255, 255, 165)", "tab_text": "#2E343B", "tab_divider": "rgba(20, 30, 40, 48)",
+    "card_shadow": "rgba(20, 40, 60, 50)", "card_border": "rgba(20, 30, 40, 50)",
+    "segment_bg": "rgba(20, 30, 40, 27)", "segment_active": "rgba(255, 255, 255, 248)",
+    "menu_bg": "#FBFBFD", "menu_border": "#BDC3CA", "menu_separator": "#D9DDE2",
+    "float_border": "rgba(20, 30, 40, 52)", "menu_shadow": "rgba(15, 30, 45, 115)",
+    "tooltip_bg": "#FFFFFF", "bubble_bg": "#F7F8FA", "separator": "#D5DAE0",
+    "scroll_handle": "rgba(0, 0, 0, 70)", "scroll_handle_hover": "rgba(0, 0, 0, 115)",
+    "card_bg": "#FFFFFF", "selection_text": "#15191E",
+    "start_bg": "#F7F8FA", "start_card": "rgba(255, 255, 255, 0.88)", "start_label": "#262C32",
+    "start_hover": "rgba(255, 255, 255, 0.6)", "tile_bg": "#FFFFFF",
+    "tile_shadow": "inset 0 0 0 1px rgba(20,40,60,.16), 0 1px 2px rgba(20,40,60,.13), 0 6px 16px rgba(20,40,60,.11)",
+    "start_card_shadow": "inset 0 0 0 1px rgba(20,40,60,.15), 0 1px 3px rgba(20,40,60,.08), 0 12px 32px rgba(20,40,60,.10)",
+    "ridge_a": "rgba(30, 50, 70, 0.075)", "ridge_b": "rgba(30, 50, 70, 0.04)", "glow_opacity": "0.63", "curtain_opacity": "0.32",
+    "group_bg": "#FFFFFF", "switch_off": "rgba(20, 30, 40, 64)", "danger": "#D93A3F", "caution": "#C46A00",
+    "warning_bg": "#FBFBFC", "input_bg": "#FFFFFF",
+}
+
+BASE_DARK = {
+    "dark": True, "content": "#15181C",
+    "capsule": "rgba(255, 255, 255, 20)", "capsule_border": "rgba(255, 255, 255, 26)",
+    "capsule_shadow": "rgba(0, 0, 0, 70)", "divider": "rgba(255, 255, 255, 36)",
+    "text": "#ECEFF3", "text_secondary": "#9AA3AD", "text_tertiary": "#5C646D",
+    "icon": "#DCE1E6", "icon_disabled": "#4E555C",
+    "hover": "rgba(255, 255, 255, 22)", "pressed": "rgba(255, 255, 255, 38)",
+    "track": "rgba(0, 0, 0, 70)", "tab_active": "rgba(255, 255, 255, 34)",
+    "tab_border": "rgba(255, 255, 255, 22)", "tab_shadow": "rgba(0, 0, 0, 80)",
+    "tab_hover": "rgba(255, 255, 255, 14)", "tab_text": "#AEB6BF", "tab_divider": "rgba(255, 255, 255, 30)",
+    "card_shadow": "rgba(0, 0, 0, 110)", "card_border": "rgba(255, 255, 255, 20)",
+    "segment_bg": "rgba(0, 0, 0, 60)", "segment_active": "rgba(255, 255, 255, 34)",
+    "menu_bg": "#23272D", "menu_border": "#3A4047", "menu_separator": "#343A41",
+    "float_border": "rgba(255, 255, 255, 24)", "menu_shadow": "rgba(0, 0, 0, 170)",
+    "tooltip_bg": "#22262B", "bubble_bg": "#22262B", "separator": "#2A2F35",
+    "scroll_handle": "rgba(255, 255, 255, 70)", "scroll_handle_hover": "rgba(255, 255, 255, 115)",
+    "card_bg": "#1E2227", "selection_text": "#FFFFFF",
+    "start_bg": "#121519", "start_card": "rgba(255, 255, 255, 0.05)", "start_label": "#C4CBD3",
+    "start_hover": "rgba(255, 255, 255, 0.06)", "tile_bg": "rgba(255, 255, 255, 0.07)",
+    "ridge_a": "rgba(255, 255, 255, 0.05)", "ridge_b": "rgba(255, 255, 255, 0.028)", "glow_opacity": "0.32", "curtain_opacity": "0.5",
+    "tile_shadow": "inset 0 0 0 1px rgba(127,127,127,.14), 0 1px 2px rgba(0,0,0,.08)",
+    "start_card_shadow": "inset 0 0 0 1px rgba(127,127,127,.16)",
+    "group_bg": "#2A2F35", "switch_off": "rgba(255, 255, 255, 46)", "danger": "#FF5F57", "caution": "#FFB340",
+    "warning_bg": "#16191D", "input_bg": "#1A1D21",
+}
+
+# Private Browsing: the address field turns dark like Safari's, with a faint violet cast
+# (Arc's incognito colour) so it still stands out against a dark toolbar.
+PRIVATE_FIELD = {
+    False: {"capsule": "rgba(40, 38, 56, 245)", "capsule_border": "rgba(0, 0, 0, 60)",
+            "capsule_shadow": "rgba(0, 0, 0, 40)", "text_secondary": "#B4B0CC"},
+    True: {"capsule": "rgba(132, 110, 255, 58)", "capsule_border": "rgba(170, 150, 255, 70)",
+           "capsule_shadow": "rgba(0, 0, 0, 70)", "text_secondary": "#C3B8FF"},
+}
+
+# The four realms: frame gradient (tint_a -> tint_b), accent, and the Start Page aurora.
+REALMS = {
+    "aurora": {"label": "Aurora", "glow": ("#3DD6B5", "#7B61FF"),
+               "light": {"tint_a": "#BEE1D6", "tint_b": "#D1D6EC", "accent": "#0A8071"},
+               "dark": {"tint_a": "#0F2624", "tint_b": "#17192C", "accent": "#43D9B8"}},
+    "bifrost": {"label": "Bifröst", "glow": ("#8E7BFF", "#FF7AB8"),
+                "light": {"tint_a": "#D3CAF2", "tint_b": "#E9D1E3", "accent": "#563AD1"},
+                "dark": {"tint_a": "#1D1932", "tint_b": "#2A1727", "accent": "#A995FF"}},
+    "muspelheim": {"label": "Muspelheim", "glow": ("#FF8A4C", "#FFC857"),
+                   "light": {"tint_a": "#EFCCB4", "tint_b": "#ECD9CA", "accent": "#AE4518"},
+                   "dark": {"tint_a": "#2C1912", "tint_b": "#1F1718", "accent": "#FF8C50"}},
+    "niflheim": {"label": "Niflheim", "glow": ("#7CC4FF", "#CFEAFF"),
+                 "light": {"tint_a": "#C6D8EC", "tint_b": "#DAE1EB", "accent": "#2361AE"},
+                 "dark": {"tint_a": "#12212F", "tint_b": "#171A20", "accent": "#7CC4FF"}},
+}
+DEFAULT_REALM = "aurora"
+
+
+def build_theme(dark: bool, realm: str) -> dict:
+    theme = dict(BASE_DARK if dark else BASE_LIGHT)
+    spec = REALMS.get(realm, REALMS[DEFAULT_REALM])
+    tones = spec["dark" if dark else "light"]
+    theme.update(tones)
+    theme["realm"] = realm if realm in REALMS else DEFAULT_REALM
+    theme["glow_a"], theme["glow_b"] = spec["glow"]
+    theme["chrome"] = tones["tint_b"]          # solid stand-in where a gradient can't be used
+    theme["frame"] = tones["tint_a"]           # Windows 11 border colour
+    a = QColor(tones["accent"])
+    theme["focus_ring"] = f"rgba({a.red()}, {a.green()}, {a.blue()}, 165)"
+    theme["selection"] = f"rgba({a.red()}, {a.green()}, {a.blue()}, {95 if dark else 70})"
+    theme["accent_text"] = "#0B1512" if a.lightnessF() > 0.6 else "#FFFFFF"
+    theme["accent_hover"] = (a.lighter(112) if not dark else a.lighter(110)).name()
+    theme["accent_pressed"] = a.darker(115).name()
+    # Windows 11 draws its own rounded menu border, so skip ours there.
+    theme["menu_border_css"] = "none" if IS_WIN11 else f"1px solid {theme['menu_border']}"
+    theme["menu_hover"] = f"rgba({a.red()}, {a.green()}, {a.blue()}, {50 if dark else 30})"
+    theme["menu_active"] = f"rgba({a.red()}, {a.green()}, {a.blue()}, {34 if dark else 22})"
+    return theme
+
+
+LIGHT_THEME = build_theme(False, DEFAULT_REALM)    # initial values before the window applies its own
+
+# Qt Style Sheet. `$name` placeholders are filled from the active theme dict.
+QSS_TEMPLATE = Template(r"""
+QWidget { color: $text; }
+QWidget#BrowserWindow { background: $frame; }
+/* The realm gradient is painted once by ChromeFrame; everything on it is transparent. */
+QWidget#Toolbar, QWidget#SidebarPanel, QTabWidget#Tabs { background: transparent; }
+
+/* ---------- toolbar capsules ---------- */
+QToolButton#CapsuleButton { background: transparent; border: none; border-radius: 14px; padding: 0px; }
+QToolButton#CapsuleButton:hover { background: $hover; }
+QToolButton#CapsuleButton:pressed, QToolButton#CapsuleButton:checked { background: $pressed; }
+QToolButton#CapsuleButton:disabled { background: transparent; }
+
+/* ---------- address field (the pill itself is custom painted) ---------- */
+QToolButton#FieldButton { background: transparent; border: none; border-radius: 11px; padding: 0px; }
+QToolButton#FieldButton:hover { background: $hover; }
+QToolButton#FieldButton:pressed { background: $pressed; }
+QToolButton#FieldButton:disabled { background: transparent; }
+QLineEdit#AddressEdit {
+    background: transparent; border: none; padding: 0px; margin: 0px; color: $text; font-size: 10pt;
+    selection-background-color: $selection; selection-color: $selection_text;
+}
+
+/* ---------- tab strip (tabs are painted by SafariTabStyle) ---------- */
+QTabBar QToolButton { background: transparent; border: none; }
+QToolButton#TabClose { background: transparent; border: none; border-radius: 9px; padding: 0px; }
+QToolButton#TabClose:hover { background: $pressed; }
+
+/* ---------- sidebar ---------- */
+QWidget#Segmented { background: $segment_bg; border-radius: 8px; }
+QPushButton#Segment {
+    background: transparent; border: none; border-radius: 6px; padding: 4px 8px;
+    color: $text_secondary; font-weight: 600;
+}
+QPushButton#Segment:hover { color: $text; }
+QPushButton#Segment:checked { background: $segment_active; color: $text; }
+QListWidget#SidebarList { background: transparent; border: none; outline: none; }
+QListWidget#SidebarList::item { color: $text; padding: 5px 6px; border-radius: 7px; }
+QListWidget#SidebarList::item:hover { background: $hover; }
+QPushButton#SidebarAction { background: transparent; border: none; color: $accent; padding: 6px; text-align: left; }
+QPushButton#SidebarAction:hover { color: $text; }
+QLabel#EmptyLabel { color: $text_tertiary; padding: 10px 8px; }
+QTreeWidget#SidebarList { background: transparent; border: none; outline: none; show-decoration-selected: 0; }
+QTreeWidget#SidebarList::item { color: $text; padding: 5px 4px; border-radius: 7px; }
+QTreeWidget#SidebarList::item:hover { background: $hover; }
+QTreeWidget#SidebarList::branch { background: transparent; image: none; border: none; }
+QLineEdit#SidebarSearch, QLineEdit#SplitAddress {
+    background: $segment_bg; color: $text; border: 1px solid transparent; border-radius: 8px; padding: 4px 8px;
+    selection-background-color: $selection; selection-color: $selection_text;
+}
+QLineEdit#SidebarSearch:focus, QLineEdit#SplitAddress:focus { border: 1px solid $accent; }
+
+/* ---------- command bar, split view ---------- */
+QLineEdit#CommandInput {
+    background: transparent; border: none; color: $text; font-size: 13pt; padding: 4px 4px 8px 4px;
+    selection-background-color: $selection; selection-color: $selection_text;
+}
+QSplitter#BodySplitter::handle { background: transparent; }
+QPlainTextEdit#CssEditor {
+    background: $input_bg; color: $text; border: 1px solid $divider; border-radius: 8px; padding: 6px;
+    font-family: "Cascadia Mono", Consolas, monospace; font-size: 9pt;
+    selection-background-color: $selection; selection-color: $selection_text;
+}
+QPlainTextEdit#CssEditor:focus { border: 1px solid $accent; }
+QTimeEdit#SheetInput {
+    background: $input_bg; color: $text; border: 1px solid $capsule_border; border-radius: 7px; padding: 5px 4px;
+    selection-background-color: $selection; selection-color: $selection_text;
+}
+QTimeEdit#SheetInput:focus { border: 1px solid $accent; }
+QTimeEdit#SheetInput::up-button, QTimeEdit#SheetInput::down-button { width: 0; border: none; }
+QWidget#PanelStrip { background: transparent; }
+QToolButton#PanelButton { background: transparent; border: none; border-radius: 8px; padding: 4px; }
+QToolButton#PanelButton:hover { background: $hover; }
+QToolButton#PanelButton:checked { background: $segment_active; }
+
+/* ---------- tab overview ---------- */
+QScrollArea#OverviewScroll { background: transparent; border: none; }
+QScrollArea#SettingsScroll { background: transparent; border: none; }
+QWidget#SettingsPage { background: transparent; }
+QLabel#OverviewEmpty { color: $text_secondary; }
+
+QLabel#FullscreenNotice {
+    background: rgba(20, 22, 26, 215); color: #FFFFFF; border-radius: 10px; padding: 9px 16px; font-size: 10pt;
+}
+
+/* ---------- link-hover / status bubble ---------- */
+QLabel#StatusBubble {
+    background: $bubble_bg; color: $text_secondary; border: 1px solid $separator;
+    border-radius: 7px; padding: 3px 9px;
+}
+
+/* ---------- Private Browsing address field (dark pill) ---------- */
+QLineEdit#AddressEdit[private="true"] {
+    color: #F2F4F7; selection-background-color: rgba(255, 255, 255, 70); selection-color: #FFFFFF;
+}
+
+/* ---------- sheets, settings, prompts ---------- */
+QDialog#Sheet { background: $menu_bg; border: $menu_border_css; }
+QLabel#SheetTitle { color: $text; font-size: 11pt; font-weight: 600; }
+QLabel#SheetBody, QLabel#RowSubtitle, QLabel#SheetNote { color: $text_secondary; }
+QLabel#RowSubtitle, QLabel#SheetNote { font-size: 8.5pt; }
+QLabel#RowTitle, QLabel#PromptText { color: $text; }
+QLabel#SectionHeader { color: $text_secondary; font-size: 8pt; font-weight: 600; padding: 10px 6px 3px 6px; }
+QFrame#SettingsGroup { background: $group_bg; border: 1px solid $menu_separator; border-radius: 10px; }
+QFrame#RowDivider { background: $menu_separator; border: none; min-height: 1px; max-height: 1px; }
+QWidget#ReportCard { background: $group_bg; border: 1px solid $menu_separator; border-radius: 10px; }
+QPushButton#PrimaryButton, QPushButton#DangerButton {
+    background: $accent; color: $accent_text; border: none; border-radius: 7px;
+    padding: 6px 16px; font-weight: 600; min-width: 60px;
+}
+QPushButton#PrimaryButton:hover { background: $accent_hover; }
+QPushButton#PrimaryButton:pressed { background: $accent_pressed; }
+QPushButton#DangerButton { background: $danger; color: #FFFFFF; }
+QPushButton#SecondaryButton {
+    background: $capsule; color: $text; border: 1px solid $capsule_border; border-radius: 7px;
+    padding: 5px 14px; min-width: 60px;
+}
+QPushButton#SecondaryButton:hover { background: $hover; }
+QPushButton#SecondaryButton:pressed { background: $pressed; }
+QPushButton#LinkButton { background: transparent; border: none; color: $accent; padding: 4px 2px; text-align: left; }
+QProgressBar#EngineProgress { border: none; background: $switch_off; border-radius: 2px; max-height: 4px; min-height: 4px; }
+QProgressBar#EngineProgress::chunk { background: $accent; border-radius: 2px; }
+QPushButton#LinkButton:hover { color: $accent_hover; text-decoration: underline; }
+QLineEdit#SheetInput {
+    background: $input_bg; color: $text; border: 1px solid $capsule_border; border-radius: 7px; padding: 5px 8px;
+    selection-background-color: $selection; selection-color: $selection_text;
+}
+QLineEdit#SheetInput:focus { border: 1px solid $accent; }
+QCheckBox { color: $text; spacing: 8px; }
+QComboBox {
+    background: $capsule; color: $text; border: 1px solid $capsule_border; border-radius: 7px;
+    padding: 4px 10px; min-width: 120px;
+}
+QComboBox:hover { background: $hover; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView {
+    background: $menu_bg; color: $text; border: 1px solid $menu_border; outline: none; padding: 4px;
+    selection-background-color: $accent; selection-color: $accent_text;
+}
+QListWidget#PermissionList { background: transparent; border: none; outline: none; }
+QListWidget#PermissionList::item { color: $text; padding: 2px; border: none; }
+QLabel#WarningTitle { color: $text; font-size: 18pt; font-weight: 600; }
+QLabel#WarningBody { color: $text_secondary; font-size: 10.5pt; }
+QLabel#WarningDetails { color: $text_secondary; }
+
+/* ---------- menus, tooltips, scrollbars ---------- */
+/* Menus are drawn by HuginnStyle (no QMenu rules here, or the style sheet would take over). */
+QLabel#MenuStepperLabel { color: $text; background: transparent; }
+QPushButton#MenuStepperValue {
+    background: transparent; color: $text_secondary; border: none; border-radius: 7px; padding: 3px 6px;
+    min-width: 40px; font-weight: 600;
+}
+QPushButton#MenuStepperValue:hover { background: $menu_hover; color: $text; }
+QToolButton#MenuStepperButton { background: $segment_bg; border: none; border-radius: 7px; }
+QToolButton#MenuStepperButton:hover { background: $menu_hover; }
+QToolButton#MenuStepperButton:pressed { background: $pressed; }
+QToolTip { background: $tooltip_bg; color: $text; border: 1px solid $menu_separator; padding: 3px 6px; }
+
+QScrollBar:vertical { background: transparent; width: 11px; margin: 0px; }
+QScrollBar::handle:vertical { background: $scroll_handle; border-radius: 3px; min-height: 28px; margin: 2px 3px; }
+QScrollBar::handle:vertical:hover { background: $scroll_handle_hover; }
+QScrollBar:horizontal { background: transparent; height: 11px; margin: 0px; }
+QScrollBar::handle:horizontal { background: $scroll_handle; border-radius: 3px; min-width: 28px; margin: 3px 2px; }
+QScrollBar::handle:horizontal:hover { background: $scroll_handle_hover; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+""")
+
+_RGBA_RE = re.compile(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
+
+
+def qc(value: str) -> QColor:
+    """QColor from '#RRGGBB' or the QSS-style 'rgba(r, g, b, a)' used in the themes."""
+    match = _RGBA_RE.fullmatch(value.strip())
+    if match:
+        return QColor(*(int(g) for g in match.groups()))
+    return QColor(value)
+
+
+def build_palette(t: dict) -> QPalette:
+    """QPalette matching the theme, for widgets/dialogs the style sheet doesn't cover."""
+    p = QPalette()
+    roles = QPalette.ColorRole
+    p.setColor(roles.Window, QColor(t["chrome"]))
+    p.setColor(roles.WindowText, QColor(t["text"]))
+    p.setColor(roles.Base, QColor(t["content"]))
+    p.setColor(roles.AlternateBase, QColor(t["chrome"]))
+    p.setColor(roles.Text, QColor(t["text"]))
+    p.setColor(roles.Button, QColor(t["chrome"]))
+    p.setColor(roles.ButtonText, QColor(t["text"]))
+    p.setColor(roles.ToolTipBase, QColor(t["tooltip_bg"]))
+    p.setColor(roles.ToolTipText, QColor(t["text"]))
+    p.setColor(roles.Highlight, QColor(t["accent"]))
+    p.setColor(roles.HighlightedText, QColor("#FFFFFF"))
+    p.setColor(roles.Link, QColor(t["accent"]))
+    p.setColor(roles.PlaceholderText, QColor(t["text_secondary"]))
+    for role in (roles.Text, roles.WindowText, roles.ButtonText):
+        p.setColor(QPalette.ColorGroup.Disabled, role, QColor(t["text_tertiary"]))
+    return p
+
+
+def styled(widget: QWidget, name: str) -> QWidget:
+    """Give a container an object name and let the style sheet paint its background."""
+    widget.setObjectName(name)
+    widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    return widget
+
+
+def paint_card_shadow(p: QPainter, card: QRectF, theme: dict) -> None:
+    """Soft shadow around the rounded page card (Arc's floating content area). Drawn directly
+    only into the small cached tile (card_tile); windows paint the card from that."""
+    base = qc(theme["card_shadow"])
+    p.setPen(Qt.PenStyle.NoPen)
+    for spread, weight in ((4.0, 0.22), (2.5, 0.4), (1.2, 0.75)):
+        color = QColor(base)
+        color.setAlphaF(base.alphaF() * weight)
+        p.setBrush(color)
+        p.drawRoundedRect(card.adjusted(-spread, -spread + 1, spread, spread + 1),
+                          CARD_RADIUS + spread, CARD_RADIUS + spread)
+
+
+def realm_swatch(realm: str) -> QIcon:
+    """Small aurora-style colour dot for the Theme menu."""
+    first, second = REALMS[realm]["glow"]
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    gradient = QLinearGradient(0, 0, 32, 32)
+    gradient.setColorAt(0, QColor(first))
+    gradient.setColorAt(1, QColor(second))
+    p.setBrush(QBrush(gradient))
+    p.setPen(QPen(QColor(0, 0, 0, 45), 1))
+    p.drawEllipse(QRectF(4, 4, 24, 24))
+    p.end()
+    return QIcon(pixmap)
+
+
+# Painting speed: antialiased rounded shapes are slow to rasterise (the address field
+# repaints ~20 times per page load for its progress bar; the page card on every frame of a
+# tint fade). They're drawn once per size, theme and screen scale into a pixmap and copied
+# from then on - pixel for pixel the same, a fraction of the time.
+_PAINT_CACHE: dict = {}
+
+
+def _paint_dpr(p: QPainter) -> float:
+    device = p.device()
+    try:
+        return float(device.devicePixelRatioF()) if device is not None else 1.0
+    except (AttributeError, RuntimeError):
+        return 1.0
+
+
+def _cached_pixmap(key: tuple, width: float, height: float, dpr: float, draw) -> QPixmap:
+    pixmap = _PAINT_CACHE.get(key)
+    if pixmap is None:
+        if len(_PAINT_CACHE) > 96:
+            _PAINT_CACHE.clear()
+        pixmap = QPixmap(max(1, math.ceil(width * dpr)), max(1, math.ceil(height * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        q = QPainter(pixmap)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw(q)
+        q.end()
+        _PAINT_CACHE[key] = pixmap
+    return pixmap
+
+
+def _draw_capsule(p: QPainter, rect: QRectF, theme: dict) -> QRectF:
+    body = rect.adjusted(0.5, 0.5, -0.5, -1.5)
+    radius = body.height() / 2
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(qc(theme["capsule_shadow"]))
+    p.drawRoundedRect(body.translated(0, 1.0), radius, radius)
+    p.setBrush(qc(theme["capsule"]))
+    p.setPen(QPen(qc(theme["capsule_border"]), 1))
+    p.drawRoundedRect(body, radius, radius)
+    return body
+
+
+def paint_capsule(p: QPainter, rect: QRectF, theme: dict) -> QRectF:
+    """White pill with a hairline border and a soft drop shadow; returns the body rect."""
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if p.transform().isScaling() or p.transform().isRotating():
+        return _draw_capsule(p, rect, theme)
+    dpr = _paint_dpr(p)
+    key = ("capsule", round(rect.width(), 2), round(rect.height(), 2), dpr,
+           theme["capsule_shadow"], theme["capsule"], theme["capsule_border"])
+    local = QRectF(0, 0, rect.width(), rect.height())
+    pixmap = _cached_pixmap(key, rect.width(), rect.height(), dpr, lambda q: _draw_capsule(q, local, theme))
+    p.drawPixmap(rect.topLeft(), pixmap)
+    return rect.adjusted(0.5, 0.5, -0.5, -1.5)
+
+
+CARD_TILE_MARGIN = 6                      # the shadow's reach outside the card (spread 4, offset 1)
+
+
+def _card_tile(theme: dict, dpr: float, body: bool) -> tuple[QPixmap, float]:
+    """A small rounded card - shadow, body (optional) and hairline - to paint big ones from."""
+    m, r = CARD_TILE_MARGIN, CARD_RADIUS
+    size = 2 * (m + r) + 8                       # corners plus a few plain pixels to stretch
+    key = ("card", dpr, body, theme["card_shadow"], theme["card_border"], theme["content"] if body else "")
+
+    def draw(q: QPainter) -> None:
+        card = QRectF(m, m, size - 2 * m, size - 2 * m)
+        if body:
+            paint_card_shadow(q, card, theme)
+        else:                                    # see-through inside: the shadow only outside the card
+            outside, inside = QPainterPath(), QPainterPath()
+            outside.addRect(QRectF(0, 0, size, size))
+            inside.addRoundedRect(card, r, r)
+            q.save()
+            q.setClipPath(outside.subtracted(inside))
+            paint_card_shadow(q, card, theme)
+            q.restore()
+        q.setBrush(qc(theme["content"]) if body else Qt.BrushStyle.NoBrush)
+        q.setPen(QPen(qc(theme["card_border"]), 1))
+        q.drawRoundedRect(card.adjusted(-0.5, -0.5, 0.5, 0.5), r + 0.5, r + 0.5)
+    return _cached_pixmap(key, size, size, dpr, draw), size
+
+
+def paint_card(p: QPainter, card: QRectF, theme: dict, body: bool = True) -> None:
+    """The page card's shadow, body and hairline, as nine slices of the cached tile: the
+    corners copied, the edges stretched along their length, the middle filled."""
+    dpr = _paint_dpr(p)
+    tile, size = _card_tile(theme, dpr, body)
+    m, k = CARD_TILE_MARGIN, CARD_TILE_MARGIN + CARD_RADIUS + 2        # k: a corner slice
+    outer = card.adjusted(-m, -m, m, m)
+    if outer.width() < 2 * k + 1 or outer.height() < 2 * k + 1 or p.transform().isScaling():
+        paint_card_shadow(p, card, theme)                                  # tiny or scaled: draw it
+        p.setBrush(qc(theme["content"]) if body else Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(qc(theme["card_border"]), 1))
+        p.drawRoundedRect(card.adjusted(-0.5, -0.5, 0.5, 0.5), CARD_RADIUS + 0.5, CARD_RADIUS + 0.5)
+        return
+    x0, y0, x1, y1 = outer.left(), outer.top(), outer.right(), outer.bottom()
+    mid_w, mid_h = outer.width() - 2 * k, outer.height() - 2 * k
+    src_mid = size - 2 * k
+    xs = ((x0, k, 0.0, k), (x0 + k, mid_w, k, src_mid), (x1 - k, k, size - k, k))
+    ys = ((y0, k, 0.0, k), (y0 + k, mid_h, k, src_mid), (y1 - k, k, size - k, k))
+    hints = p.renderHints()
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+    for row, (ty, th, sy, sh) in enumerate(ys):
+        for col, (tx, tw, sx, sw) in enumerate(xs):
+            if row == 1 and col == 1:
+                if body:
+                    p.fillRect(QRectF(tx, ty, tw, th), qc(theme["content"]))
+                continue
+            p.drawPixmap(QRectF(tx, ty, tw, th), tile, QRectF(sx * dpr, sy * dpr, sw * dpr, sh * dpr))
+    p.setRenderHints(hints)
+
+
+# --------------------------------------------------------------------------------------
+# Windows integration: DWM attributes and a native frame without a title bar
+# --------------------------------------------------------------------------------------
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWA_BORDER_COLOR = 34
+DWMWCP_DONOTROUND = 1
+DWMWCP_ROUND = 2
+DWMWCP_ROUNDSMALL = 3
+DWMWA_COLOR_NONE = 0xFFFFFFFE
+
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    GWL_STYLE = -16
+    WS_CAPTION, WS_THICKFRAME, WS_SYSMENU = 0x00C00000, 0x00040000, 0x00080000
+    WS_MINIMIZEBOX, WS_MAXIMIZEBOX = 0x00020000, 0x00010000
+    SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
+    WM_NCCALCSIZE, WM_NCHITTEST = 0x0083, 0x0084
+    HTCLIENT, HTCAPTION = 1, 2
+    HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT = 10, 11, 12, 13, 14
+    HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT = 15, 16, 17
+    SM_CXSIZEFRAME, SM_CXPADDEDBORDER = 32, 92
+
+    class _MARGINS(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_int), ("right", ctypes.c_int),
+                    ("top", ctypes.c_int), ("bottom", ctypes.c_int)]
+
+    class _NCCALCSIZE_PARAMS(ctypes.Structure):
+        _fields_ = [("rgrc", wintypes.RECT * 3), ("lppos", ctypes.c_void_p)]
+
+    _user32 = ctypes.WinDLL("user32")
+    _dwmapi = ctypes.WinDLL("dwmapi")
+    _user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    _user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    _user32.IsZoomed.argtypes = [wintypes.HWND]
+    _user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    _user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    _dwmapi.DwmExtendFrameIntoClientArea.argtypes = [wintypes.HWND, ctypes.POINTER(_MARGINS)]
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    class _APPBARDATA(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND), ("uCallbackMessage", wintypes.UINT),
+                    ("uEdge", wintypes.UINT), ("rc", wintypes.RECT), ("lParam", wintypes.LPARAM)]
+
+    _user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    _user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    _user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MONITORINFO)]
+    _shell32 = ctypes.WinDLL("shell32")
+    _shell32.SHAppBarMessage.restype = ctypes.c_size_t
+    _shell32.SHAppBarMessage.argtypes = [wintypes.DWORD, ctypes.POINTER(_APPBARDATA)]
+    MONITOR_DEFAULTTONEAREST, ABM_GETAUTOHIDEBAREX = 2, 11
+
+    def _fit_to_work_area(hwnd, rect) -> None:
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        monitor = _user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if not monitor or not _user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            inset = _frame_thickness(hwnd)          # fallback: strip the overhanging frame
+            rect.left, rect.top = rect.left + inset, rect.top + inset
+            rect.right, rect.bottom = rect.right - inset, rect.bottom - inset
+            return
+        work = info.rcWork
+        rect.left, rect.top, rect.right, rect.bottom = work.left, work.top, work.right, work.bottom
+        # An auto-hide taskbar only pops up if a pixel of its edge stays uncovered.
+        for edge in range(4):                       # ABE_LEFT, TOP, RIGHT, BOTTOM
+            bar = _APPBARDATA()
+            bar.cbSize = ctypes.sizeof(bar)
+            bar.uEdge = edge
+            bar.rc = info.rcMonitor
+            try:
+                if not _shell32.SHAppBarMessage(ABM_GETAUTOHIDEBAREX, ctypes.byref(bar)):
+                    continue
+            except OSError:
+                return
+            if edge == 0:
+                rect.left += 1
+            elif edge == 1:
+                rect.top += 1
+            elif edge == 2:
+                rect.right -= 1
+            else:
+                rect.bottom -= 1
+
+    def _frame_thickness(hwnd: int) -> int:
+        try:
+            dpi = _user32.GetDpiForWindow(wintypes.HWND(hwnd))
+            return (_user32.GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+                    + _user32.GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi))
+        except (AttributeError, OSError):
+            return _user32.GetSystemMetrics(SM_CXSIZEFRAME) + _user32.GetSystemMetrics(SM_CXPADDEDBORDER)
+
+
+def set_dwm_attribute(hwnd: int, attribute: int, value: int) -> None:
+    if not IS_WINDOWS:
+        return
+    try:
+        val = ctypes.c_int(value)
+        _dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.addressof(val), ctypes.sizeof(val))
+    except Exception:
+        pass  # older Windows builds simply ignore the cosmetic attributes
+
+
+def colorref(hex_color: str) -> int:
+    c = QColor(hex_color)
+    return c.red() | (c.green() << 8) | (c.blue() << 16)
+
+
+def prepare_menu(menu: QMenu) -> QMenu:
+    """A menu Huginn shows. HuginnStyle draws it (rounded card, soft shadow); nothing to set
+    up here any more, but every menu still passes through, so a menu-wide tweak has one home."""
+    return menu
+
+
+# Icons for menu items that come without one (right-click menus, the web page's own menu),
+# by the item's text. Matching is on the lower-case text without "&" and "…".
+MENU_AUTO_ICONS = {
+    "back": "back", "forward": "forward", "reload": "reload", "reload page": "reload", "stop": "stop",
+    "new tab": "plus", "duplicate tab": "duplicate", "pin tab": "pin", "unpin tab": "pin",
+    "mute tab": "speaker", "unmute tab": "speaker_muted", "move tab to group": "group",
+    "open in split view": "split", "open link in split view": "split", "close tab": "close",
+    "open": "page", "open in new tab": "plus", "open link in new tab": "plus", "open link in new window": "tabs",
+    "open link in this window": "page", "open all in new tabs": "tabs", "open saved copy (offline)": "download",
+    "copy link": "link", "copy link address": "link", "copy image address": "link", "copy": "clipboard",
+    "copy image to clipboard": "clipboard", "copy image": "clipboard", "paste": "clipboard",
+    "paste and match style": "clipboard", "save page": "download", "save link": "download",
+    "save image": "download", "save video": "download", "save audio": "download", "view page source": "command",
+    "inspect": "gauge", "add link to reading list": "reading", "add to reading list": "reading",
+    "add to favorites": "star", "remove bookmark": "trash", "remove from reading list": "trash",
+    "delete folder": "trash", "remove panel": "trash", "move to folder": "folder", "rename folder": "fonts",
+    "email this page": "mail", "open in default browser": "open_in", "show sidebar": "sidebar",
+    "hide sidebar": "sidebar", "bookmarks": "star", "history": "clock", "start page": "page",
+    "new private window": "private", "reopen closed tab": "valhalla", "show all tabs": "tabs",
+    "clear history": "trash", "new tab group": "group", "import passwords": "download",
+    "export passwords": "share", "change master password": "key", "lock passwords": "lock",
+    "mark as read": "reading", "mark as unread": "reading",
+}
+
+
+def _menu_key(text: str) -> str:
+    return text.split("\t")[0].replace("&&", "\0").replace("&", "").replace("\0", "&").replace("…", "").strip().lower()
+
+
+class _MenuPlacer(QObject):
+    """Just before a menu appears: items without an icon get one if their text is a known
+    one (so right-click menus and the web page's menu look like the rest), and a menu opened
+    at a point (under a button, at the mouse) is moved up-left by its shadow, so the card -
+    not the shadow - lands on the point. Submenus are placed by Qt from the style's metrics."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Show and isinstance(obj, QMenu):
+            self._icons(obj)
+            if not isinstance(obj.parentWidget(), QMenu):
+                obj.move(obj.pos() - QPoint(MENU_SHADOW - 2, MENU_SHADOW - 2))
+        return False
+
+    @staticmethod
+    def _icons(menu: QMenu) -> None:
+        source = HuginnStyle.icon_source
+        if source is None:
+            return
+        colour = HuginnStyle.theme["text_secondary"]
+        stamp = f"{colour}"
+        replace = bool(menu.property("huginnOwnIcons"))
+        for action in menu.actions():
+            if action.isSeparator() or isinstance(action, QWidgetAction) or action.property("huginnNoAutoIcon"):
+                continue
+            glyph = MENU_AUTO_ICONS.get(_menu_key(action.text()))
+            auto = action.property("huginnAutoIcon")
+            if glyph and (action.icon().isNull() or replace or (auto and auto != stamp)):
+                action.setIcon(source.icon(glyph, colour))
+                action.setProperty("huginnAutoIcon", stamp)
+
+
+_MENU_PLACER: "_MenuPlacer | None" = None
+
+
+def _menu_placer() -> "_MenuPlacer":
+    global _MENU_PLACER
+    if _MENU_PLACER is None:
+        _MENU_PLACER = _MenuPlacer(QApplication.instance())
+    return _MENU_PLACER
+
+
+def _as_bytes(value) -> bytes:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    try:
+        return bytes(value.data())
+    except Exception:
+        return bytes(value)
+
+
+class WindowsFrame:
+    """Native frame behaviour for a frameless Qt window on Windows.
+
+    Qt's FramelessWindowHint drops the caption/thick-frame styles, which also drops the
+    drop shadow, Aero Snap, Win+arrow keys and the minimize/maximize animations. We switch
+    those styles back on and answer WM_NCCALCSIZE so Windows draws no title bar or border:
+    the entire window stays client area, painted by Qt. WM_NCHITTEST then tells Windows
+    which parts are resize edges and which are the draggable title-bar area."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        self.window = window
+        self.hwnd = 0
+
+    def install(self) -> None:
+        hwnd = int(self.window.winId())
+        if not hwnd or hwnd == self.hwnd:
+            return
+        self.hwnd = hwnd
+        style = _user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
+        _user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU
+                                  | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+        margin = int(os.environ.get("SAFARIQT_DWM_MARGIN", "0") or 0)
+        if margin:
+            margins = _MARGINS(margin, margin, margin, margin)
+            _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+        _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
+                             | SWP_NOZORDER | SWP_NOACTIVATE)
+
+    def handle(self, event_type, message):
+        """Returns (True, result) for messages we answer, else None."""
+        if _as_bytes(event_type) != b"windows_generic_MSG":
+            return None
+        msg = wintypes.MSG.from_address(int(message))
+        if msg.message == WM_NCCALCSIZE and msg.wParam:
+            if _user32.IsZoomed(msg.hWnd):
+                # A maximized window overhangs the screen by its frame: fit the client to the
+                # monitor's work area (the space beside the taskbar) instead.
+                params = _NCCALCSIZE_PARAMS.from_address(msg.lParam)
+                _fit_to_work_area(msg.hWnd, params.rgrc[0])
+            return True, 0
+        if msg.message == WM_NCHITTEST:
+            return True, self._hit_test(msg.hWnd, msg.lParam)
+        return None
+
+    def _hit_test(self, hwnd, lparam: int) -> int:
+        x = ctypes.c_short(lparam & 0xFFFF).value
+        y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+        origin = wintypes.POINT(0, 0)
+        _user32.ClientToScreen(hwnd, ctypes.byref(origin))
+        client = wintypes.RECT()
+        _user32.GetClientRect(hwnd, ctypes.byref(client))
+        dpr = self.window.devicePixelRatioF() or 1.0
+        lx, ly = (x - origin.x) / dpr, (y - origin.y) / dpr
+        w, h = client.right / dpr, client.bottom / dpr
+        win = self.window
+        if not (win.isMaximized() or win.isFullScreen()):
+            m = RESIZE_MARGIN
+            left, right, top, bottom = lx < m, lx >= w - m, ly < m, ly >= h - m
+            if top and left:
+                return HTTOPLEFT
+            if top and right:
+                return HTTOPRIGHT
+            if bottom and left:
+                return HTBOTTOMLEFT
+            if bottom and right:
+                return HTBOTTOMRIGHT
+            if left:
+                return HTLEFT
+            if right:
+                return HTRIGHT
+            if top:
+                return HTTOP
+            if bottom:
+                return HTBOTTOM
+        if win.is_drag_area(QPoint(int(lx), int(ly))):
+            return HTCAPTION
+        return HTCLIENT
+
+
+# --------------------------------------------------------------------------------------
+# URL helpers (address-field logic)
+# --------------------------------------------------------------------------------------
+_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):")
+_KNOWN_SCHEMES = {"http", "https", "file", "ftp", "about", "data", "view-source", "chrome",
+                  "mailto", START_SCHEME}
+_TAIL = r"(?::\d{1,5})?(?:[/?#]\S*)?$"
+_DOMAIN_RE = re.compile(r"^(?:[\w-]+\.)+[^\W\d_]{2,63}\.?" + _TAIL)
+_LOCALHOST_RE = re.compile(r"^localhost" + _TAIL, re.IGNORECASE)
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}" + _TAIL)
+_IPV6_RE = re.compile(r"^\[[0-9a-fA-F:.]+\]" + _TAIL)
+_SECOND_LEVEL = {"co", "com", "net", "org", "gov", "ac", "edu", "ne", "or", "go"}
+
+
+def url_from_user_input(text: str) -> QUrl | None:
+    """Turn address-field input into a URL: explicit URLs, bare domains, local paths, or a search."""
+    text = text.strip()
+    if not text:
+        return None
+    match = _SCHEME_RE.match(text)
+    if match and match.group(1).lower() in _KNOWN_SCHEMES:
+        url = QUrl(text)
+        if url.isValid():
+            return url
+    if os.path.isabs(text) and os.path.exists(text):
+        return QUrl.fromLocalFile(text)
+    if " " not in text:
+        if _LOCALHOST_RE.match(text) or _IPV4_RE.match(text) or _IPV6_RE.match(text):
+            return QUrl("http://" + text)
+        if _DOMAIN_RE.match(text):
+            return QUrl("https://" + text)
+    return QUrl(SEARCH_URL.format(quote_plus(text)))
+
+
+def registrable_domain(host: str) -> str:
+    """Approximate eTLD+1 ('news.bbc.co.uk' -> 'bbc.co.uk'), enough for first/third-party checks."""
+    host = host.lower().strip(".").strip("[]")
+    if ":" in host or re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+        return host                                   # an IP address is its own site
+    parts = host.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def bare_host(url: QUrl) -> str:
+    host = url.host()
+    return host[4:] if host.startswith("www.") else host
+
+
+def is_start_page(url: QUrl) -> bool:
+    return url.scheme() == START_SCHEME
+
+
+def focus_target(url: QUrl) -> QUrl | None:
+    """The site a Focus Hours "Not now" page stands in for."""
+    if url.scheme() != START_SCHEME or url.path() != "focus":
+        return None
+    target = QUrl(QUrlQuery(url).queryItemValue("url", QUrl.ComponentFormattingOption.FullyDecoded))
+    return target if target.scheme() in ("http", "https") else None
+
+
+def _is_blank(url: QUrl) -> bool:
+    return url.isEmpty() or is_start_page(url) or url.toString() == "about:blank"
+
+
+def _is_local_host(host: str) -> bool:
+    return host in ("localhost", "127.0.0.1", "[::1]", "::1") or host.endswith(".localhost")
+
+
+def _char_script(ch: str) -> str:
+    """Rough Unicode script of a character, from its name: LATIN, CYRILLIC, CJK, ..."""
+    if ch.isdigit() or ch in "-._":
+        return "COMMON"
+    name = unicodedata.name(ch, "")
+    return name.split(" ")[0].split("-")[0] if name else "UNKNOWN"
+
+
+def is_spoof_label(label: str, tld: str = "") -> bool:
+    """True when a domain label could pass for a different (usually Latin) one: mixed
+    scripts ("pаypal" with a Cyrillic а), an all-look-alike Cyrillic/Greek label ("аррӏе"),
+    Latin look-alike letters, or invisible / slash- and dash-like characters."""
+    if label.isascii():
+        return False
+    for i, ch in enumerate(label):
+        category = unicodedata.category(ch)
+        if ch in _SPOOF_CHARS or category in ("Cf", "Zs"):
+            return True
+        # Accents stacked on Latin/Cyrillic/Greek letters ("e" + U+0301); other scripts'
+        # vowel signs (Devanagari, Thai...) are ordinary combining marks.
+        if category == "Mn" and i and _char_script(label[i - 1]) in ("LATIN", "CYRILLIC", "GREEK", "COMMON"):
+            return True
+    scripts = {_char_script(ch) for ch in label} - {"COMMON"}
+    if "LATIN" in scripts and any(ch in _LATIN_LOOKALIKES for ch in label):
+        return True
+    if len(scripts) > 1:                       # Latin + Chinese/Japanese/Korean is normal
+        return not any(scripts <= allowed for allowed in _CJK_SCRIPTS)
+    if scripts <= {"CYRILLIC", "GREEK"} and tld.isascii():
+        letters = [ch for ch in label if _char_script(ch) != "COMMON"]
+        return bool(letters) and all(ch in _LOOKALIKE_LETTERS for ch in letters)
+    return False
+
+
+def display_host(url: QUrl) -> str:
+    """The host as people should see it: Unicode ("münchen.de"), unless a label could imitate
+    another site, which then shows in its raw xn-- form (like Safari and Chrome do)."""
+    host = url.host()
+    if host.isascii():
+        return host
+    labels = host.split(".")
+    if any(is_spoof_label(label, labels[-1]) for label in labels):
+        return url.host(QUrl.ComponentFormattingOption.FullyEncoded)
+    return host
+
+
+def bare_display_host(url: QUrl) -> str:
+    host = display_host(url)
+    return host[4:] if host.startswith("www.") else host
+
+
+def origin_label(url: QUrl) -> str:
+    """'example.com', or 'localhost:8080' when the port matters, for prompts and dialogs."""
+    host = bare_display_host(url)
+    return f"{host}:{url.port()}" if url.port() not in (-1, 80, 443) else host
+
+
+def display_text_for(url: QUrl, not_secure: bool = False) -> str:
+    """What the idle address field shows: just the site, like Safari. not_secure marks an
+    https page whose certificate the user chose to accept anyway."""
+    target = focus_target(url)
+    if target is not None:
+        return bare_display_host(target)
+    if _is_blank(url):
+        return ""
+    if url.scheme() == "https":
+        host = bare_display_host(url)
+        return f"Not Secure — {host}" if not_secure else host
+    if url.scheme() == "http":
+        host = bare_display_host(url)
+        return host if _is_local_host(url.host()) else f"Not Secure — {host}"
+    if url.isLocalFile():
+        return url.fileName() or url.toLocalFile()
+    return url.toDisplayString()
+
+
+def _is_tracking_param(key: str) -> bool:
+    key = unquote(key).lower()
+    return key in TRACKING_PARAMS or key.startswith(TRACKING_PREFIXES)
+
+
+def strip_tracking_params(url: QUrl) -> QUrl | None:
+    """The address without click-tracking parameters, or None when it has none."""
+    if url.scheme() not in ("http", "https") or not url.hasQuery():
+        return None
+    parts = url.query(QUrl.ComponentFormattingOption.FullyEncoded).split("&")
+    kept = [p for p in parts if not _is_tracking_param(p.split("=", 1)[0])]
+    if len(kept) == len(parts):
+        return None
+    clean = QUrl(url)
+    kept = [p for p in kept if p]
+    clean.setQuery("&".join(kept) if kept else None)      # still percent-encoded: kept as is
+    return clean
+
+
+def should_upgrade_to_https(url: QUrl) -> bool:
+    """Plain-http addresses worth trying over https first: public names on the default
+    port. Local names, IP addresses and intranet suffixes are left alone."""
+    if url.scheme() != "http" or url.port() not in (-1, 80):
+        return False
+    host = url.host().lower().rstrip(".")
+    if not host or "." not in host or ":" in host or _is_local_host(host):
+        return False
+    if re.fullmatch(r"[\d.]+", host) or host.endswith(_LOCAL_SUFFIXES):
+        return False
+    return True
+
+
+def is_dangerous_download(name: str) -> bool:
+    return "." in name and name.rsplit(".", 1)[-1].lower().strip() in DANGEROUS_EXTENSIONS
+
+
+def mark_of_the_web(host_url: QUrl | None, referrer: QUrl | None) -> str:
+    """The Zone.Identifier stream Windows uses to know a file came from the internet, so
+    SmartScreen and Office's Protected View check it. URLs are left out when unknown
+    (or in Private Browsing)."""
+    lines = ["[ZoneTransfer]", "ZoneId=3"]
+    for key, url in (("ReferrerUrl", referrer), ("HostUrl", host_url)):
+        if url is not None and url.scheme() in ("http", "https"):
+            lines.append(f"{key}={bytes(without_credentials(url).toEncoded()).decode('ascii', 'replace')}")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def write_mark_of_the_web(path: str, host_url: QUrl | None, referrer: QUrl | None) -> bool:
+    """Writes the NTFS alternate data stream (Windows only; FAT drives can't hold one)."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        with open(path + ":Zone.Identifier", "w", encoding="ascii", newline="") as stream:
+            stream.write(mark_of_the_web(host_url, referrer))
+        return True
+    except OSError:
+        return False
+
+
+def without_credentials(url: QUrl) -> QUrl:
+    """Strips user:password@ so it never reaches history, bookmarks or shared links."""
+    clean = QUrl(url)
+    clean.setUserInfo(None)      # null clears the "@" too (PySide6's adjusted() rejects RemoveUserInfo)
+    return clean
+
+
+def plain_tooltip(text: str) -> str:
+    """Tooltips auto-detect HTML; escape page-controlled text so it shows literally."""
+    return f"<qt>{html.escape(text)}</qt>"
+
+
+# Qt's own command-line options that take a value (their values aren't URLs to open).
+_QT_VALUE_OPTIONS = {"platform", "platformpluginpath", "platformtheme", "plugin", "qwindowgeometry",
+                     "geometry", "qwindowtitle", "title", "qwindowicon", "style", "stylesheet",
+                     "session", "display", "name", "dialogs", "fontengine", "darkmode"}
+
+
+def launch_targets(argv: list[str]) -> list[str]:
+    """URLs/paths given on the command line, skipping options and their values."""
+    targets, skip = [], False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg.startswith("-"):
+            name = arg.lstrip("-").split("=", 1)[0].lower()
+            skip = "=" not in arg and name in _QT_VALUE_OPTIONS
+        else:
+            targets.append(arg)
+    return targets
+
+
+def history_cutoff(period: str, now: float | None = None) -> float | None:
+    """Start of a Clear History period: 'hour', 'today', 'yesterday' (today and yesterday),
+    or None for 'all'."""
+    now = time.time() if now is None else now
+    if period == "hour":
+        return now - 3600
+    if period in ("today", "yesterday"):
+        t = time.localtime(now)
+        day = t.tm_mday - (1 if period == "yesterday" else 0)      # mktime normalizes day 0
+        return time.mktime((t.tm_year, t.tm_mon, day, 0, 0, 0, 0, 0, -1))
+    return None
+
+
+def edit_text_for(url: QUrl) -> str:
+    """What the focused address field shows: the full URL (look-alike hosts as xn--)."""
+    url = focus_target(url) or url
+    if _is_blank(url):
+        return ""
+    text, host, shown = url.toDisplayString(), url.host(), display_host(url)
+    return text.replace(host, shown, 1) if host and shown != host else text
+
+
+# --------------------------------------------------------------------------------------
+# Icons: SF-Symbols-like line glyphs drawn as inline SVG, recoloured per theme
+# --------------------------------------------------------------------------------------
+_SVG_WRAPPER = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">'
+                '<g fill="none" stroke="{c}" stroke-width="{w}" stroke-linecap="round" '
+                'stroke-linejoin="round">{body}</g></svg>')
+
+# App icon: the rune Raidho (ᚱ, "journey") on an aurora-gradient squircle.
+# The built-in logo (used if Huginn.ico is missing from the browser's folder): a raven in a
+# round frame against the northern lights. The plain version is used at 32 px and below.
+APP_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><defs><linearGradient '
+    'id="sky" x1="0.15" y1="0" x2="0.85" y2="1"><stop offset="0" stop-color="#7DF0D2"/><stop offset="0.45" '
+    'stop-color="#4AA8E8"/><stop offset="1" stop-color="#6A4ADB"/></linearGradient></defs><g '
+    'transform="scale(0.64)"><circle cx="50.0" cy="50.0" r="42.3" fill="url(#sky)"/><path fill="#15111F" '
+    'fill-rule="evenodd" d="M97.82 45.88 L97.56 43.54 L97.19 41.21 L96.70 38.91 L96.10 36.63 L95.39 34.39 L94.57 '
+    '32.18 L93.64 30.01 L92.61 27.89 L91.47 25.83 L90.23 23.82 L88.90 21.88 L87.48 20.01 L85.96 18.20 L84.36 '
+    '16.48 L82.67 14.83 L80.90 13.27 L79.06 11.80 L77.16 10.42 L75.18 9.13 L73.14 7.95 L71.05 6.86 L68.91 5.88 '
+    'L66.72 5.01 L64.50 4.24 L62.23 3.59 L59.94 3.04 L57.63 2.61 L55.29 2.29 L52.94 2.09 L50.59 2.00 L48.23 2.03 '
+    'L45.88 2.18 L43.54 2.44 L41.21 2.81 L38.91 3.30 L36.63 3.90 L34.39 4.61 L32.18 5.43 L30.01 6.36 L27.89 7.39 '
+    'L25.83 8.53 L23.82 9.77 L21.88 11.10 L20.01 12.52 L18.20 14.04 L16.48 15.64 L14.83 17.33 L13.27 19.10 L11.80'
+    ' 20.94 L10.42 22.84 L9.13 24.82 L7.95 26.86 L6.86 28.95 L5.88 31.09 L5.01 33.28 L4.24 35.50 L3.59 37.77 '
+    'L3.04 40.06 L2.61 42.37 L2.29 44.71 L2.09 47.06 L2.00 49.41 L2.03 51.77 L2.18 54.12 L2.44 56.46 L2.81 58.79 '
+    'L3.30 61.09 L3.90 63.37 L4.61 65.61 L5.43 67.82 L6.36 69.99 L7.39 72.11 L8.53 74.17 L9.77 76.18 L11.10 78.12'
+    ' L12.52 79.99 L14.04 81.80 L15.64 83.52 L17.33 85.17 L19.10 86.73 L20.94 88.20 L22.84 89.58 L24.82 90.87 '
+    'L26.86 92.05 L28.95 93.14 L31.09 94.12 L33.28 94.99 L35.50 95.76 L37.77 96.41 L40.06 96.96 L42.37 97.39 '
+    'L44.71 97.71 L47.06 97.91 L49.41 98.00 L51.77 97.97 L54.12 97.82 L56.46 97.56 L58.79 97.19 L61.09 96.70 '
+    'L63.37 96.10 L65.61 95.39 L67.82 94.57 L69.99 93.64 L72.11 92.61 L74.17 91.47 L76.18 90.23 L78.12 88.90 '
+    'L79.99 87.48 L81.80 85.96 L83.52 84.36 L85.17 82.67 L86.73 80.90 L88.20 79.06 L89.58 77.16 L90.87 75.18 '
+    'L92.05 73.14 L93.14 71.05 L94.12 68.91 L94.99 66.72 L95.76 64.50 L96.41 62.23 L96.96 59.94 L97.39 57.63 '
+    'L97.71 55.29 L97.91 52.94 L98.00 50.59 L97.97 48.23 Z M91.30 54.07 L90.89 57.09 L90.26 60.08 L89.41 63.02 '
+    'L88.53 65.41 L87.29 68.20 L86.11 70.46 L84.51 73.06 L82.72 75.53 L81.09 77.49 L79.34 79.34 L77.11 81.42 '
+    'L74.72 83.33 L72.63 84.79 L70.01 86.36 L67.52 87.62 L66.93 82.18 L65.98 75.46 L65.08 70.00 L62.10 53.26 '
+    'L61.95 51.43 L61.94 49.65 L62.10 47.91 L62.33 46.66 L62.79 45.04 L63.44 43.49 L64.27 42.04 L65.03 41.00 '
+    'L65.90 40.02 L66.55 39.40 L68.10 38.36 L69.76 37.49 L71.07 36.94 L72.88 36.36 L74.75 35.92 L76.65 35.62 '
+    'L78.57 35.46 L80.95 35.42 L82.82 35.51 L85.24 35.78 L85.76 35.67 L86.20 35.40 L86.54 34.99 L86.80 34.45 '
+    'L85.54 33.00 L84.20 31.68 L82.79 30.49 L81.31 29.42 L79.78 28.47 L77.66 27.38 L76.04 26.69 L73.84 25.93 '
+    'L72.17 25.47 L69.94 25.00 L68.28 24.75 L66.10 24.55 L64.14 23.61 L63.10 23.24 L61.51 22.81 L59.87 22.55 '
+    'L58.21 22.45 L55.97 22.56 L54.30 22.84 L52.66 23.29 L51.06 23.91 L49.52 24.71 L48.05 25.68 L46.67 26.82 '
+    'L45.40 28.15 L44.55 28.66 L44.81 28.19 L43.59 27.74 L42.31 27.32 L41.16 27.02 L40.26 26.87 L39.39 26.82 '
+    'L38.39 26.89 L37.26 27.15 L33.25 28.60 L36.04 28.78 L36.88 28.92 L37.70 29.14 L38.69 29.68 L40.83 31.41 '
+    'L39.16 32.92 L39.28 32.36 L36.87 32.23 L34.23 32.30 L32.99 32.48 L32.03 32.72 L31.10 33.04 L30.00 33.52 '
+    'L25.60 35.80 L28.99 35.61 L30.94 35.72 L32.41 36.09 L35.20 37.26 L33.37 39.61 L33.26 38.89 L30.58 39.81 '
+    'L28.61 40.69 L27.56 41.29 L26.58 41.97 L22.45 45.25 L24.97 44.63 L26.67 44.32 L28.04 44.23 L30.01 44.32 '
+    'L28.91 45.87 L28.74 45.29 L27.75 45.73 L26.04 46.55 L24.61 47.31 L23.39 48.07 L22.32 48.86 L21.36 49.71 '
+    'L20.47 50.63 L16.60 55.15 L19.50 53.69 L21.47 52.86 L23.09 52.42 L25.05 52.16 L23.93 54.28 L22.56 57.05 '
+    'L21.21 58.25 L20.02 59.51 L16.15 64.60 L18.60 63.07 L20.30 62.15 L19.06 65.27 L18.07 67.97 L16.12 73.97 '
+    'L14.40 71.34 L12.71 68.20 L11.28 64.94 L10.29 62.05 L9.40 58.60 L8.81 55.08 L8.55 52.04 L8.53 48.47 L8.65 '
+    '46.44 L8.88 44.41 L9.20 42.40 L9.62 40.41 L10.14 38.44 L10.76 36.50 L11.47 34.59 L12.27 32.72 L13.16 30.89 '
+    'L14.15 29.10 L15.21 27.37 L16.37 25.69 L17.60 24.07 L18.91 22.51 L20.30 21.02 L21.76 19.59 L23.28 18.25 '
+    'L24.87 16.97 L26.52 15.78 L28.23 14.67 L29.99 13.64 L31.80 12.71 L33.65 11.86 L35.54 11.10 L37.47 10.44 '
+    'L39.42 9.87 L41.40 9.40 L43.41 9.03 L45.43 8.75 L47.46 8.58 L49.49 8.50 L51.53 8.53 L53.56 8.65 L55.59 8.88 '
+    'L57.60 9.20 L59.59 9.62 L61.56 10.14 L63.50 10.76 L65.41 11.47 L67.28 12.27 L69.11 13.16 L70.90 14.15 L72.63'
+    ' 15.21 L74.31 16.37 L75.93 17.60 L77.49 18.91 L78.98 20.30 L80.41 21.76 L81.75 23.28 L83.03 24.87 L84.22 '
+    '26.52 L85.33 28.23 L86.36 29.99 L87.29 31.80 L88.14 33.65 L88.90 35.54 L89.56 37.47 L90.13 39.42 L90.60 '
+    '41.40 L90.97 43.41 L91.25 45.43 L91.42 47.46 L91.50 49.49 L91.47 51.53 Z M84.10 34.54 L80.30 34.70 L78.18 '
+    '34.55 L76.11 34.51 L74.40 34.59 L73.02 34.72 L71.44 34.98 L69.94 35.35 L68.77 35.75 L67.45 36.34 L68.92 '
+    '35.49 L70.82 34.72 L72.65 34.22 L74.90 33.83 L77.58 33.61 L80.37 33.60 L81.93 33.92 Z M59.44 48.40 L59.58 '
+    '52.98 L59.05 57.45 L58.83 61.40 L58.81 64.79 L58.93 68.27 L59.24 72.58 L59.73 77.06 L60.50 82.50 L61.66 '
+    '89.41 L61.54 89.45 L59.88 81.79 L58.76 75.66 L57.93 69.79 L57.48 64.84 L57.34 62.08 L57.31 59.36 L57.38 '
+    '56.68 L57.56 54.03 L57.72 52.72 L58.89 49.61 Z M55.30 53.80 L54.97 55.80 L54.54 57.79 L54.01 59.77 L53.57 '
+    '61.07 L51.95 64.10 L50.52 66.48 L48.97 68.81 L47.32 71.09 L45.55 73.31 L43.67 75.48 L41.68 77.59 L39.58 '
+    '79.63 L37.37 81.61 L35.06 83.52 L32.01 85.80 L31.05 86.47 L30.96 86.42 L34.79 83.20 L38.02 80.14 L40.99 '
+    '76.95 L42.38 75.31 L44.13 73.09 L46.15 70.25 L48.34 66.77 L49.97 63.80 L51.67 60.18 Z M55.75 66.40 L55.25 '
+    '68.02 L54.67 69.62 L54.00 71.19 L53.49 72.21 L51.40 74.92 L49.14 77.51 L47.54 79.18 L45.87 80.80 L44.13 '
+    '82.37 L41.87 84.26 L39.02 86.45 L35.93 88.61 L35.52 88.46 L38.17 86.33 L40.87 84.00 L43.41 81.59 L45.40 '
+    '79.52 L46.92 77.82 L48.35 76.08 L50.35 73.41 L51.87 71.12 Z M56.65 78.10 L55.74 80.45 L54.60 82.69 L52.37 '
+    '85.16 L51.18 86.32 L49.62 87.69 L48.31 88.72 L46.60 89.94 L45.23 90.82 L44.25 90.69 L47.08 88.51 L49.46 '
+    '86.30 L51.62 83.93 L53.31 81.71 Z M64.24 30.58 L64.24 30.68 L64.23 30.78 L64.23 30.87 L64.21 30.97 L64.20 '
+    '31.07 L64.18 31.17 L64.16 31.26 L64.14 31.36 L64.11 31.45 L64.08 31.54 L64.05 31.64 L64.01 31.73 L63.97 '
+    '31.82 L63.93 31.91 L63.89 31.99 L63.84 32.08 L63.79 32.16 L63.73 32.25 L63.68 32.33 L63.62 32.41 L63.56 '
+    '32.48 L63.50 32.56 L63.43 32.63 L63.36 32.70 L63.29 32.77 L63.22 32.84 L63.14 32.90 L63.07 32.96 L62.99 '
+    '33.02 L62.91 33.07 L62.82 33.13 L62.74 33.18 L62.65 33.23 L62.57 33.27 L62.48 33.31 L62.39 33.35 L62.30 '
+    '33.39 L62.20 33.42 L62.11 33.45 L62.02 33.48 L61.92 33.50 L61.83 33.52 L61.73 33.54 L61.63 33.55 L61.53 '
+    '33.57 L61.44 33.57 L61.34 33.58 L61.24 33.58 L61.14 33.58 L61.04 33.57 L60.95 33.57 L60.85 33.55 L60.75 '
+    '33.54 L60.65 33.52 L60.56 33.50 L60.46 33.48 L60.37 33.45 L60.28 33.42 L60.18 33.39 L60.09 33.35 L60.00 '
+    '33.31 L59.91 33.27 L59.83 33.23 L59.74 33.18 L59.66 33.13 L59.57 33.07 L59.49 33.02 L59.41 32.96 L59.34 '
+    '32.90 L59.26 32.84 L59.19 32.77 L59.12 32.70 L59.05 32.63 L58.98 32.56 L58.92 32.48 L58.86 32.41 L58.80 '
+    '32.33 L58.75 32.25 L58.69 32.16 L58.64 32.08 L58.59 31.99 L58.55 31.91 L58.51 31.82 L58.47 31.73 L58.43 '
+    '31.64 L58.40 31.54 L58.37 31.45 L58.34 31.36 L58.32 31.26 L58.30 31.17 L58.28 31.07 L58.27 30.97 L58.25 '
+    '30.87 L58.25 30.78 L58.24 30.68 L58.24 30.58 L58.24 30.48 L58.25 30.38 L58.25 30.29 L58.27 30.19 L58.28 '
+    '30.09 L58.30 29.99 L58.32 29.90 L58.34 29.80 L58.37 29.71 L58.40 29.62 L58.43 29.52 L58.47 29.43 L58.51 '
+    '29.34 L58.55 29.25 L58.59 29.17 L58.64 29.08 L58.69 29.00 L58.75 28.91 L58.80 28.83 L58.86 28.75 L58.92 '
+    '28.68 L58.98 28.60 L59.05 28.53 L59.12 28.46 L59.19 28.39 L59.26 28.32 L59.34 28.26 L59.41 28.20 L59.49 '
+    '28.14 L59.57 28.09 L59.66 28.03 L59.74 27.98 L59.83 27.93 L59.91 27.89 L60.00 27.85 L60.09 27.81 L60.18 '
+    '27.77 L60.28 27.74 L60.37 27.71 L60.46 27.68 L60.56 27.66 L60.65 27.64 L60.75 27.62 L60.85 27.61 L60.95 '
+    '27.59 L61.04 27.59 L61.14 27.58 L61.24 27.58 L61.34 27.58 L61.44 27.59 L61.53 27.59 L61.63 27.61 L61.73 '
+    '27.62 L61.83 27.64 L61.92 27.66 L62.02 27.68 L62.11 27.71 L62.20 27.74 L62.30 27.77 L62.39 27.81 L62.48 '
+    '27.85 L62.57 27.89 L62.65 27.93 L62.74 27.98 L62.82 28.03 L62.91 28.09 L62.99 28.14 L63.07 28.20 L63.14 '
+    '28.26 L63.22 28.32 L63.29 28.39 L63.36 28.46 L63.43 28.53 L63.50 28.60 L63.56 28.68 L63.62 28.75 L63.68 '
+    '28.83 L63.73 28.91 L63.79 29.00 L63.84 29.08 L63.89 29.17 L63.93 29.25 L63.97 29.34 L64.01 29.43 L64.05 '
+    '29.52 L64.08 29.62 L64.11 29.71 L64.14 29.80 L64.16 29.90 L64.18 29.99 L64.20 30.09 L64.21 30.19 L64.23 '
+    '30.29 L64.23 30.38 L64.24 30.48 Z M63.04 30.58 L63.04 30.52 L63.04 30.46 L63.03 30.40 L63.02 30.35 L63.02 '
+    '30.29 L63.01 30.23 L62.99 30.17 L62.98 30.11 L62.96 30.06 L62.94 30.00 L62.92 29.95 L62.90 29.89 L62.88 '
+    '29.84 L62.85 29.78 L62.83 29.73 L62.80 29.68 L62.77 29.63 L62.74 29.58 L62.70 29.53 L62.67 29.48 L62.63 '
+    '29.44 L62.59 29.39 L62.55 29.35 L62.51 29.31 L62.47 29.27 L62.43 29.23 L62.38 29.19 L62.34 29.15 L62.29 '
+    '29.12 L62.24 29.08 L62.19 29.05 L62.14 29.02 L62.09 28.99 L62.04 28.97 L61.98 28.94 L61.93 28.92 L61.87 '
+    '28.90 L61.82 28.88 L61.76 28.86 L61.71 28.84 L61.65 28.83 L61.59 28.81 L61.53 28.80 L61.47 28.80 L61.42 '
+    '28.79 L61.36 28.78 L61.30 28.78 L61.24 28.78 L61.18 28.78 L61.12 28.78 L61.06 28.79 L61.01 28.80 L60.95 '
+    '28.80 L60.89 28.81 L60.83 28.83 L60.77 28.84 L60.72 28.86 L60.66 28.88 L60.61 28.90 L60.55 28.92 L60.50 '
+    '28.94 L60.44 28.97 L60.39 28.99 L60.34 29.02 L60.29 29.05 L60.24 29.08 L60.19 29.12 L60.14 29.15 L60.10 '
+    '29.19 L60.05 29.23 L60.01 29.27 L59.97 29.31 L59.93 29.35 L59.89 29.39 L59.85 29.44 L59.81 29.48 L59.78 '
+    '29.53 L59.74 29.58 L59.71 29.63 L59.68 29.68 L59.65 29.73 L59.63 29.78 L59.60 29.84 L59.58 29.89 L59.56 '
+    '29.95 L59.54 30.00 L59.52 30.06 L59.50 30.11 L59.49 30.17 L59.47 30.23 L59.46 30.29 L59.46 30.35 L59.45 '
+    '30.40 L59.44 30.46 L59.44 30.52 L59.44 30.58 L59.44 30.64 L59.44 30.70 L59.45 30.76 L59.46 30.81 L59.46 '
+    '30.87 L59.47 30.93 L59.49 30.99 L59.50 31.05 L59.52 31.10 L59.54 31.16 L59.56 31.21 L59.58 31.27 L59.60 '
+    '31.32 L59.63 31.38 L59.65 31.43 L59.68 31.48 L59.71 31.53 L59.74 31.58 L59.78 31.63 L59.81 31.68 L59.85 '
+    '31.72 L59.89 31.77 L59.93 31.81 L59.97 31.85 L60.01 31.89 L60.05 31.93 L60.10 31.97 L60.14 32.01 L60.19 '
+    '32.04 L60.24 32.08 L60.29 32.11 L60.34 32.14 L60.39 32.17 L60.44 32.19 L60.50 32.22 L60.55 32.24 L60.61 '
+    '32.26 L60.66 32.28 L60.72 32.30 L60.77 32.32 L60.83 32.33 L60.89 32.35 L60.95 32.36 L61.01 32.36 L61.06 '
+    '32.37 L61.12 32.38 L61.18 32.38 L61.24 32.38 L61.30 32.38 L61.36 32.38 L61.42 32.37 L61.47 32.36 L61.53 '
+    '32.36 L61.59 32.35 L61.65 32.33 L61.71 32.32 L61.76 32.30 L61.82 32.28 L61.87 32.26 L61.93 32.24 L61.98 '
+    '32.22 L62.04 32.19 L62.09 32.17 L62.14 32.14 L62.19 32.11 L62.24 32.08 L62.29 32.04 L62.34 32.01 L62.38 '
+    '31.97 L62.43 31.93 L62.47 31.89 L62.51 31.85 L62.55 31.81 L62.59 31.77 L62.63 31.72 L62.67 31.68 L62.70 '
+    '31.63 L62.74 31.58 L62.77 31.53 L62.80 31.48 L62.83 31.43 L62.85 31.38 L62.88 31.32 L62.90 31.27 L62.92 '
+    '31.21 L62.94 31.16 L62.96 31.10 L62.98 31.05 L62.99 30.99 L63.01 30.93 L63.02 30.87 L63.02 30.81 L63.03 '
+    '30.76 L63.04 30.70 L63.04 30.64 Z"/></g></svg>')
+APP_ICON_SMALL_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><defs><linearGradient '
+    'id="sky" x1="0.15" y1="0" x2="0.85" y2="1"><stop offset="0" stop-color="#7DF0D2"/><stop offset="0.45" '
+    'stop-color="#4AA8E8"/><stop offset="1" stop-color="#6A4ADB"/></linearGradient></defs><g '
+    'transform="scale(0.64)"><circle cx="50.0" cy="50.0" r="42.3" fill="url(#sky)"/><path fill="#15111F" '
+    'fill-rule="evenodd" d="M97.82 45.88 L97.56 43.54 L97.19 41.21 L96.70 38.91 L96.10 36.63 L95.39 34.39 L94.57 '
+    '32.18 L93.64 30.01 L92.61 27.89 L91.47 25.83 L90.23 23.82 L88.90 21.88 L87.48 20.01 L85.96 18.20 L84.36 '
+    '16.48 L82.67 14.83 L80.90 13.27 L79.06 11.80 L77.16 10.42 L75.18 9.13 L73.14 7.95 L71.05 6.86 L68.91 5.88 '
+    'L66.72 5.01 L64.50 4.24 L62.23 3.59 L59.94 3.04 L57.63 2.61 L55.29 2.29 L52.94 2.09 L50.59 2.00 L48.23 2.03 '
+    'L45.88 2.18 L43.54 2.44 L41.21 2.81 L38.91 3.30 L36.63 3.90 L34.39 4.61 L32.18 5.43 L30.01 6.36 L27.89 7.39 '
+    'L25.83 8.53 L23.82 9.77 L21.88 11.10 L20.01 12.52 L18.20 14.04 L16.48 15.64 L14.83 17.33 L13.27 19.10 L11.80'
+    ' 20.94 L10.42 22.84 L9.13 24.82 L7.95 26.86 L6.86 28.95 L5.88 31.09 L5.01 33.28 L4.24 35.50 L3.59 37.77 '
+    'L3.04 40.06 L2.61 42.37 L2.29 44.71 L2.09 47.06 L2.00 49.41 L2.03 51.77 L2.18 54.12 L2.44 56.46 L2.81 58.79 '
+    'L3.30 61.09 L3.90 63.37 L4.61 65.61 L5.43 67.82 L6.36 69.99 L7.39 72.11 L8.53 74.17 L9.77 76.18 L11.10 78.12'
+    ' L12.52 79.99 L14.04 81.80 L15.64 83.52 L17.33 85.17 L19.10 86.73 L20.94 88.20 L22.84 89.58 L24.82 90.87 '
+    'L26.86 92.05 L28.95 93.14 L31.09 94.12 L33.28 94.99 L35.50 95.76 L37.77 96.41 L40.06 96.96 L42.37 97.39 '
+    'L44.71 97.71 L47.06 97.91 L49.41 98.00 L51.77 97.97 L54.12 97.82 L56.46 97.56 L58.79 97.19 L61.09 96.70 '
+    'L63.37 96.10 L65.61 95.39 L67.82 94.57 L69.99 93.64 L72.11 92.61 L74.17 91.47 L76.18 90.23 L78.12 88.90 '
+    'L79.99 87.48 L81.80 85.96 L83.52 84.36 L85.17 82.67 L86.73 80.90 L88.20 79.06 L89.58 77.16 L90.87 75.18 '
+    'L92.05 73.14 L93.14 71.05 L94.12 68.91 L94.99 66.72 L95.76 64.50 L96.41 62.23 L96.96 59.94 L97.39 57.63 '
+    'L97.71 55.29 L97.91 52.94 L98.00 50.59 L97.97 48.23 Z M91.30 54.07 L90.89 57.09 L90.26 60.08 L89.41 63.02 '
+    'L88.53 65.41 L87.29 68.20 L86.11 70.46 L84.51 73.06 L82.72 75.53 L81.09 77.49 L79.34 79.34 L77.11 81.42 '
+    'L74.72 83.33 L72.63 84.79 L70.01 86.36 L67.52 87.62 L66.93 82.18 L65.98 75.46 L65.08 70.00 L62.10 53.26 '
+    'L61.95 51.43 L61.94 49.65 L62.10 47.91 L62.33 46.66 L62.79 45.04 L63.44 43.49 L64.27 42.04 L65.03 41.00 '
+    'L65.90 40.02 L66.55 39.40 L68.10 38.36 L69.76 37.49 L71.07 36.94 L72.88 36.36 L74.75 35.92 L76.65 35.62 '
+    'L78.57 35.46 L80.95 35.42 L82.82 35.51 L85.24 35.78 L85.76 35.67 L86.20 35.40 L86.54 34.99 L86.80 34.45 '
+    'L85.54 33.00 L84.20 31.68 L82.79 30.49 L81.31 29.42 L79.78 28.47 L77.66 27.38 L76.04 26.69 L73.84 25.93 '
+    'L72.17 25.47 L69.94 25.00 L68.28 24.75 L66.10 24.55 L64.14 23.61 L63.10 23.24 L61.51 22.81 L59.87 22.55 '
+    'L58.21 22.45 L55.97 22.56 L54.30 22.84 L52.66 23.29 L51.06 23.91 L49.52 24.71 L48.05 25.68 L46.67 26.82 '
+    'L45.40 28.15 L44.55 28.66 L44.81 28.19 L43.59 27.74 L42.31 27.32 L41.16 27.02 L40.26 26.87 L39.39 26.82 '
+    'L38.39 26.89 L37.26 27.15 L33.25 28.60 L36.04 28.78 L36.88 28.92 L37.70 29.14 L38.69 29.68 L40.83 31.41 '
+    'L39.16 32.92 L39.28 32.36 L36.87 32.23 L34.23 32.30 L32.99 32.48 L32.03 32.72 L31.10 33.04 L30.00 33.52 '
+    'L25.60 35.80 L28.99 35.61 L30.94 35.72 L32.41 36.09 L35.20 37.26 L33.37 39.61 L33.26 38.89 L30.58 39.81 '
+    'L28.61 40.69 L27.56 41.29 L26.58 41.97 L22.45 45.25 L24.97 44.63 L26.67 44.32 L28.04 44.23 L30.01 44.32 '
+    'L28.91 45.87 L28.74 45.29 L27.75 45.73 L26.04 46.55 L24.61 47.31 L23.39 48.07 L22.32 48.86 L21.36 49.71 '
+    'L20.47 50.63 L16.60 55.15 L19.50 53.69 L21.47 52.86 L23.09 52.42 L25.05 52.16 L23.93 54.28 L22.56 57.05 '
+    'L21.21 58.25 L20.02 59.51 L16.15 64.60 L18.60 63.07 L20.30 62.15 L19.06 65.27 L18.07 67.97 L16.12 73.97 '
+    'L14.40 71.34 L12.71 68.20 L11.28 64.94 L10.29 62.05 L9.40 58.60 L8.81 55.08 L8.55 52.04 L8.53 48.47 L8.65 '
+    '46.44 L8.88 44.41 L9.20 42.40 L9.62 40.41 L10.14 38.44 L10.76 36.50 L11.47 34.59 L12.27 32.72 L13.16 30.89 '
+    'L14.15 29.10 L15.21 27.37 L16.37 25.69 L17.60 24.07 L18.91 22.51 L20.30 21.02 L21.76 19.59 L23.28 18.25 '
+    'L24.87 16.97 L26.52 15.78 L28.23 14.67 L29.99 13.64 L31.80 12.71 L33.65 11.86 L35.54 11.10 L37.47 10.44 '
+    'L39.42 9.87 L41.40 9.40 L43.41 9.03 L45.43 8.75 L47.46 8.58 L49.49 8.50 L51.53 8.53 L53.56 8.65 L55.59 8.88 '
+    'L57.60 9.20 L59.59 9.62 L61.56 10.14 L63.50 10.76 L65.41 11.47 L67.28 12.27 L69.11 13.16 L70.90 14.15 L72.63'
+    ' 15.21 L74.31 16.37 L75.93 17.60 L77.49 18.91 L78.98 20.30 L80.41 21.76 L81.75 23.28 L83.03 24.87 L84.22 '
+    '26.52 L85.33 28.23 L86.36 29.99 L87.29 31.80 L88.14 33.65 L88.90 35.54 L89.56 37.47 L90.13 39.42 L90.60 '
+    '41.40 L90.97 43.41 L91.25 45.43 L91.42 47.46 L91.50 49.49 L91.47 51.53 Z M59.44 48.40 L59.58 52.98 L59.05 '
+    '57.45 L58.81 62.07 L58.82 65.48 L58.97 68.98 L59.24 72.58 L59.73 77.06 L60.50 82.50 L61.66 89.41 L61.54 '
+    '89.45 L59.88 81.79 L58.76 75.66 L57.93 69.79 L57.64 66.94 L57.44 64.15 L57.33 61.40 L57.32 58.69 L57.41 '
+    '56.02 L57.62 53.38 L57.72 52.72 L57.93 52.09 Z M55.30 53.80 L54.97 55.80 L54.54 57.79 L54.01 59.77 L53.57 '
+    '61.07 L52.29 63.50 L50.89 65.89 L49.37 68.23 L47.74 70.52 L46.00 72.76 L44.15 74.94 L42.18 77.06 L40.11 '
+    '79.13 L37.37 81.61 L35.06 83.52 L32.01 85.80 L31.05 86.47 L30.96 86.42 L34.79 83.20 L38.02 80.14 L40.99 '
+    '76.95 L42.38 75.31 L44.13 73.09 L46.15 70.25 L48.34 66.77 L49.97 63.80 L51.67 60.18 L53.69 56.74 Z M64.24 '
+    '30.58 L64.24 30.68 L64.23 30.78 L64.23 30.87 L64.21 30.97 L64.20 31.07 L64.18 31.17 L64.16 31.26 L64.14 '
+    '31.36 L64.11 31.45 L64.08 31.54 L64.05 31.64 L64.01 31.73 L63.97 31.82 L63.93 31.91 L63.89 31.99 L63.84 '
+    '32.08 L63.79 32.16 L63.73 32.25 L63.68 32.33 L63.62 32.41 L63.56 32.48 L63.50 32.56 L63.43 32.63 L63.36 '
+    '32.70 L63.29 32.77 L63.22 32.84 L63.14 32.90 L63.07 32.96 L62.99 33.02 L62.91 33.07 L62.82 33.13 L62.74 '
+    '33.18 L62.65 33.23 L62.57 33.27 L62.48 33.31 L62.39 33.35 L62.30 33.39 L62.20 33.42 L62.11 33.45 L62.02 '
+    '33.48 L61.92 33.50 L61.83 33.52 L61.73 33.54 L61.63 33.55 L61.53 33.57 L61.44 33.57 L61.34 33.58 L61.24 '
+    '33.58 L61.14 33.58 L61.04 33.57 L60.95 33.57 L60.85 33.55 L60.75 33.54 L60.65 33.52 L60.56 33.50 L60.46 '
+    '33.48 L60.37 33.45 L60.28 33.42 L60.18 33.39 L60.09 33.35 L60.00 33.31 L59.91 33.27 L59.83 33.23 L59.74 '
+    '33.18 L59.66 33.13 L59.57 33.07 L59.49 33.02 L59.41 32.96 L59.34 32.90 L59.26 32.84 L59.19 32.77 L59.12 '
+    '32.70 L59.05 32.63 L58.98 32.56 L58.92 32.48 L58.86 32.41 L58.80 32.33 L58.75 32.25 L58.69 32.16 L58.64 '
+    '32.08 L58.59 31.99 L58.55 31.91 L58.51 31.82 L58.47 31.73 L58.43 31.64 L58.40 31.54 L58.37 31.45 L58.34 '
+    '31.36 L58.32 31.26 L58.30 31.17 L58.28 31.07 L58.27 30.97 L58.25 30.87 L58.25 30.78 L58.24 30.68 L58.24 '
+    '30.58 L58.24 30.48 L58.25 30.38 L58.25 30.29 L58.27 30.19 L58.28 30.09 L58.30 29.99 L58.32 29.90 L58.34 '
+    '29.80 L58.37 29.71 L58.40 29.62 L58.43 29.52 L58.47 29.43 L58.51 29.34 L58.55 29.25 L58.59 29.17 L58.64 '
+    '29.08 L58.69 29.00 L58.75 28.91 L58.80 28.83 L58.86 28.75 L58.92 28.68 L58.98 28.60 L59.05 28.53 L59.12 '
+    '28.46 L59.19 28.39 L59.26 28.32 L59.34 28.26 L59.41 28.20 L59.49 28.14 L59.57 28.09 L59.66 28.03 L59.74 '
+    '27.98 L59.83 27.93 L59.91 27.89 L60.00 27.85 L60.09 27.81 L60.18 27.77 L60.28 27.74 L60.37 27.71 L60.46 '
+    '27.68 L60.56 27.66 L60.65 27.64 L60.75 27.62 L60.85 27.61 L60.95 27.59 L61.04 27.59 L61.14 27.58 L61.24 '
+    '27.58 L61.34 27.58 L61.44 27.59 L61.53 27.59 L61.63 27.61 L61.73 27.62 L61.83 27.64 L61.92 27.66 L62.02 '
+    '27.68 L62.11 27.71 L62.20 27.74 L62.30 27.77 L62.39 27.81 L62.48 27.85 L62.57 27.89 L62.65 27.93 L62.74 '
+    '27.98 L62.82 28.03 L62.91 28.09 L62.99 28.14 L63.07 28.20 L63.14 28.26 L63.22 28.32 L63.29 28.39 L63.36 '
+    '28.46 L63.43 28.53 L63.50 28.60 L63.56 28.68 L63.62 28.75 L63.68 28.83 L63.73 28.91 L63.79 29.00 L63.84 '
+    '29.08 L63.89 29.17 L63.93 29.25 L63.97 29.34 L64.01 29.43 L64.05 29.52 L64.08 29.62 L64.11 29.71 L64.14 '
+    '29.80 L64.16 29.90 L64.18 29.99 L64.20 30.09 L64.21 30.19 L64.23 30.29 L64.23 30.38 L64.24 30.48 Z M63.04 '
+    '30.58 L63.04 30.52 L63.04 30.46 L63.03 30.40 L63.02 30.35 L63.02 30.29 L63.01 30.23 L62.99 30.17 L62.98 '
+    '30.11 L62.96 30.06 L62.94 30.00 L62.92 29.95 L62.90 29.89 L62.88 29.84 L62.85 29.78 L62.83 29.73 L62.80 '
+    '29.68 L62.77 29.63 L62.74 29.58 L62.70 29.53 L62.67 29.48 L62.63 29.44 L62.59 29.39 L62.55 29.35 L62.51 '
+    '29.31 L62.47 29.27 L62.43 29.23 L62.38 29.19 L62.34 29.15 L62.29 29.12 L62.24 29.08 L62.19 29.05 L62.14 '
+    '29.02 L62.09 28.99 L62.04 28.97 L61.98 28.94 L61.93 28.92 L61.87 28.90 L61.82 28.88 L61.76 28.86 L61.71 '
+    '28.84 L61.65 28.83 L61.59 28.81 L61.53 28.80 L61.47 28.80 L61.42 28.79 L61.36 28.78 L61.30 28.78 L61.24 '
+    '28.78 L61.18 28.78 L61.12 28.78 L61.06 28.79 L61.01 28.80 L60.95 28.80 L60.89 28.81 L60.83 28.83 L60.77 '
+    '28.84 L60.72 28.86 L60.66 28.88 L60.61 28.90 L60.55 28.92 L60.50 28.94 L60.44 28.97 L60.39 28.99 L60.34 '
+    '29.02 L60.29 29.05 L60.24 29.08 L60.19 29.12 L60.14 29.15 L60.10 29.19 L60.05 29.23 L60.01 29.27 L59.97 '
+    '29.31 L59.93 29.35 L59.89 29.39 L59.85 29.44 L59.81 29.48 L59.78 29.53 L59.74 29.58 L59.71 29.63 L59.68 '
+    '29.68 L59.65 29.73 L59.63 29.78 L59.60 29.84 L59.58 29.89 L59.56 29.95 L59.54 30.00 L59.52 30.06 L59.50 '
+    '30.11 L59.49 30.17 L59.47 30.23 L59.46 30.29 L59.46 30.35 L59.45 30.40 L59.44 30.46 L59.44 30.52 L59.44 '
+    '30.58 L59.44 30.64 L59.44 30.70 L59.45 30.76 L59.46 30.81 L59.46 30.87 L59.47 30.93 L59.49 30.99 L59.50 '
+    '31.05 L59.52 31.10 L59.54 31.16 L59.56 31.21 L59.58 31.27 L59.60 31.32 L59.63 31.38 L59.65 31.43 L59.68 '
+    '31.48 L59.71 31.53 L59.74 31.58 L59.78 31.63 L59.81 31.68 L59.85 31.72 L59.89 31.77 L59.93 31.81 L59.97 '
+    '31.85 L60.01 31.89 L60.05 31.93 L60.10 31.97 L60.14 32.01 L60.19 32.04 L60.24 32.08 L60.29 32.11 L60.34 '
+    '32.14 L60.39 32.17 L60.44 32.19 L60.50 32.22 L60.55 32.24 L60.61 32.26 L60.66 32.28 L60.72 32.30 L60.77 '
+    '32.32 L60.83 32.33 L60.89 32.35 L60.95 32.36 L61.01 32.36 L61.06 32.37 L61.12 32.38 L61.18 32.38 L61.24 '
+    '32.38 L61.30 32.38 L61.36 32.38 L61.42 32.37 L61.47 32.36 L61.53 32.36 L61.59 32.35 L61.65 32.33 L61.71 '
+    '32.32 L61.76 32.30 L61.82 32.28 L61.87 32.26 L61.93 32.24 L61.98 32.22 L62.04 32.19 L62.09 32.17 L62.14 '
+    '32.14 L62.19 32.11 L62.24 32.08 L62.29 32.04 L62.34 32.01 L62.38 31.97 L62.43 31.93 L62.47 31.89 L62.51 '
+    '31.85 L62.55 31.81 L62.59 31.77 L62.63 31.72 L62.67 31.68 L62.70 31.63 L62.74 31.58 L62.77 31.53 L62.80 '
+    '31.48 L62.83 31.43 L62.85 31.38 L62.88 31.32 L62.90 31.27 L62.92 31.21 L62.94 31.16 L62.96 31.10 L62.98 '
+    '31.05 L62.99 30.99 L63.01 30.93 L63.02 30.87 L63.02 30.81 L63.03 30.76 L63.04 30.70 L63.04 30.64 '
+    'Z"/></g></svg>')
+
+
+def render_svg(svg: str, px: int) -> QPixmap:
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    image = QImage(px, px, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    renderer.render(painter)
+    painter.end()
+    return QPixmap.fromImage(image)
+
+
+def render_app_icon(px: int) -> QPixmap:
+    """The logo at px x px (the detailed version from 48 px up)."""
+    return render_svg(APP_ICON_SVG if px > 32 else APP_ICON_SMALL_SVG, px)
+
+
+def app_icon_file() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "Huginn.ico")
+
+
+def refresh_shell_icons(settings: QSettings) -> None:
+    """Huginn.ico is also the desktop shortcut's icon. Windows keeps icons cached, so when the
+    file has changed since last time, ask Explorer to redraw them (as installers do)."""
+    if not IS_WINDOWS:
+        return
+    try:
+        stamp = str(int(os.path.getmtime(app_icon_file())))
+    except OSError:
+        return
+    if settings.value("shellIconStamp") == stamp:
+        return
+    settings.setValue("shellIconStamp", stamp)
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)     # SHCNE_ASSOCCHANGED
+    except Exception:
+        pass
+
+
+def refresh_windows_registration(settings: QSettings) -> None:
+    """If Huginn registered itself with Windows and has since moved folders (or Python
+    did), point Windows at where it is now."""
+    registered = str(settings.value("registeredWithWindows", "") or "")
+    current = " ".join(browser_launch_command())
+    if IS_WINDOWS and registered and registered != current:
+        try:
+            register_with_windows()
+            settings.setValue("registeredWithWindows", current)
+        except OSError:
+            pass
+
+
+def make_app_icon() -> QIcon:
+    """The logo: Huginn.ico in the browser's folder (the raven against the aurora - the same
+    file the desktop shortcut uses), or the built-in drawing if that file is missing."""
+    path = app_icon_file()
+    if os.path.isfile(path):
+        icon = QIcon(path)
+        if not icon.isNull() and icon.availableSizes():
+            return icon
+    icon = QIcon()
+    for px in (16, 20, 24, 32, 40, 48, 64, 128, 256):
+        icon.addPixmap(render_app_icon(px))
+    return icon
+
+
+class IconFactory:
+    """Renders the toolbar glyphs into QIcons in the current theme's colours (cached)."""
+
+    GLYPHS = {
+        "back": '<path d="M14.5 5.5 L8 12 L14.5 18.5"/>',
+        "forward": '<path d="M9.5 5.5 L16 12 L9.5 18.5"/>',
+        "sidebar": ('<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M9.5 5 V19"/>'
+                    '<path d="M5.6 8.5 H7.3 M5.6 11 H7.3 M5.6 13.5 H7.3" stroke-width="1.3"/>'),
+        "chevron_down": '<path d="M6.5 9.5 L12 15 L17.5 9.5"/>',
+        "chevron_up": '<path d="M6.5 14.5 L12 9 L17.5 14.5"/>',
+        "share": ('<path d="M8.6 9.5 H7.4 A2 2 0 0 0 5.4 11.5 V18.7 A2 2 0 0 0 7.4 20.7 H16.6 '
+                  'A2 2 0 0 0 18.6 18.7 V11.5 A2 2 0 0 0 16.6 9.5 H15.4"/>'
+                  '<path d="M12 3.5 V14.3"/><path d="M8.8 6.7 L12 3.5 L15.2 6.7"/>'),
+        "plus": '<path d="M12 5.5 V18.5 M5.5 12 H18.5"/>',
+        "tabs": ('<rect x="8.2" y="8.2" width="12" height="12" rx="2.6"/>'
+                 '<path d="M5.9 15.9 A2.3 2.3 0 0 1 3.8 13.6 V6.3 A2.5 2.5 0 0 1 6.3 3.8 H13.6 '
+                 'A2.3 2.3 0 0 1 15.9 5.9"/>'),
+        "page": ('<rect x="4.5" y="4.5" width="15" height="6.4" rx="2"/>'
+                 '<path d="M5 14.6 H19 M5 18.6 H14.5"/>'),
+        "reload": '<path d="M18.3 13.6 A6.6 6.6 0 1 1 16.5 7.3"/><path d="M16.7 3.5 L16.5 7.3 L12.7 7.1"/>',
+        "stop": '<path d="M7 7 L17 17 M17 7 L7 17"/>',
+        "close": '<path d="M7.5 7.5 L16.5 16.5 M16.5 7.5 L7.5 16.5"/>',
+        "search": '<circle cx="10.5" cy="10.5" r="5.7"/><path d="M14.8 14.8 L19.6 19.6"/>',
+        "globe": ('<circle cx="12" cy="12" r="8.4"/><path d="M3.6 12 H20.4"/>'
+                  '<path d="M12 3.6 C8.7 7 8.7 17 12 20.4 C15.3 17 15.3 7 12 3.6"/>'),
+        "clock": '<circle cx="12" cy="12" r="8.4"/><path d="M12 7.3 V12 L15.1 13.9"/>',
+        "private": ('<path d="M3.2 9.6 C3.2 7.6 6.6 6.6 12 6.6 C17.4 6.6 20.8 7.6 20.8 9.6 C20.8 13.6 18.9 16.6 '
+                    '16 16.6 C14 16.6 13.2 14.3 12 14.3 C10.8 14.3 10 16.6 8 16.6 C5.1 16.6 3.2 13.6 3.2 9.6 Z"/>'
+                    '<circle cx="8.1" cy="11" r="1.5"/><circle cx="15.9" cy="11" r="1.5"/>'),
+        "shield": '<path d="M12 3.2 L19 6 V11.5 C19 15.8 16 19.2 12 20.8 C8 19.2 5 15.8 5 11.5 V6 Z"/>',
+        "noads": ('<path d="M8.3 3.8 H15.7 L20.2 8.3 V15.7 L15.7 20.2 H8.3 L3.8 15.7 V8.3 Z"/>'
+                  '<path d="M8.6 14.6 L10.3 9.4 L12 14.6 M9.1 13.1 H11.5"/>'
+                  '<path d="M13.6 9.4 V14.6 H14.8 A2.6 2.6 0 0 0 14.8 9.4 Z"/>'),
+        "lock": ('<rect x="5" y="10.5" width="14" height="10" rx="2.2"/>'
+                 '<path d="M8.5 10.5 V7.6 A3.5 3.5 0 0 1 15.5 7.6 V10.5"/>'),
+        "lock_open": ('<rect x="5" y="10.5" width="14" height="10" rx="2.2"/>'
+                      '<path d="M8.5 10.5 V7.6 A3.5 3.5 0 0 1 15.2 6.2"/>'),
+        "warning": ('<path d="M10.3 4.6 A2 2 0 0 1 13.7 4.6 L21 17.6 A2 2 0 0 1 19.3 20.5 H4.7 '
+                    'A2 2 0 0 1 3 17.6 Z"/><path d="M12 9.3 V13.6"/><path d="M12 16.8 V16.9"/>'),
+        "camera": '<rect x="2.8" y="6.8" width="13" height="10.4" rx="2.6"/><path d="M15.8 10.4 L21.2 7.4 V16.6 L15.8 13.6"/>',
+        "mic": ('<rect x="9" y="3.4" width="6" height="11" rx="3"/><path d="M5.6 11.4 A6.4 6.4 0 0 0 18.4 11.4"/>'
+                '<path d="M12 17.8 V20.8"/>'),
+        "location": ('<path d="M12 21 C12 21 5.5 14.7 5.5 9.9 A6.5 6.5 0 0 1 18.5 9.9 C18.5 14.7 12 21 12 21 Z"/>'
+                     '<circle cx="12" cy="9.9" r="2.3"/>'),
+        "clipboard": ('<rect x="5.5" y="5" width="13" height="16" rx="2.2"/><path d="M9.2 5 V3.6 H14.8 V5"/>'
+                      '<path d="M9 11 H15 M9 15 H13"/>'),
+        "screen": '<rect x="3" y="4.5" width="18" height="12.2" rx="2"/><path d="M8.5 20.2 H15.5 M12 16.7 V20.2"/>',
+        "fonts": '<path d="M3.5 19 L8.7 5 L13.9 19 M5.6 14 H11.8"/><path d="M14.8 19 L17.9 10.6 L21 19 M16 16 H19.8"/>',
+        "pointer": '<path d="M6 3.4 V18.6 L10 14.9 L12.7 20.6 L15.2 19.5 L12.5 13.8 H18 Z"/>',
+        "video": '<rect x="3" y="5.5" width="18" height="13" rx="2.6"/><path d="M10.3 9.4 V14.6 L14.7 12 Z"/>',
+        "key": ('<circle cx="7.8" cy="12" r="3.9"/><path d="M11.7 12 H20.6"/>'
+                '<path d="M17.6 12 V15.2 M20.4 12 V14.4"/>'),
+        "cloud": '<path d="M7.2 18.5 H17.4 A4 4 0 0 0 17.9 10.5 A5.6 5.6 0 0 0 7.1 9.8 A4.4 4.4 0 0 0 7.2 18.5 Z"/>',
+        "speaker": ('<path d="M4.6 9.4 H8 L12.4 5.6 V18.4 L8 14.6 H4.6 Z"/><path d="M15.4 9.3 A3.9 3.9 0 0 1 15.4 14.7"/>'
+                    '<path d="M17.9 6.8 A7.4 7.4 0 0 1 17.9 17.2"/>'),
+        "speaker_muted": ('<path d="M4.6 9.4 H8 L12.4 5.6 V18.4 L8 14.6 H4.6 Z"/>'
+                          '<path d="M15.6 9.6 L20.4 14.4 M20.4 9.6 L15.6 14.4"/>'),
+        "download": ('<circle cx="12" cy="12" r="8.4"/><path d="M12 7.4 V15.8"/>'
+                     '<path d="M8.6 12.5 L12 15.9 L15.4 12.5"/>'),
+        "reader": ('<rect x="4.6" y="3.8" width="14.8" height="16.4" rx="2.2"/>'
+                   '<path d="M8 8.2 H16 M8 11.2 H16 M8 14.2 H16 M8 17 H12.6"/>'),
+        "screenshot": ('<path d="M4 8.6 V6 A2 2 0 0 1 6 4 H8.6 M15.4 4 H18 A2 2 0 0 1 20 6 V8.6 M20 15.4 V18 '
+                       'A2 2 0 0 1 18 20 H15.4 M8.6 20 H6 A2 2 0 0 1 4 18 V15.4"/><circle cx="12" cy="12" r="3"/>'),
+        "group": ('<rect x="3.6" y="5.4" width="16.8" height="13.2" rx="2.6"/><path d="M3.6 9.6 H20.4"/>'
+                  '<path d="M7 7.5 H11"/>'),
+        "folder": ('<path d="M3.6 7.4 A1.8 1.8 0 0 1 5.4 5.6 H9.4 L11.4 7.6 H18.6 A1.8 1.8 0 0 1 20.4 9.4 V16.8 '
+                   'A1.8 1.8 0 0 1 18.6 18.6 H5.4 A1.8 1.8 0 0 1 3.6 16.8 Z"/>'),
+        "moon": '<path d="M19.6 14.6 A8 8 0 1 1 9.4 4.4 A6.4 6.4 0 0 0 19.6 14.6 Z"/>',
+        "pin": ('<path d="M9.2 4 H14.8 L14.2 9.6 L17.4 13 H6.6 L9.8 9.6 Z"/><path d="M12 13 V20.4"/>'),
+        "popout": ('<rect x="3.6" y="5.2" width="16.8" height="13.6" rx="2.4"/>'
+                   '<rect x="11.4" y="11.6" width="6.6" height="4.8" rx="1.2" fill="{c}"/>'),
+        "speed": ('<path d="M4.4 16.6 A8 8 0 1 1 19.6 16.6"/><path d="M12 12.6 L16 8.6"/>'
+                  '<circle cx="12" cy="12.6" r="1.2" fill="{c}"/>'),
+        "split": '<rect x="3.6" y="5.2" width="16.8" height="13.6" rx="2.4"/><path d="M12 5.2 V18.8"/>',
+        "reading": ('<circle cx="7.4" cy="14" r="3.4"/><circle cx="16.6" cy="14" r="3.4"/>'
+                    '<path d="M10.8 13.4 C11.6 12.6 12.4 12.6 13.2 13.4 M4 14 L5.6 8.2 M20 14 L18.4 8.2"/>'),
+        "star": '<path d="M12 4 L14.4 9.1 L19.9 9.7 L15.8 13.4 L16.9 18.9 L12 16.1 L7.1 18.9 L8.2 13.4 L4.1 9.7 L9.6 9.1 Z"/>',
+        "gauge": ('<rect x="5.6" y="5.6" width="12.8" height="12.8" rx="2"/><rect x="9.2" y="9.2" width="5.6" height="5.6" rx="1"/>'
+                  '<path d="M9 3 V5.6 M15 3 V5.6 M9 18.4 V21 M15 18.4 V21 M3 9 H5.6 M3 15 H5.6 M18.4 9 H21 M18.4 15 H21"/>'),
+        "person": '<circle cx="12" cy="8.6" r="3.6"/><path d="M4.8 19.8 C5.6 15.6 8.4 13.8 12 13.8 C15.6 13.8 18.4 15.6 19.2 19.8"/>',
+        "command": ('<path d="M8.6 9 H15.4 V15 H8.6 Z"/><path d="M8.6 9 A2.6 2.6 0 1 1 6 6.4 A2.6 2.6 0 0 1 8.6 9 '
+                    'M15.4 9 A2.6 2.6 0 1 0 18 6.4 A2.6 2.6 0 0 0 15.4 9 M8.6 15 A2.6 2.6 0 1 0 6 17.6 A2.6 2.6 0 0 0 '
+                    '8.6 15 M15.4 15 A2.6 2.6 0 1 1 18 17.6 A2.6 2.6 0 0 1 15.4 15"/>'),
+        "flame": ('<path d="M12 20.6 C8.2 20.6 6 18 6 14.8 C6 11.2 9 9.6 9.6 5.6 C11.8 7 12.6 9 12.4 11 '
+                  'C13.4 10.4 14 9.2 14 8 C16.4 9.8 18 12.4 18 14.8 C18 18 15.8 20.6 12 20.6 Z"/>'),
+        "palette": ('<path d="M12 3.8 C7.2 3.8 3.8 7.4 3.8 11.6 C3.8 16 7.2 20.2 11.4 20.2 C12.6 20.2 13.2 19.4 12.8 18.4 '
+                    'C12.2 17 13 15.8 14.4 15.8 H16.6 C18.6 15.8 20.2 14.2 20.2 12 C20.2 7.4 16.6 3.8 12 3.8 Z"/>'
+                    '<circle cx="8" cy="11" r="1.1" fill="{c}"/><circle cx="11" cy="7.6" r="1.1" fill="{c}"/>'
+                    '<circle cx="15.2" cy="8.4" r="1.1" fill="{c}"/>'),
+        "valhalla": ('<path d="M4 20 V10.4 L12 4.6 L20 10.4 V20"/><path d="M9.4 20 V14.4 A2.6 2.6 0 0 1 14.6 14.4 V20"/>'
+                     '<path d="M2.8 20 H21.2"/>'),
+        "game": ('<path d="M7.4 8.4 H16.6 A4 4 0 0 1 20.4 13.2 L19.6 16.6 A2 2 0 0 1 16.4 17.6 L14.6 15.6 H9.4 '
+                 'L7.6 17.6 A2 2 0 0 1 4.4 16.6 L3.6 13.2 A4 4 0 0 1 7.4 8.4 Z"/><path d="M8 11 V13.6 M6.7 12.3 H9.3"/>'
+                 '<circle cx="15.6" cy="11.6" r="0.9" fill="{c}"/><circle cx="17" cy="13.2" r="0.9" fill="{c}"/>'),
+        "panel": '<rect x="3.6" y="5.2" width="16.8" height="13.6" rx="2.4"/><path d="M9.4 5.2 V18.8 M5.6 8.6 H7.4 M5.6 11 H7.4"/>',
+        "voice": '<path d="M4.6 10.4 V13.6 M8.3 7.4 V16.6 M12 4.6 V19.4 M15.7 8.2 V15.8 M19.4 10.6 V13.4"/>',
+        "minus": '<path d="M5.5 12 H18.5"/>',
+        "sparkle": ('<path d="M12 3.5 C12.6 8.4 13.6 9.6 18.5 12 C13.6 14.4 12.6 15.6 12 20.5 C11.4 15.6 10.4 14.4 5.5 12 '
+                    'C10.4 9.6 11.4 8.4 12 3.5 Z"/><path d="M18.6 3.8 V6.6 M17.2 5.2 H20"/>'),
+        "weather": ('<circle cx="9" cy="9" r="3.1"/><path d="M9 3.4 V4.5 M3.4 9 H4.5 M5 5 L5.8 5.8 M13 5 L12.2 5.8"/>'
+                    '<path d="M8.2 19.4 H17 A3.4 3.4 0 0 0 17 12.6 A4.8 4.8 0 0 0 8.6 13.8 A2.8 2.8 0 0 0 8.2 19.4 Z"/>'),
+        "zoom": ('<circle cx="10.6" cy="10.6" r="6.2"/><path d="M15.2 15.2 L19.8 19.8"/>'
+                 '<path d="M8.2 10.6 H13 M10.6 8.2 V13"/>'),
+        "link": ('<path d="M10.2 13.8 L13.8 10.2"/>'
+                 '<path d="M8.9 11.3 L7.1 13.1 A3.3 3.3 0 0 0 11.8 17.8 L13.6 16"/>'
+                 '<path d="M15.1 12.7 L16.9 10.9 A3.3 3.3 0 0 0 12.2 6.2 L10.4 8"/>'),
+        "power": '<path d="M12 4 V11.6"/><path d="M7.6 6.9 A7 7 0 1 0 16.4 6.9"/>',
+        "sliders": ('<path d="M4.5 7.6 H6.9 M11.3 7.6 H19.5 M4.5 16.4 H12.7 M17.1 16.4 H19.5"/>'
+                    '<circle cx="9.1" cy="7.6" r="2.2"/><circle cx="14.9" cy="16.4" r="2.2"/>'),
+        "grid": ('<rect x="4.6" y="4.6" width="6" height="6" rx="1.6"/><rect x="13.4" y="4.6" width="6" height="6" rx="1.6"/>'
+                 '<rect x="4.6" y="13.4" width="6" height="6" rx="1.6"/><rect x="13.4" y="13.4" width="6" height="6" rx="1.6"/>'),
+        "duplicate": ('<rect x="8.4" y="8.4" width="11.2" height="11.2" rx="2.2"/>'
+                      '<path d="M15.6 8.4 V6.6 A2.2 2.2 0 0 0 13.4 4.4 H6.6 A2.2 2.2 0 0 0 4.4 6.6 V13.4 '
+                      'A2.2 2.2 0 0 0 6.6 15.6 H8.4"/>'),
+        "trash": ('<path d="M4.8 7.2 H19.2 M9.8 7.2 V5 H14.2 V7.2"/><path d="M6.6 7.2 L7.6 19.4 H16.4 L17.4 7.2"/>'
+                  '<path d="M10.2 10.6 V16 M13.8 10.6 V16"/>'),
+        "mail": '<rect x="3.8" y="6" width="16.4" height="12" rx="2.2"/><path d="M4.6 7.2 L12 12.6 L19.4 7.2"/>',
+        "open_in": ('<path d="M13.6 4.6 H19.4 V10.4 M19.4 4.6 L11.4 12.6"/>'
+                    '<path d="M17.4 13.8 V17.6 A1.8 1.8 0 0 1 15.6 19.4 H6.4 A1.8 1.8 0 0 1 4.6 17.6 V8.4 A1.8 1.8 0 0 1 6.4 6.6 H10.2"/>'),
+        "gift": ('<rect x="4" y="9" width="16" height="11" rx="1.8"/><path d="M3.4 9 H20.6 M12 9 V20"/>'
+                 '<path d="M12 9 C10.6 5.2 7 5 7 7.2 C7 8.6 9.6 9 12 9 C14.4 9 17 8.6 17 7.2 C17 5 13.4 5.2 12 9"/>'),
+    }
+    STROKES = {"back": 2.0, "forward": 2.0, "plus": 1.9, "stop": 2.0, "close": 2.2,
+               "chevron_down": 2.4, "warning": 1.6}
+
+    def __init__(self) -> None:
+        self.color = LIGHT_THEME["icon"]
+        self.disabled_color = LIGHT_THEME["icon_disabled"]
+        self._cache: dict[tuple[str, str], QIcon] = {}
+
+    def set_colors(self, color: str, disabled_color: str) -> None:
+        self.color, self.disabled_color = color, disabled_color
+        self._cache.clear()
+
+    def _svg(self, name: str, color: str) -> str:
+        return (_SVG_WRAPPER.replace("{body}", self.GLYPHS[name])
+                .replace("{w}", str(self.STROKES.get(name, 1.75)))
+                .replace("{c}", color))
+
+    def icon(self, name: str, color: str | None = None) -> QIcon:
+        color = color or self.color
+        key = (name, color)
+        if key not in self._cache:
+            icon = QIcon()
+            for px in (32, 64):
+                icon.addPixmap(render_svg(self._svg(name, color), px), QIcon.Mode.Normal)
+                icon.addPixmap(render_svg(self._svg(name, self.disabled_color), px), QIcon.Mode.Disabled)
+            self._cache[key] = icon
+        return self._cache[key]
+
+
+# --------------------------------------------------------------------------------------
+# Persistent bookmarks, history and tracker log (QSettings, i.e. the registry on Windows)
+# --------------------------------------------------------------------------------------
+class BrowserStore(QObject):
+    bookmarksChanged = Signal()
+    historyChanged = Signal()
+    readingChanged = Signal()
+
+    def __init__(self, parent: QObject | None = None, settings_name: str = APP_NAME,
+                 data_dir: str | None = None, persist: bool = True) -> None:
+        super().__init__(parent)
+        self.settings = QSettings(ORG_NAME, settings_name)      # small preferences only
+        self.persist = persist                                  # False: throwaway, memory only
+        # Bookmarks, history and the tracker log can grow to hundreds of KB, which doesn't
+        # belong in the registry; they live in one JSON file, written atomically.
+        self.data_path = os.path.join(data_dir, "browser-data.json") if data_dir else None
+        data = self._read_data()
+        self.bookmarks: list[dict] = self._clean(data.get("bookmarks"), DEFAULT_BOOKMARKS, "bookmark")
+        self.history: list[dict] = self._clean(data.get("history"), [], "history")[:MAX_HISTORY]
+        self.trackers: list[dict] = self._clean(data.get("trackers"), [], "tracker")[-5000:]
+        self.reading_list: list[dict] = self._clean(data.get("reading"), [], "reading")[:500]
+        week = time.time() - 7 * 86400
+        self.closed_tabs: list[dict] = [e for e in self._clean(data.get("closed"), [], "closed") if e["time"] > week][:500]
+        raw_stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+        self.stats: dict[str, dict] = {d: {k: int(v) for k, v in c.items() if isinstance(v, int)}
+                                       for d, c in raw_stats.items() if isinstance(c, dict) and re.fullmatch(r"\d{4}-\d\d-\d\d", d)}
+        self._recent_trackers: dict[tuple[str, str], float] = {}
+        self._prune_trackers()
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(1500)       # coalesce writes while browsing
+        self._save_timer.timeout.connect(self.flush)
+
+    def _read_data(self) -> dict:
+        if not self.persist:
+            return {}
+        if self.data_path and os.path.exists(self.data_path):
+            try:
+                with open(self.data_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except (OSError, ValueError):
+                pass                              # unreadable file: start fresh, keep going
+            return {}
+        # First run with a data file: migrate what earlier versions kept in QSettings.
+        data = {}
+        for key in ("bookmarks", "history", "trackers"):
+            raw = self.settings.value(key)
+            if isinstance(raw, str) and raw:
+                try:
+                    data[key] = json.loads(raw)
+                except ValueError:
+                    pass
+        return data
+
+    @staticmethod
+    def _clean(items, default: list[dict], kind: str) -> list[dict]:
+        """Keep only well-formed entries (persisted data may be stale or hand-edited)."""
+        if not isinstance(items, list):
+            return [dict(d) for d in default]
+        cleaned = []
+        for d in items:
+            if not isinstance(d, dict):
+                continue
+            key = "tracker" if kind == "tracker" else "url"
+            if not isinstance(d.get(key), str) or not d[key]:
+                continue
+            entry = {key: d[key]}
+            if kind != "tracker":
+                entry["title"] = d["title"] if isinstance(d.get("title"), str) else d[key]
+            if kind == "tracker":
+                entry["site"] = d["site"] if isinstance(d.get("site"), str) else ""
+            if kind == "bookmark" and isinstance(d.get("folder"), str) and d["folder"].strip():
+                entry["folder"] = d["folder"].strip()[:60]
+            if kind == "reading":
+                entry["read"] = bool(d.get("read"))
+                if isinstance(d.get("saved"), str):
+                    entry["saved"] = d["saved"]
+            if kind != "bookmark":
+                t = d.get("time")
+                entry["time"] = float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else 0.0
+            cleaned.append(entry)
+        return cleaned
+
+    def flush(self) -> None:
+        self._save_timer.stop()
+        if not self.persist:
+            return
+        payload = {"bookmarks": self.bookmarks, "history": self.history, "trackers": self.trackers,
+                   "reading": self.reading_list, "closed": self.closed_tabs, "stats": self.stats}
+        if self.data_path:
+            tmp = self.data_path + ".tmp"
+            try:
+                os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                os.replace(tmp, self.data_path)          # atomic: never a half-written file
+                for key in ("bookmarks", "history", "trackers"):
+                    self.settings.remove(key)            # drop pre-migration copies
+                return
+            except OSError:
+                pass                                     # fall back to QSettings below
+        for key, value in payload.items():
+            self.settings.setValue(key, json.dumps(value))
+        self.settings.sync()
+
+    # -- bookmarks ------------------------------------------------------------------------
+    def add_bookmark(self, title: str, url: str) -> bool:
+        if any(b["url"] == url for b in self.bookmarks):
+            return False
+        self.bookmarks.append({"title": title or url, "url": url})
+        self._save_timer.start()
+        self.bookmarksChanged.emit()
+        return True
+
+    def remove_bookmark(self, url: str) -> None:
+        self.bookmarks = [b for b in self.bookmarks if b["url"] != url]
+        self._save_timer.start()
+        self.bookmarksChanged.emit()
+
+    def _bookmarks_changed(self) -> None:
+        self._save_timer.start()
+        self.bookmarksChanged.emit()
+
+    def bookmark_folders(self) -> list[str]:
+        folders = []
+        for b in self.bookmarks:
+            if b.get("folder") and b["folder"] not in folders:
+                folders.append(b["folder"])
+        return folders
+
+    def set_bookmark_folder(self, url: str, folder: str) -> None:
+        folder = folder.strip()[:60]
+        for b in self.bookmarks:
+            if b["url"] == url:
+                if folder:
+                    b["folder"] = folder
+                else:
+                    b.pop("folder", None)
+        self._bookmarks_changed()
+
+    def rename_folder(self, old: str, new: str) -> None:
+        for b in self.bookmarks:
+            if b.get("folder") == old:
+                b["folder"] = new.strip()[:60]
+        self._bookmarks_changed()
+
+    def delete_folder(self, folder: str) -> None:
+        self.bookmarks = [b for b in self.bookmarks if b.get("folder") != folder]
+        self._bookmarks_changed()
+
+    def move_bookmark(self, url: str, before_url: str | None) -> None:
+        item = next((b for b in self.bookmarks if b["url"] == url), None)
+        if item is None:
+            return
+        self.bookmarks.remove(item)
+        index = next((i for i, b in enumerate(self.bookmarks) if b["url"] == before_url), len(self.bookmarks))
+        self.bookmarks.insert(index, item)
+        self._bookmarks_changed()
+
+    # -- Valhalla (closed tabs) and the weekly numbers ---------------------------------------
+    def add_closed(self, url: str, title: str) -> None:
+        self.closed_tabs.insert(0, {"url": url, "title": title or url, "time": time.time()})
+        week = time.time() - 7 * 86400
+        self.closed_tabs = [e for e in self.closed_tabs if e["time"] > week][:500]
+        self._save_timer.start()
+
+    def remove_closed(self, url: str, when: float) -> None:
+        self.closed_tabs = [e for e in self.closed_tabs if not (e["url"] == url and abs(e["time"] - when) < 0.001)]
+        self._save_timer.start()
+
+    def count_stat(self, key: str, n: int = 1) -> None:
+        day = time.strftime("%Y-%m-%d")
+        self.stats.setdefault(day, {})
+        self.stats[day][key] = self.stats[day].get(key, 0) + n
+        if len(self.stats) > 21:
+            for old in sorted(self.stats)[:-14]:
+                del self.stats[old]
+        self._save_timer.start()
+
+    def week_stats(self) -> dict:
+        """This past week: trackers stopped, ads blocked, cookie pop-ups refused."""
+        days = {time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400)) for i in range(7)}
+        totals = {"ads": 0, "banners": 0, "pages": 0}
+        for day in days:
+            for key in totals:
+                totals[key] += self.stats.get(day, {}).get(key, 0)
+        week = time.time() - 7 * 86400
+        totals["trackers"] = sum(1 for t in self.trackers if t["time"] > week)
+        return totals
+
+    # -- Reading List -----------------------------------------------------------------------
+    def add_reading(self, url: str, title: str) -> bool:
+        if any(e["url"] == url for e in self.reading_list):
+            return False
+        self.reading_list.insert(0, {"url": url, "title": title or url, "time": time.time(), "read": False})
+        self._save_timer.start()
+        self.readingChanged.emit()
+        return True
+
+    def set_reading_saved(self, url: str, path: str) -> None:
+        for e in self.reading_list:
+            if e["url"] == url:
+                e["saved"] = path
+        self._save_timer.start()
+        self.readingChanged.emit()
+
+    def mark_read(self, url: str, read: bool = True) -> None:
+        for e in self.reading_list:
+            if e["url"] == url:
+                e["read"] = bool(read)
+        self._save_timer.start()
+        self.readingChanged.emit()
+
+    def remove_reading(self, url: str) -> None:
+        for e in self.reading_list:
+            if e["url"] == url and e.get("saved"):
+                try:
+                    os.remove(e["saved"])
+                except OSError:
+                    pass
+        self.reading_list = [e for e in self.reading_list if e["url"] != url]
+        self._save_timer.start()
+        self.readingChanged.emit()
+
+    def import_bookmarks(self, items: list[tuple[str, str]]) -> int:
+        """Adds bookmarks brought over from another browser (skipping ones already here);
+        returns how many were added."""
+        have = {b["url"] for b in self.bookmarks}
+        added = 0
+        for title, url in items:
+            if not importable_url(url) or url in have:
+                continue
+            self.bookmarks.append({"title": (title or "").strip() or url, "url": url})
+            have.add(url)
+            added += 1
+        if added:
+            self._save_timer.start()
+            self.bookmarksChanged.emit()
+        return added
+
+    # -- history --------------------------------------------------------------------------
+    def import_history(self, items: list[tuple[str, str, float]]) -> int:
+        """Merges another browser's history (one entry per page, at its last visit) by
+        date, skipping pages already in history; returns how many were added."""
+        have = {e["url"] for e in self.history}
+        new = []
+        for title, url, when in items:
+            if not url.startswith(("http://", "https://")) or url in have or not when:
+                continue
+            new.append({"title": (title or "").strip() or url, "url": url, "time": float(when)})
+            have.add(url)
+        if not new:
+            return 0
+        merged = sorted(self.history + new, key=lambda e: e.get("time", 0), reverse=True)[:MAX_HISTORY]
+        kept = {id(e) for e in merged}
+        self.history = merged
+        self._save_timer.start()
+        self.historyChanged.emit()
+        return sum(1 for e in new if id(e) in kept)
+
+    def add_history(self, title: str, url: str) -> None:
+        entry = {"title": title or url, "url": url, "time": time.time()}
+        if self.history and self.history[0]["url"] == url:
+            self.history[0] = entry               # reload of the same page: refresh, don't duplicate
+        else:
+            self.history.insert(0, entry)
+            del self.history[MAX_HISTORY:]
+        self._save_timer.start()
+        self.historyChanged.emit()
+
+    def clear_history(self, since: float | None = None) -> list[dict]:
+        """Removes history visited at or after `since` (everything when None) and returns
+        the removed entries, so the caller can clear those sites' data too."""
+        if since is None:
+            removed, self.history = self.history, []
+        else:
+            removed = [e for e in self.history if e.get("time", 0) >= since]
+            self.history = [e for e in self.history if e.get("time", 0) < since]
+        self._save_timer.start()
+        self.historyChanged.emit()
+        return removed
+
+    def clear_tracker_sites(self, since: float | None = None) -> None:
+        """Keep the Privacy Report's counts but forget which sites were visited."""
+        for entry in self.trackers:
+            if since is None or entry.get("time", 0) >= since:
+                entry["site"] = ""
+        self._recent_trackers.clear()
+        self._save_timer.start()
+
+    def frequently_visited(self, limit: int = 8, exclude: set[str] | None = None) -> list[dict]:
+        """Most visited sites (by host) from history, newest title per host."""
+        exclude = exclude or set()
+        counts: Counter[str] = Counter()
+        latest: dict[str, dict] = {}
+        for entry in self.history:
+            url = QUrl(entry["url"])
+            host = bare_host(url)
+            if not host or host in exclude or url.scheme() not in ("http", "https"):
+                continue
+            counts[host] += 1
+            latest.setdefault(host, entry)
+        sites = []
+        for host, _n in counts.most_common(limit):
+            entry = latest[host]
+            url = QUrl(entry["url"])
+            sites.append({"title": entry.get("title") or host, "url": f"{url.scheme()}://{url.host()}/"})
+        return sites
+
+    # -- tracker log ------------------------------------------------------------------------
+    def record_tracker(self, tracker: str, site: str) -> None:
+        now = time.time()
+        key = (tracker, site)
+        if now - self._recent_trackers.get(key, 0) < 600:    # one entry per pair per 10 min
+            return
+        if len(self._recent_trackers) > 2000:                 # keep the de-dup memo bounded
+            self._recent_trackers = {k: t for k, t in self._recent_trackers.items() if now - t < 600}
+        self._recent_trackers[key] = now
+        self.trackers.append({"tracker": tracker, "site": site, "time": now})
+        if len(self.trackers) > 5000:
+            del self.trackers[:-5000]
+        self._save_timer.start()
+
+    def _prune_trackers(self) -> None:
+        cutoff = time.time() - WEEK
+        self.trackers = [t for t in self.trackers if t.get("time", 0) >= cutoff]
+
+    def tracker_report(self) -> dict:
+        self._prune_trackers()
+        trackers = {t["tracker"] for t in self.trackers}
+        sites_per_tracker: dict[str, set] = {}
+        for t in self.trackers:
+            sites_per_tracker.setdefault(t["tracker"], set()).add(t.get("site", ""))
+        top = max(sites_per_tracker.items(), key=lambda kv: len(kv[1]), default=None)
+        return {"trackers": len(trackers),
+                "sites": len({t.get("site") for t in self.trackers if t.get("site")}),
+                "top": (top[0], len(top[1])) if top else None}
+
+    def site_tracker_count(self, site: str) -> int:
+        cutoff = time.time() - WEEK
+        return len({t["tracker"] for t in self.trackers if t.get("site") == site and t["time"] >= cutoff})
+
+
+# --------------------------------------------------------------------------------------
+# Importing bookmarks and history from other browsers (page menu > Import From Another
+# Browser). Reads copies of their files, so they can stay open; nothing leaves the PC.
+# --------------------------------------------------------------------------------------
+CHROMIUM_BROWSERS = (                     # name, folder variable, path below it
+    ("Chrome", "LOCALAPPDATA", ("Google", "Chrome", "User Data")),
+    ("Edge", "LOCALAPPDATA", ("Microsoft", "Edge", "User Data")),
+    ("Brave", "LOCALAPPDATA", ("BraveSoftware", "Brave-Browser", "User Data")),
+    ("Vivaldi", "LOCALAPPDATA", ("Vivaldi", "User Data")),
+    ("Chromium", "LOCALAPPDATA", ("Chromium", "User Data")),
+    ("Opera", "APPDATA", ("Opera Software", "Opera Stable")),
+    ("Opera GX", "APPDATA", ("Opera Software", "Opera GX Stable")),
+)
+FIREFOX_BROWSERS = (
+    ("Firefox", "APPDATA", ("Mozilla", "Firefox")),
+    ("LibreWolf", "APPDATA", ("librewolf",)),
+    ("Waterfox", "APPDATA", ("Waterfox",)),
+    ("Zen", "APPDATA", ("zen",)),
+)
+_WEBKIT_EPOCH = 11644473600               # seconds from 1601-01-01 to 1970-01-01
+
+
+class BrowserImportError(Exception):
+    pass
+
+
+def importable_url(url: str) -> bool:
+    return isinstance(url, str) and url.startswith(("http://", "https://", "file:///")) and len(url) < 4096
+
+
+def find_import_sources(env: dict | None = None) -> list[dict]:
+    """Browsers (and their profiles) on this PC with bookmarks or history to import:
+    [{"browser", "label", "kind": "chromium" | "firefox", "path"}]."""
+    env = os.environ if env is None else env
+    sources: list[dict] = []
+    for name, var, parts in CHROMIUM_BROWSERS:
+        base = env.get(var)
+        if not base:
+            continue
+        root = os.path.join(base, *parts)
+        if not os.path.isdir(root):
+            continue
+        names = {}
+        try:
+            with open(os.path.join(root, "Local State"), encoding="utf-8") as f:
+                cache = json.load(f).get("profile", {}).get("info_cache", {})
+            names = {d: str(info.get("name") or d) for d, info in cache.items() if isinstance(info, dict)}
+        except (OSError, ValueError, AttributeError):
+            pass
+        candidates = [root] + [os.path.join(root, d) for d in sorted(os.listdir(root))
+                               if d == "Default" or d.startswith("Profile ")]
+        found = [p for p in candidates
+                 if os.path.isfile(os.path.join(p, "Bookmarks")) or os.path.isfile(os.path.join(p, "History"))]
+        for path in found:
+            profile = names.get(os.path.basename(path), "")
+            label = f"{name} — {profile}" if len(found) > 1 and profile else (
+                f"{name} — {os.path.basename(path)}" if len(found) > 1 else name)
+            sources.append({"browser": name, "label": label, "kind": "chromium", "path": path})
+    for name, var, parts in FIREFOX_BROWSERS:
+        base = env.get(var)
+        if not base:
+            continue
+        root = os.path.join(base, *parts)
+        profiles = []
+        ini = configparser.ConfigParser(interpolation=None)
+        try:
+            ini.read(os.path.join(root, "profiles.ini"), encoding="utf-8")
+        except (configparser.Error, OSError, UnicodeDecodeError):
+            pass
+        for section in ini.sections():
+            if not section.startswith("Profile") or not ini.has_option(section, "Path"):
+                continue
+            rel = ini.get(section, "Path").replace("/", os.sep).replace("\\", os.sep)
+            path = os.path.join(root, rel) if ini.get(section, "IsRelative", fallback="1") == "1" else rel
+            profiles.append((ini.get(section, "Name", fallback=os.path.basename(path)), path))
+        if not profiles and os.path.isdir(os.path.join(root, "Profiles")):
+            for d in sorted(os.listdir(os.path.join(root, "Profiles"))):
+                profiles.append((d.split(".", 1)[-1], os.path.join(root, "Profiles", d)))
+        found = [(n, p) for n, p in profiles if os.path.isfile(os.path.join(p, "places.sqlite"))]
+        for profile, path in found:
+            label = f"{name} — {profile}" if len(found) > 1 else name
+            sources.append({"browser": name, "label": label, "kind": "firefox", "path": path})
+    return sources
+
+
+def _readable_copy(path: str, browser: str) -> tuple[str, str]:
+    """Copies a database (and its write-ahead log) to a temporary folder: (copy, folder)."""
+    folder = tempfile.mkdtemp(prefix="huginn-import-")
+    copy = os.path.join(folder, os.path.basename(path))
+    try:
+        shutil.copyfile(path, copy)
+        for suffix in ("-wal", "-journal"):
+            if os.path.isfile(path + suffix):
+                shutil.copyfile(path + suffix, copy + suffix)
+    except OSError as e:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise BrowserImportError(f"{browser}'s files couldn't be read ({e.strerror or e}). "
+                                 f"Close {browser} and try again.") from None
+    return copy, folder
+
+
+def _query(path: str, browser: str, sql: str, args: tuple = ()) -> list[tuple]:
+    copy, folder = _readable_copy(path, browser)
+    try:
+        con = sqlite3.connect(copy)
+        try:
+            return con.execute(sql, args).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        raise BrowserImportError(f"{browser}'s data couldn't be read ({e}).") from None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def read_chromium_bookmarks(profile: str) -> list[tuple[str, str]]:
+    try:
+        with open(os.path.join(profile, "Bookmarks"), encoding="utf-8") as f:
+            roots = json.load(f).get("roots", {})
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, AttributeError) as e:
+        raise BrowserImportError(f"The bookmarks file couldn't be read ({e}).") from None
+    out: list[tuple[str, str]] = []
+
+    def walk(node) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "url" and isinstance(node.get("url"), str):
+            out.append((str(node.get("name") or ""), node["url"]))
+        for child in node.get("children", []) or []:
+            walk(child)
+    for key in ("bookmark_bar", "other", "synced"):          # the bar first, as it's shown
+        walk(roots.get(key))
+    return out
+
+
+def read_chromium_history(profile: str, browser: str, limit: int = MAX_HISTORY) -> list[tuple[str, str, float]]:
+    path = os.path.join(profile, "History")
+    if not os.path.isfile(path):
+        return []
+    rows = _query(path, browser, "SELECT title, url, last_visit_time FROM urls WHERE hidden = 0 "
+                                 "AND last_visit_time > 0 ORDER BY last_visit_time DESC LIMIT ?", (limit,))
+    return [(t or "", u, lv / 1e6 - _WEBKIT_EPOCH) for t, u, lv in rows if isinstance(u, str)]
+
+
+def read_firefox_bookmarks(profile: str, browser: str) -> list[tuple[str, str]]:
+    rows = _query(os.path.join(profile, "places.sqlite"), browser,
+                  "SELECT b.id, b.type, b.parent, b.position, b.title, p.url, b.guid FROM moz_bookmarks b "
+                  "LEFT JOIN moz_places p ON b.fk = p.id")
+    children: dict[int, list] = {}
+    roots = {}
+    for row in rows:
+        children.setdefault(row[2], []).append(row)
+        roots[row[6]] = row[0]
+    out: list[tuple[str, str]] = []
+
+    def walk(folder_id: int) -> None:
+        for _id, kind, _parent, _pos, title, url, _guid in sorted(children.get(folder_id, []), key=lambda r: r[3] or 0):
+            if kind == 1 and isinstance(url, str) and not url.startswith("place:"):
+                out.append((title or "", url))
+            elif kind == 2:
+                walk(_id)
+    for guid in ("toolbar_____", "menu________", "unfiled_____", "mobile______"):
+        if guid in roots:
+            walk(roots[guid])
+    return out
+
+
+def read_firefox_history(profile: str, browser: str, limit: int = MAX_HISTORY) -> list[tuple[str, str, float]]:
+    rows = _query(os.path.join(profile, "places.sqlite"), browser,
+                  "SELECT title, url, last_visit_date FROM moz_places WHERE hidden = 0 AND last_visit_date "
+                  "IS NOT NULL ORDER BY last_visit_date DESC LIMIT ?", (limit,))
+    return [(t or "", u, lv / 1e6) for t, u, lv in rows if isinstance(u, str)]
+
+
+class _BookmarksHtml(HTMLParser):
+    """The 'bookmarks.html' every browser can export (Netscape format)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.items: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if tag == "a":
+            self._href = dict(attrs).get("href")
+            self._text = []
+
+    def handle_data(self, data) -> None:
+        if self._href is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag) -> None:
+        if tag == "a" and self._href:
+            self.items.append(("".join(self._text).strip(), self._href))
+        if tag == "a":
+            self._href = None
+
+
+def read_bookmarks_html(path: str) -> list[tuple[str, str]]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(20_000_000)
+    except OSError as e:
+        raise BrowserImportError(f"The file couldn't be read ({e.strerror or e}).") from None
+    parser = _BookmarksHtml()
+    parser.feed(text)
+    return parser.items
+
+
+def read_import_source(source: dict) -> tuple[list, list]:
+    """(bookmarks, history) from one source found by find_import_sources()."""
+    browser, path = source["browser"], source["path"]
+    if source["kind"] == "chromium":
+        return read_chromium_bookmarks(path), read_chromium_history(path, browser)
+    return read_firefox_bookmarks(path, browser), read_firefox_history(path, browser)
+
+
+# --------------------------------------------------------------------------------------
+# Default browser (Windows). Huginn registers itself for this user the way browser
+# installers do, so it's listed in Settings > Default apps; Windows leaves the choice to
+# the user there. A Start menu entry (with Huginn's taskbar identity) comes with it.
+# --------------------------------------------------------------------------------------
+BROWSER_REG_NAME = "Huginn"
+BROWSER_PROGID_URL = "HuginnURL"
+BROWSER_PROGID_HTML = "HuginnHTML"
+BROWSER_FILE_TYPES = (".htm", ".html", ".shtml", ".xht", ".xhtml", ".svg", ".pdf", ".webp")
+APP_USER_MODEL_ID = f"{ORG_NAME}.{APP_NAME}"
+
+
+def browser_launch_command() -> tuple[str, str]:
+    """(program, arguments) that start this browser without a console window."""
+    exe = sys.executable
+    pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.isfile(pythonw):
+        exe = pythonw
+    return exe, f'"{os.path.abspath(__file__)}"'
+
+
+def default_browser_registry(program: str, arguments: str, icon: str) -> list[tuple[str, str, str]]:
+    """Registry values (key under HKEY_CURRENT_USER, value name - '' for the default -,
+    data) that register Huginn as a browser for this user."""
+    command = f'"{program}" {arguments}'
+    open_with = f'{command} "%1"'
+    icon_ref = f'"{icon}",0'
+    client = rf"Software\Clients\StartMenuInternet\{BROWSER_REG_NAME}"
+    caps = client + r"\Capabilities"
+    url, page = rf"Software\Classes\{BROWSER_PROGID_URL}", rf"Software\Classes\{BROWSER_PROGID_HTML}"
+    entries = [
+        (url, "", f"{BROWSER_NAME} URL"), (url, "URL Protocol", ""), (url + r"\DefaultIcon", "", icon_ref),
+        (url + r"\shell\open\command", "", open_with),
+        (url + r"\Application", "ApplicationName", BROWSER_NAME), (url + r"\Application", "ApplicationIcon", icon_ref),
+        (url + r"\Application", "AppUserModelId", APP_USER_MODEL_ID),
+        (page, "", f"{BROWSER_NAME} Document"), (page + r"\DefaultIcon", "", icon_ref),
+        (page + r"\shell\open\command", "", open_with),
+        (client, "", BROWSER_NAME), (client + r"\DefaultIcon", "", icon_ref),
+        (client + r"\shell\open\command", "", command),
+        (caps, "ApplicationName", BROWSER_NAME), (caps, "ApplicationIcon", icon_ref),
+        (caps, "ApplicationDescription", "A private, Safari-style web browser."),
+        (caps + r"\StartMenu", "StartMenuInternet", BROWSER_REG_NAME),
+        (caps + r"\URLAssociations", "http", BROWSER_PROGID_URL),
+        (caps + r"\URLAssociations", "https", BROWSER_PROGID_URL),
+    ]
+    entries += [(caps + r"\FileAssociations", ext, BROWSER_PROGID_HTML) for ext in BROWSER_FILE_TYPES]
+    entries.append((r"Software\RegisteredApplications", BROWSER_REG_NAME, caps))
+    return entries
+
+
+def write_user_registry(entries: list[tuple[str, str, str]]) -> None:
+    import winreg
+    for key, name, value in entries:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_WRITE) as handle:
+            winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, value)
+
+
+def default_browser_progid() -> str | None:
+    """The ProgID Windows opens https links with for this user (None if unknown)."""
+    if not IS_WINDOWS:
+        return None
+    import winreg
+    base = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https"
+    for sub in ("UserChoiceLatest", "UserChoice"):           # Windows 11 (2024+) uses the first
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base + "\\" + sub) as key:
+                return str(winreg.QueryValueEx(key, "ProgId")[0])
+        except OSError:
+            continue
+    return None
+
+
+def is_default_browser() -> bool | None:
+    """True / False, or None where there's no such thing (not Windows)."""
+    if not IS_WINDOWS:
+        return None
+    return default_browser_progid() == BROWSER_PROGID_URL
+
+
+def start_menu_shortcut_path() -> str:
+    return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Microsoft", "Windows",
+                        "Start Menu", "Programs", f"{BROWSER_NAME}.lnk")
+
+
+if IS_WINDOWS:
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort), ("Data3", ctypes.c_ushort),
+                    ("Data4", ctypes.c_ubyte * 8)]
+
+        @classmethod
+        def parse(cls, text: str) -> "_GUID":
+            return cls.from_buffer_copy(uuid.UUID(text).bytes_le)
+
+    class _PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", _GUID), ("pid", ctypes.c_ulong)]
+
+    class _PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                    ("r3", ctypes.c_ushort), ("ptr", ctypes.c_void_p), ("pad", ctypes.c_void_p)]
+
+
+def _com_call(obj, index: int, *argtypes):
+    """Method `index` of a COM interface pointer, callable with the remaining arguments."""
+    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    function = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtable[index])
+
+    def call(*args):
+        result = function(obj, *args)
+        if result < 0:
+            raise OSError(f"COM error 0x{result & 0xFFFFFFFF:08X}")
+        return result
+    return call
+
+
+def _shortcut_via_com(link: str, target: str, arguments: str, folder: str, icon: str, description: str) -> None:
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitialize(None)                      # Qt has done this already; harmless again
+    shell_link = ctypes.c_void_p()
+    hr = ole32.CoCreateInstance(ctypes.byref(_GUID.parse("00021401-0000-0000-C000-000000000046")), None, 1,
+                                ctypes.byref(_GUID.parse("000214F9-0000-0000-C000-000000000046")),
+                                ctypes.byref(shell_link))
+    if hr != 0 or not shell_link:
+        raise OSError(f"ShellLink unavailable (0x{hr & 0xFFFFFFFF:08X})")
+    query = lambda obj, iid, out: _com_call(obj, 0, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+        ctypes.byref(_GUID.parse(iid)), ctypes.byref(out))
+    release = lambda obj: _com_call(obj, 2)()
+    try:
+        _com_call(shell_link, 20, ctypes.c_wchar_p)(target)                   # SetPath
+        _com_call(shell_link, 11, ctypes.c_wchar_p)(arguments)                # SetArguments
+        _com_call(shell_link, 9, ctypes.c_wchar_p)(folder)                    # SetWorkingDirectory
+        _com_call(shell_link, 17, ctypes.c_wchar_p, ctypes.c_int)(icon, 0)    # SetIconLocation
+        _com_call(shell_link, 7, ctypes.c_wchar_p)(description)               # SetDescription
+        store = ctypes.c_void_p()
+        query(shell_link, "886d8eeb-8cf2-4446-8d02-cdba1dbdcf99", store)       # IPropertyStore
+        try:
+            key = _PROPERTYKEY(_GUID.parse("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5)    # AppUserModel.ID
+            text = ctypes.create_unicode_buffer(APP_USER_MODEL_ID)
+            value = _PROPVARIANT(31, 0, 0, 0, ctypes.cast(text, ctypes.c_void_p), None)   # VT_LPWSTR
+            _com_call(store, 6, ctypes.POINTER(_PROPERTYKEY), ctypes.POINTER(_PROPVARIANT))(
+                ctypes.byref(key), ctypes.byref(value))
+            _com_call(store, 7)()                                             # Commit
+        finally:
+            release(store)
+        persist = ctypes.c_void_p()
+        query(shell_link, "0000010b-0000-0000-C000-000000000046", persist)     # IPersistFile
+        try:
+            _com_call(persist, 6, ctypes.c_wchar_p, ctypes.c_int)(link, 1)    # Save
+        finally:
+            release(persist)
+    finally:
+        release(shell_link)
+
+
+def create_windows_shortcut(link: str, target: str, arguments: str, folder: str, icon: str,
+                            description: str) -> bool:
+    """A .lnk shortcut carrying Huginn's taskbar identity (so a pinned Huginn and the
+    running one share one taskbar button). Falls back to Windows Script Host."""
+    if not IS_WINDOWS:
+        return False
+    os.makedirs(os.path.dirname(link), exist_ok=True)
+    try:
+        _shortcut_via_com(link, target, arguments, folder, icon, description)
+        return os.path.isfile(link)
+    except Exception:
+        pass
+    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:HUGINN_LNK);"
+              "$s.TargetPath=$env:HUGINN_TARGET;$s.Arguments=$env:HUGINN_ARGS;$s.WorkingDirectory=$env:HUGINN_DIR;"
+              "$s.IconLocation=$env:HUGINN_ICON;$s.Description=$env:HUGINN_DESC;$s.Save()")
+    env = dict(os.environ, HUGINN_LNK=link, HUGINN_TARGET=target, HUGINN_ARGS=arguments, HUGINN_DIR=folder,
+               HUGINN_ICON=icon + ",0", HUGINN_DESC=description)
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env,
+                       timeout=30, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return os.path.isfile(link)
+
+
+def register_with_windows() -> bool:
+    """Registers Huginn as a browser for this user and adds its Start menu entry."""
+    if not IS_WINDOWS:
+        return False
+    program, arguments = browser_launch_command()
+    icon = app_icon_file()
+    write_user_registry(default_browser_registry(program, arguments, icon))
+    create_windows_shortcut(start_menu_shortcut_path(), program, arguments, os.path.dirname(os.path.abspath(__file__)),
+                            icon, f"{BROWSER_NAME} - a private web browser")
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)      # SHCNE_ASSOCCHANGED
+    except Exception:
+        pass
+    return True
+
+
+def install_shortcuts(links: list[str]) -> int:
+    """For the installer (installer/install.ps1), once Python is set up: Huginn's desktop and
+    Start menu shortcuts, carrying its taskbar identity. Returns the process exit code."""
+    program, arguments = browser_launch_command()
+    ok = bool(links)
+    for link in links:
+        if not link.lower().endswith(".lnk"):
+            ok = False
+            continue
+        ok = create_windows_shortcut(link, program, arguments, APP_DIR, app_icon_file(),
+                                     f"{BROWSER_NAME} - a private web browser") and ok
+    return 0 if ok else 1
+
+
+def open_default_apps_settings() -> None:
+    """Windows' Default apps page, opened at Huginn where Windows supports that."""
+    if not QDesktopServices.openUrl(QUrl(f"ms-settings:defaultapps?registeredAppUser={BROWSER_REG_NAME}")):
+        QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))
+
+
+# --------------------------------------------------------------------------------------
+# Sharing with friends, and updates. "Share Huginn…" (page menu) makes a zip a friend
+# unpacks and installs with "Install Huginn.bat". "Publish Update…" makes an update (a zip plus
+# huginn-update.json) for you to upload to the address you chose; friends' copies check
+# it once a day. Every update is signed with a key only your PC has (Ed25519), and a
+# friend's copy installs only updates with that signature - a hacked upload site can't
+# slip anything else in. Settings, bookmarks, passwords and history are never included.
+# --------------------------------------------------------------------------------------
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+VERSION_FILE = "version.txt"
+UPDATE_CONFIG_FILE = "update.json"
+UPDATE_MANIFEST = "huginn-update.json"
+RELEASE_KEY_FILE = "release-key.pem"
+UPDATE_CHECK_EVERY = 24 * 3600
+# What a package / update carries (paths relative to the browser's folder).
+PACKAGE_FILES = ("Install Huginn.bat", "installer/install.ps1",
+                 "safari_browser.py", "run.bat", "setup.bat", "README.txt", "LICENSE.md", "Huginn.ico", "readability.js",
+                 "dictionaries/en-US.bdic", "build-engine.bat", "restore-engine.bat", "engine/build_engine.py",
+                 "engine/codec_check.py", "engine/codec_test.mp4", "engine/gnu_tools.zip",
+                 "adblock_test.py", "security_test.py", VERSION_FILE)
+
+
+def app_version(folder: str = APP_DIR) -> str:
+    try:
+        with open(os.path.join(folder, VERSION_FILE), encoding="utf-8") as f:
+            text = f.read().strip()
+        return text if re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,2}\.\d{1,3}", text) else "0"
+    except OSError:
+        return "0"
+
+
+def version_key(version: str) -> tuple:
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return (0,)
+
+
+def next_version(current: str, today: time.struct_time | None = None) -> str:
+    today = today or time.localtime()
+    base = f"{today.tm_year}.{today.tm_mon}.{today.tm_mday}"
+    if current.startswith(base + "."):
+        return f"{base}.{version_key(current)[-1] + 1}"
+    return f"{base}.1"
+
+
+def load_update_config(folder: str = APP_DIR) -> dict | None:
+    """A friend's copy: {'url': manifest address, 'key': the publisher's public key}."""
+    try:
+        with open(os.path.join(folder, UPDATE_CONFIG_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and str(data.get("url", "")).startswith("https://") and data.get("key"):
+        return {"url": str(data["url"]), "key": str(data["key"])}
+    return None
+
+
+def _ed25519():
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives import serialization
+    return ed25519, serialization
+
+
+def release_key(data_dir: str, create: bool = True):
+    """This PC's signing key (made the first time you share Huginn), or None."""
+    ed25519, serialization = _ed25519()
+    path = os.path.join(data_dir, RELEASE_KEY_FILE)
+    try:
+        with open(path, "rb") as f:
+            return serialization.load_pem_private_key(f.read(), password=None)
+    except (OSError, ValueError):
+        if not create:
+            return None
+    key = ed25519.Ed25519PrivateKey.generate()
+    os.makedirs(data_dir, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                  serialization.NoEncryption()))
+    return key
+
+
+def public_key_text(key) -> str:
+    _ed25519_mod, serialization = _ed25519()
+    raw = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _signed_text(version: str, file: str, sha256: str) -> bytes:
+    return f"huginn-update\n{version}\n{file}\n{sha256}".encode("utf-8")
+
+
+def verify_manifest(manifest: dict, public_key: str) -> bool:
+    try:
+        ed25519, _serialization = _ed25519()
+        key = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key))
+        key.verify(base64.b64decode(manifest["signature"]),
+                   _signed_text(str(manifest["version"]), str(manifest["file"]), str(manifest["sha256"])))
+        return True
+    except Exception:
+        return False
+
+
+def _write_zip(target: str, folder: str, version: str, extra: dict[str, bytes]) -> list[str]:
+    """Zips PACKAGE_FILES (those present) under a 'Huginn' folder; returns what went in."""
+    import zipfile
+    added = []
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+        for rel in PACKAGE_FILES:
+            if rel == VERSION_FILE:
+                z.writestr("Huginn/" + VERSION_FILE, version + "\n")
+                added.append(rel)
+                continue
+            path = os.path.join(folder, *rel.split("/"))
+            if os.path.isfile(path):
+                z.write(path, "Huginn/" + rel)
+                added.append(rel)
+        for rel, data in extra.items():
+            z.writestr("Huginn/" + rel, data)
+            added.append(rel)
+    return added
+
+
+def create_friend_package(target: str, data_dir: str, update_url: str, folder: str = APP_DIR) -> str:
+    """The zip to give a friend. Returns the version it carries."""
+    version = next_version(app_version(folder))
+    extra = {}
+    if update_url:
+        key = release_key(data_dir)
+        extra[UPDATE_CONFIG_FILE] = json.dumps({"url": update_url, "key": public_key_text(key)}, indent=2).encode()
+    _write_zip(target, folder, version, extra)
+    with open(os.path.join(folder, VERSION_FILE), "w", encoding="utf-8") as f:
+        f.write(version + "\n")
+    return version
+
+
+def publish_update(out_dir: str, data_dir: str, notes: str = "", folder: str = APP_DIR) -> tuple[str, list[str]]:
+    """Writes huginn-<version>.zip and huginn-update.json (signed) into out_dir."""
+    key = release_key(data_dir)
+    version = next_version(app_version(folder))
+    os.makedirs(out_dir, exist_ok=True)
+    name = f"huginn-{version}.zip"
+    zip_path = os.path.join(out_dir, name)
+    _write_zip(zip_path, folder, version, {})
+    with open(zip_path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    manifest = {"version": version, "file": name, "sha256": digest, "notes": notes[:500],
+                "signature": base64.b64encode(key.sign(_signed_text(version, name, digest))).decode("ascii")}
+    with open(os.path.join(out_dir, UPDATE_MANIFEST), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    with open(os.path.join(folder, VERSION_FILE), "w", encoding="utf-8") as f:
+        f.write(version + "\n")
+    return version, [name, UPDATE_MANIFEST]
+
+
+def install_update(zip_bytes: bytes, manifest: dict, public_key: str, folder: str = APP_DIR) -> list[str]:
+    """Checks the signature and checksum, then puts the update's files in place (only
+    the known files; never anything outside the folder). Returns what was replaced."""
+    import zipfile
+    if not verify_manifest(manifest, public_key):
+        raise ValueError("The update isn't signed by the person who shared Huginn with you.")
+    if hashlib.sha256(zip_bytes).hexdigest() != str(manifest.get("sha256", "")).lower():
+        raise ValueError("The update was damaged on the way.")
+    allowed = set(PACKAGE_FILES)
+    written = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        names = {n[len("Huginn/"):]: n for n in z.namelist() if n.startswith("Huginn/")}
+        if "safari_browser.py" not in names:
+            raise ValueError("The update is incomplete.")
+        staged = []
+        for rel, member in names.items():
+            if rel not in allowed or rel == UPDATE_CONFIG_FILE:
+                continue
+            target = os.path.join(folder, *rel.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            temp = target + ".new"
+            with open(temp, "wb") as f:
+                f.write(z.read(member))
+            staged.append((temp, target))
+        for temp, target in staged:
+            os.replace(temp, target)
+            written.append(os.path.relpath(target, folder).replace(os.sep, "/"))
+    return written
+
+
+class Updater(QObject):
+    """A friend's copy: checks the publisher's address once a day; downloads, verifies and
+    installs a newer version, then offers to restart."""
+
+    ready = Signal(str, str)                      # version, notes
+    failed = Signal(str)
+
+    def __init__(self, settings: QSettings, config: dict, user_agent: str, parent: QObject | None = None,
+                 folder: str = APP_DIR) -> None:
+        super().__init__(parent)
+        self.settings, self.config, self.folder = settings, config, folder
+        self.user_agent = user_agent
+        self.net = QNetworkAccessManager(self)
+        self.busy = False
+        self.installed: str | None = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(3 * 3600 * 1000)
+        self._timer.timeout.connect(self.check_if_due)
+        self._timer.start()
+
+    def check_if_due(self) -> None:
+        last = self.settings.value("updateCheckedAt", 0.0, type=float)
+        if time.time() - last >= UPDATE_CHECK_EVERY:
+            self.check()
+
+    def _get(self, url: str, done) -> None:
+        request = QNetworkRequest(QUrl(url))
+        request.setRawHeader(b"User-Agent", self.user_agent.encode("utf-8", "ignore"))
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                             QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
+        reply = self.net.get(request)
+        reply.finished.connect(partial(self._finished, reply, done))
+
+    def _finished(self, reply: QNetworkReply, done) -> None:
+        ok = reply.error() == QNetworkReply.NetworkError.NoError
+        data = bytes(reply.readAll().data()) if ok else b""
+        reply.deleteLater()
+        done(data if ok else None)
+
+    def check(self) -> None:
+        if self.busy or self.installed:
+            return
+        self.busy = True
+        self.settings.setValue("updateCheckedAt", time.time())
+        self._get(self.config["url"], self._got_manifest)
+
+    def _got_manifest(self, data: bytes | None) -> None:
+        try:
+            manifest = json.loads(data.decode("utf-8")) if data else None
+        except ValueError:
+            manifest = None
+        if (not isinstance(manifest, dict) or not all(k in manifest for k in ("version", "file", "sha256", "signature"))
+                or version_key(str(manifest["version"])) <= version_key(app_version(self.folder))):
+            self.busy = False
+            return
+        if not verify_manifest(manifest, self.config["key"]):
+            self.busy = False
+            self.failed.emit("An update was found, but it isn't signed by the person who shared Huginn with you, "
+                             "so it wasn't installed.")
+            return
+        file = os.path.basename(str(manifest["file"]))
+        self._get(QUrl(self.config["url"]).resolved(QUrl(file)).toString(), partial(self._got_zip, manifest))
+
+    def _got_zip(self, manifest: dict, data: bytes | None) -> None:
+        self.busy = False
+        if not data:
+            return
+        try:
+            install_update(data, manifest, self.config["key"], self.folder)
+        except (ValueError, OSError, Exception) as e:
+            self.failed.emit(f"The update couldn't be installed ({e}).")
+            return
+        self.installed = str(manifest["version"])
+        self.ready.emit(self.installed, str(manifest.get("notes", ""))[:300])
+
+
+def restart_browser(after_pid: int, extra_args: list[str] | None = None) -> bool:
+    """Starts Huginn again once this process (after_pid) has closed."""
+    program, arguments = browser_launch_command()
+    args = [program, os.path.abspath(__file__), "--after", str(after_pid)] + (extra_args or [])
+    try:
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if IS_WINDOWS else 0
+        subprocess.Popen(args, close_fds=True, creationflags=flags, cwd=APP_DIR)
+        return True
+    except OSError:
+        return False
+
+
+def wait_for_process(pid: int, timeout: float = 20.0) -> None:
+    """Waits (a while at most) for an earlier Huginn to finish closing."""
+    if pid <= 0 or pid == os.getpid():
+        return
+    if IS_WINDOWS:
+        try:
+            SYNCHRONIZE = 0x00100000
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            raw = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if raw:
+                handle = ctypes.c_void_p(raw)
+                kernel32.WaitForSingleObject(handle, int(timeout * 1000))
+                kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+        return
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+
+
+# --------------------------------------------------------------------------------------
+# Cross-site tracking prevention
+# --------------------------------------------------------------------------------------
+def match_tracker(host: str) -> str | None:
+    parts = host.lower().strip(".").split(".")
+    for i in range(len(parts) - 1):
+        candidate = ".".join(parts[i:])
+        if candidate in TRACKER_DOMAINS:
+            return candidate
+    return None
+
+
+class FaviconCache:
+    """Remembers the favicon of every site visited (as PNG files) so the Start Page can show
+    real icons on its Favorites and Frequently Visited tiles."""
+
+    def __init__(self, directory: str) -> None:
+        self.directory = directory
+        os.makedirs(directory, exist_ok=True)
+        self._saved: dict[str, int] = {}               # host -> QIcon.cacheKey() last written
+
+    def _path(self, host: str, kind: str = "") -> str:
+        # Only [a-z0-9.-] survive, so a crafted host can't escape the cache directory.
+        name = re.sub(r"[^a-z0-9.\-]", "_", host.lower()) + (f".{kind}" if kind else "") + ".png"
+        return os.path.join(self.directory, name)
+
+    def store(self, host: str, icon: QIcon) -> None:
+        if not host or icon.isNull() or self._saved.get(host) == icon.cacheKey():
+            return
+        pixmap = icon.pixmap(QSize(64, 64))
+        if not pixmap.isNull() and pixmap.save(self._path(host), "PNG"):
+            self._saved[host] = icon.cacheKey()
+
+    def store_touch(self, host: str, image: QImage) -> bool:
+        return bool(host) and image.save(self._path(host, "touch"), "PNG")
+
+    def clear(self) -> None:
+        for name in os.listdir(self.directory):
+            if name.endswith(".png"):
+                try:
+                    os.remove(os.path.join(self.directory, name))
+                except OSError:
+                    pass
+        self._saved.clear()
+
+    def remove(self, host: str) -> None:
+        for kind in ("", "touch"):
+            try:
+                os.remove(self._path(host, kind))
+            except OSError:
+                pass
+        self._saved.pop(host, None)
+
+    def has(self, host: str, kind: str = "") -> bool:
+        return bool(host) and os.path.exists(self._path(host, kind))
+
+    def icon(self, host: str) -> QIcon:
+        return QIcon(self._path(host)) if self.has(host) else QIcon()
+
+    def read(self, host: str, kind: str = "") -> bytes | None:
+        try:
+            with open(self._path(host, kind), "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+
+class TouchIconFetcher(QObject):
+    """Downloads a site's apple-touch-icon once per session, into the FaviconCache, so the
+    Start Page can show big icons without being allowed to load remote content itself."""
+
+    fetched = Signal(str)                      # host
+    MAX_BYTES = 1_000_000
+
+    def __init__(self, favicons: FaviconCache, user_agent: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.favicons = favicons
+        self.user_agent = user_agent
+        self.network = QNetworkAccessManager(self)
+        self._tried: set[str] = set()
+
+    def ensure(self, url: QUrl) -> None:
+        host = bare_host(url)
+        if (url.scheme() not in ("http", "https") or not host or host in self._tried
+                or self.favicons.has(host, "touch")):
+            return
+        self._tried.add(host)
+        request = QNetworkRequest(QUrl(f"{url.scheme()}://{url.host()}/apple-touch-icon.png"))
+        request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, self.user_agent)
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                             QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
+        request.setTransferTimeout(8000)
+        reply = self.network.get(request)
+        reply.downloadProgress.connect(
+            lambda received, _total, r=reply: r.abort() if received > self.MAX_BYTES else None)
+        reply.finished.connect(partial(self._finished, reply, host))
+
+    def _finished(self, reply: QNetworkReply, host: str) -> None:
+        try:
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                image = QImage()
+                if (image.loadFromData(reply.readAll()) and image.width() >= 57
+                        and self.favicons.store_touch(host, image)):
+                    self.fetched.emit(host)
+        finally:
+            reply.deleteLater()
+
+
+_MAIN_FRAME = QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMainFrame
+_REDIRECT = QWebEngineUrlRequestInfo.NavigationType.NavigationTypeRedirect
+
+
+class PrivacyGuard(QWebEngineUrlRequestInterceptor):
+    """Sees every request a profile makes (Qt 6 calls it on the UI thread):
+      * removes click-tracking parameters from addresses before they load
+      * upgrades plain-http page loads to https (the window falls back if that fails)
+      * adds the Global Privacy Control header
+      * blocks third-party requests to known trackers, logging them for the Privacy Report
+    It also answers the cookie filter (no third-party cookies) and remembers this session's
+    certificate exceptions and http-only sites."""
+
+    def __init__(self, store: BrowserStore, parent: QObject | None = None, *, record: bool = True) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.record = record                    # False in Private Browsing: nothing logged
+        self.enabled = True                     # cross-site tracking prevention
+        self.strip_links = True
+        self.gpc = True
+        self.https_mode = "upgrade"
+        self.links_cleaned = 0
+        self.http_allowed: set[str] = set()      # hosts that turned out to be http-only
+        self.upgraded: dict[str, QUrl] = {}      # pending https:// url -> the http:// url it replaced
+        self.cert_exceptions: set[tuple[str, int]] = set()     # (host, error type) accepted
+        self.insecure_hosts: set[str] = set()    # hosts shown as "Not Secure" because of that
+        self.adblock: AdBlocker | None = None     # shared ad-blocking engine
+        self.block_ads = True
+        self.ad_allowlist: set[str] = set()      # sites where ad blocking is off
+        self.ads_blocked: Counter[str] = Counter()  # requests blocked per site, this session
+        self.trackers_by_site: Counter[str] = Counter()
+        self.third_parties: dict[str, set[str]] = {}   # site -> other companies it contacted
+        self._page_flags: dict[tuple, int] = {}
+
+    # -- requests ---------------------------------------------------------------------------
+    def interceptRequest(self, info) -> None:
+        url = info.requestUrl()
+        if self.gpc:
+            info.setHttpHeader(b"Sec-GPC", b"1")
+        if info.resourceType() == _MAIN_FRAME and bytes(info.requestMethod()) == b"GET":
+            if self.strip_links:
+                clean = strip_tracking_params(url)
+                if clean is not None:
+                    self.links_cleaned += 1
+                    info.redirect(clean)
+                    return
+            if self._upgrade(info, url):
+                return
+        self._note_third_party(info, url)
+        if self.enabled and self._block_tracker(info, url):
+            return
+        if self.block_ads and self.adblock is not None:
+            if self._block_ad(info, url) and self.record:
+                self.store.count_stat("ads")
+
+    def _note_third_party(self, info, url: QUrl) -> None:
+        site_host = info.firstPartyUrl().host().lower()
+        host = url.host().lower()
+        if not site_host or not host:
+            return
+        site, other = registrable_domain(site_host), registrable_domain(host)
+        if other != site:
+            parties = self.third_parties.get(site)
+            if parties is None:
+                if len(self.third_parties) > 300:
+                    self.third_parties.pop(next(iter(self.third_parties)))
+                parties = self.third_parties[site] = set()
+            if len(parties) < 300:
+                parties.add(other)
+
+    def _upgrade(self, info, url: QUrl) -> bool:
+        host = url.host().lower()
+        if self.https_mode == "off" or host in self.http_allowed or not should_upgrade_to_https(url):
+            return False
+        if info.navigationType() == _REDIRECT and any(u.host().lower() == host for u in self.upgraded.values()):
+            self.http_allowed.add(host)          # the https site itself sent us back to http
+            return False
+        secure = QUrl(url)
+        secure.setScheme("https")
+        secure.setPort(-1)
+        if len(self.upgraded) > 200:
+            self.upgraded.pop(next(iter(self.upgraded)))
+        self.upgraded[self._key(secure)] = QUrl(url)
+        info.redirect(secure)
+        return True
+
+    @staticmethod
+    def _key(url: QUrl) -> str:
+        """Comparable form: WebEngine reports 'https://a.com' back as 'https://a.com/'."""
+        u = QUrl(url)
+        u.setFragment(None)                       # (PySide6's adjusted() rejects these flags)
+        if not u.path():
+            u.setPath("/")
+        return u.toString()
+
+    def was_upgraded(self, url: QUrl) -> bool:
+        return self._key(url) in self.upgraded
+
+    def take_upgrade(self, url: QUrl) -> QUrl | None:
+        """The http:// address an https:// load replaced (forgotten once it finishes)."""
+        return self.upgraded.pop(self._key(url), None)
+
+    def upgrade_key_for(self, url: QUrl) -> str | None:
+        """The pending upgrade a load belongs to, given either its http:// or https:// address."""
+        key = self._key(url)
+        if key in self.upgraded:
+            return key
+        for secure, original in self.upgraded.items():
+            if self._key(original) == key:
+                return secure
+        return None
+
+    def _block_tracker(self, info, url: QUrl) -> bool:
+        host = url.host()
+        tracker = match_tracker(host) if host else None
+        if tracker is None:
+            return False
+        site_host = info.firstPartyUrl().host()
+        site = registrable_domain(site_host) if site_host else ""
+        if site and site == registrable_domain(host):
+            return False                            # first-party: e.g. on the tracker's own site
+        info.block(True)
+        self.trackers_by_site[site] += 1
+        if self.record:
+            self.store.record_tracker(tracker, site)
+        return True
+
+    def ads_allowed_on(self, host: str) -> bool:
+        return not self.block_ads or registrable_domain(host.lower()) in self.ad_allowlist
+
+    def _block_ad(self, info, url: QUrl) -> bool:
+        if url.scheme() not in ("http", "https", "ws", "wss"):
+            return False
+        rtype = ad_request_type(info.resourceType())
+        if rtype == AD_TYPES["document"]:
+            return False                            # the page itself is never blocked
+        host = url.host().lower()
+        site_url = info.firstPartyUrl()
+        site = site_url.host().lower() or host
+        if registrable_domain(site) in self.ad_allowlist:
+            return False
+        engine = self.adblock.engine
+        key = (engine.serial, site_url.toString())
+        flags = self._page_flags.get(key)
+        if flags is None:                           # "@@||site^$document": hands off this page
+            if len(self._page_flags) > 512:
+                self._page_flags.clear()
+            flags = self._page_flags[key] = engine.page_flags(site_url.toString(), site)
+        if flags & PAGE_DOCUMENT:
+            return False
+        third_party = registrable_domain(host) != registrable_domain(site)
+        text = bytes(url.toEncoded()).decode("ascii", "replace")
+        if engine.match(text, host, site, rtype, third_party) is None:
+            return False
+        info.block(True)
+        self.ads_blocked[registrable_domain(site)] += 1
+        return True
+
+    # -- cookies ----------------------------------------------------------------------------
+    def allow_cookie(self, request) -> bool:
+        """Cookie filter (runs on WebEngine's IO thread: reads one flag only)."""
+        return not (self.enabled and request.thirdParty)
+
+    # -- per-session decisions -------------------------------------------------------------
+    def accept_certificate(self, host: str, error_type: int) -> None:
+        self.cert_exceptions.add((host.lower(), error_type))
+        self.insecure_hosts.add(host.lower())
+
+    def allow_http(self, host: str) -> None:
+        self.http_allowed.add(host.lower())
+
+
+TrackerBlocker = PrivacyGuard                      # earlier name, kept for compatibility
+
+
+class CookieKeeper(QObject):
+    """Mirrors a profile's cookie jar so cookies can be deleted per site (Clear History
+    for 'the last hour' removes only the cookies of sites visited in that hour)."""
+
+    def __init__(self, store, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.cookies: dict[tuple, object] = {}
+        store.cookieAdded.connect(self._added)
+        store.cookieRemoved.connect(self._removed)
+        store.loadAllCookies()
+
+    @staticmethod
+    def _key(cookie) -> tuple:
+        return bytes(cookie.name()), cookie.domain(), cookie.path()
+
+    def _added(self, cookie) -> None:
+        self.cookies[self._key(cookie)] = cookie
+
+    def _removed(self, cookie) -> None:
+        self.cookies.pop(self._key(cookie), None)
+
+    def delete_for_sites(self, sites: set[str]) -> int:
+        doomed = [c for c in self.cookies.values() if registrable_domain(c.domain().lstrip(".")) in sites]
+        for cookie in doomed:
+            self.store.deleteCookie(cookie)
+            self.cookies.pop(self._key(cookie), None)
+        return len(doomed)
+
+    def delete_all(self) -> None:
+        self.store.deleteAllCookies()
+        self.cookies.clear()
+
+    def delete_except(self, keep: set[str]) -> int:
+        doomed = [c for c in self.cookies.values() if registrable_domain(c.domain().lstrip(".").lower()) not in keep]
+        for cookie in doomed:
+            self.store.deleteCookie(cookie)
+            self.cookies.pop(self._key(cookie), None)
+        return len(doomed)
+
+
+def load_privacy_prefs(settings: QSettings) -> dict:
+    """Privacy & Security preferences, validated (the registry may hold anything)."""
+    prefs = dict(PRIVACY_DEFAULTS)
+    for key, default in PRIVACY_DEFAULTS.items():
+        raw = settings.value(key, default)
+        if isinstance(default, bool):
+            prefs[key] = raw if isinstance(raw, bool) else str(raw).lower() in ("true", "1")
+        elif key == "searchCustomUrl":
+            prefs[key] = raw if isinstance(raw, str) and custom_search_template(raw) else ""
+        else:
+            choices = {"httpsMode": HTTPS_MODES, "secureDns": SECURE_DNS_PROVIDERS,
+                       "searchEngine": SEARCH_ENGINES}[key]
+            prefs[key] = raw if raw in choices else default
+    if prefs["searchEngine"] == "custom" and not prefs["searchCustomUrl"]:
+        prefs["searchEngine"] = "google"
+    return prefs
+
+
+def custom_search_template(text: str) -> str:
+    """'https://search.example/?q=%s' -> 'https://search.example/?q={}', or '' if it can't be used."""
+    text = str(text or "").strip()
+    if "%s" not in text:
+        return ""
+    url = QUrl(text.replace("%s", "query"))
+    if url.scheme() not in ("https", "http") or not url.host() or not url.isValid():
+        return ""
+    return text.replace("{", "%7B").replace("}", "%7D").replace("%s", "{}", 1)
+
+
+def set_search_engine(key: str, custom: str = "") -> str:
+    """Makes the address field search with this engine (every window)."""
+    global SEARCH_URL
+    template = custom_search_template(custom) if key == "custom" else SEARCH_ENGINES.get(key, ("", ""))[1]
+    SEARCH_URL = template or SEARCH_ENGINES["google"][1]
+    return SEARCH_URL
+
+
+def search_engine_label(prefs: dict) -> str:
+    if prefs.get("searchEngine") == "custom":
+        return QUrl(prefs.get("searchCustomUrl", "").replace("%s", "q")).host() or "Custom"
+    return SEARCH_ENGINES.get(prefs.get("searchEngine"), SEARCH_ENGINES["google"])[0]
+
+
+def apply_secure_dns(mode: str) -> bool:
+    """Encrypted DNS for every profile (falls back to system DNS if the provider can't be
+    reached, e.g. behind a captive portal). Returns whether WebEngine accepted it."""
+    if QWebEngineGlobalSettings is None:
+        return False
+    dns = QWebEngineGlobalSettings.DnsMode()
+    template = SECURE_DNS_PROVIDERS.get(mode, ("", ""))[1]
+    if template:
+        dns.secureMode = QWebEngineGlobalSettings.SecureDnsMode.SecureWithFallback
+        dns.serverTemplates = [template]
+    else:
+        dns.secureMode = QWebEngineGlobalSettings.SecureDnsMode.SystemOnly
+    try:
+        return bool(QWebEngineGlobalSettings.setDnsMode(dns))
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------------------------
+# Fingerprinting protection (Privacy & Security; on by default). Like Brave's "farbling":
+# what a page reads back from a canvas, WebGL or audio gets a tiny, per-site change no one
+# can see or hear, so the same PC looks different to every site (and every session); the
+# graphics card and core count report common values. Runs before the page's own scripts.
+# --------------------------------------------------------------------------------------
+FINGERPRINT_SCRIPT_NAME = "huginn-fingerprint"
+FINGERPRINT_SCRIPT = r"""(function () {
+  'use strict';
+  var SECRET = %SECRET%;
+  function hash(s) { var h = 0x811c9dc5; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }
+  function rng(seed) { var s = (seed >>> 0) || 1; return function () { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s; }; }
+  var site = location.hostname;
+  try {
+    var anc = location.ancestorOrigins;
+    if (anc && anc.length) site = new URL(anc[anc.length - 1]).hostname;
+  } catch (e) {}
+  var SEED = hash(SECRET + '|' + site);
+  var done = new WeakSet();
+  function farble(data, w, h) {                 // flip the lowest bit of a few seeded bytes
+    var n = data.length;
+    if (!n) return;
+    var r = rng(SEED ^ Math.imul(w | 0, 7919) ^ (h | 0));
+    var count = Math.max(1, Math.min(64, n >> 12));
+    for (var i = 0; i < count; i++) { var k = r() % n; if ((k & 3) === 3) k -= 1; data[k] ^= 1; }
+  }
+  function protect(win) {
+    if (!win || done.has(win)) return;
+    done.add(win);
+    var Fn = win.Function, nativeToString = Fn.prototype.toString, shown = new WeakMap();
+    function looksNative(fn, original) { shown.set(fn, original); return fn; }
+    var toStringPatch = looksNative(function toString() {
+      return nativeToString.call(shown.get(this) || this);
+    }, nativeToString);
+    Object.defineProperty(Fn.prototype, 'toString', { value: toStringPatch, writable: true, configurable: true });
+    function patch(proto, name, make) {
+      if (!proto) return;
+      var d = Object.getOwnPropertyDescriptor(proto, name);
+      if (!d || typeof d.value !== 'function') return;
+      var original = d.value, replaced = make(original);
+      Object.defineProperty(replaced, 'name', { value: original.name });
+      Object.defineProperty(replaced, 'length', { value: original.length });
+      looksNative(replaced, original);
+      Object.defineProperty(proto, name, { value: replaced, writable: d.writable, enumerable: d.enumerable,
+                                           configurable: d.configurable });
+    }
+    function getter(proto, name, value) {
+      if (!proto) return;
+      var d = Object.getOwnPropertyDescriptor(proto, name);
+      if (!d || !d.get) return;
+      var g = looksNative({ get: function () { return value; } }.get, d.get);
+      Object.defineProperty(g, 'name', { value: 'get ' + name });
+      Object.defineProperty(proto, name, { get: g, enumerable: d.enumerable, configurable: d.configurable });
+    }
+    var C2D = win.CanvasRenderingContext2D, rawGetImageData = C2D && C2D.prototype.getImageData;
+    patch(C2D && C2D.prototype, 'getImageData', function (orig) {
+      return function getImageData() {
+        var img = orig.apply(this, arguments);
+        try { farble(img.data, img.width, img.height); } catch (e) {}
+        return img;
+      };
+    });
+    function noisyCopy(canvas) {
+      var w = canvas.width, h = canvas.height;
+      if (!w || !h || w * h > 16777216 || !rawGetImageData) return null;
+      var copy = win.document.createElement('canvas');
+      copy.width = w; copy.height = h;
+      var ctx = copy.getContext('2d');
+      ctx.drawImage(canvas, 0, 0);
+      var img = rawGetImageData.call(ctx, 0, 0, w, h);
+      farble(img.data, w, h);
+      ctx.putImageData(img, 0, 0);
+      return copy;
+    }
+    var Canvas = win.HTMLCanvasElement && win.HTMLCanvasElement.prototype;
+    ['toDataURL', 'toBlob'].forEach(function (name) {
+      patch(Canvas, name, function (orig) {
+        return function () {
+          var copy = null;
+          try { copy = noisyCopy(this); } catch (e) {}
+          return orig.apply(copy || this, arguments);
+        };
+      });
+    });
+    ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(function (kind) {
+      var GL = win[kind] && win[kind].prototype;
+      patch(GL, 'getParameter', function (orig) {
+        return function getParameter(p) {
+          if (p === 0x9245) return 'Google Inc. (Intel)';
+          if (p === 0x9246) return 'ANGLE (Intel, Intel(R) UHD Graphics 620 (0x00005917) Direct3D11 vs_5_0 ps_5_0, D3D11)';
+          return orig.apply(this, arguments);
+        };
+      });
+      patch(GL, 'readPixels', function (orig) {
+        return function readPixels(x, y, w, h, format, type, pixels) {
+          var result = orig.apply(this, arguments);
+          try { if (pixels && pixels.BYTES_PER_ELEMENT === 1 && pixels.length) farble(pixels, w, h); } catch (e) {}
+          return result;
+        };
+      });
+    });
+    var seen = new WeakSet();
+    patch(win.AudioBuffer && win.AudioBuffer.prototype, 'getChannelData', function (orig) {
+      return function getChannelData(channel) {
+        var data = orig.apply(this, arguments);
+        try {
+          if (!seen.has(data)) {
+            seen.add(data);
+            var r = rng(SEED ^ (data.length + (channel | 0)));
+            for (var i = 0; i < data.length; i += 97) data[i] += ((r() % 2001) - 1000) * 1e-9;
+          }
+        } catch (e) {}
+        return data;
+      };
+    });
+    patch(win.AnalyserNode && win.AnalyserNode.prototype, 'getFloatFrequencyData', function (orig) {
+      return function getFloatFrequencyData(array) {
+        var result = orig.apply(this, arguments);
+        try {
+          var r = rng(SEED ^ array.length);
+          for (var i = 0; i < array.length; i += 7) array[i] += ((r() % 2001) - 1000) * 1e-7;
+        } catch (e) {}
+        return result;
+      };
+    });
+    var Nav = win.Navigator && win.Navigator.prototype;
+    getter(Nav, 'hardwareConcurrency', 8);
+    getter(Nav, 'deviceMemory', 8);
+    // A fresh same-origin frame would otherwise hand out untouched originals.
+    var Frame = win.HTMLIFrameElement && win.HTMLIFrameElement.prototype;
+    ['contentWindow', 'contentDocument'].forEach(function (name) {
+      var d = Frame && Object.getOwnPropertyDescriptor(Frame, name);
+      if (!d || !d.get) return;
+      var original = d.get;
+      var g = looksNative({ get: function () {
+        var value = original.call(this);
+        try { protect(name === 'contentWindow' ? value : value && value.defaultView); } catch (e) {}
+        return value;
+      } }.get, original);
+      Object.defineProperty(Frame, name, { get: g, enumerable: d.enumerable, configurable: d.configurable });
+    });
+  }
+  protect(window);
+})();"""
+
+
+def set_fingerprint_script(profile: QWebEngineProfile, on: bool, secret: str) -> None:
+    scripts = profile.scripts()
+    for script in scripts.find(FINGERPRINT_SCRIPT_NAME):
+        scripts.remove(script)
+    if on:
+        script = QWebEngineScript()
+        script.setName(FINGERPRINT_SCRIPT_NAME)
+        script.setSourceCode(FINGERPRINT_SCRIPT.replace("%SECRET%", json.dumps(secret)))
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        script.setRunsOnSubFrames(True)
+        scripts.insert(script)
+
+
+# --------------------------------------------------------------------------------------
+# Cookie banners (Privacy & Security; on by default): clicks "Reject all" on the consent
+# pop-ups of the common consent platforms (and on others whose button plainly says
+# reject / decline / only necessary), never "Accept". Banners that only say "OK" are
+# hidden instead, and the page can scroll again. Runs in its own hidden world, in frames
+# too (some platforms show the banner in a frame).
+# --------------------------------------------------------------------------------------
+CONSENT_SCRIPT_NAME = "huginn-consent"
+CONSENT_WORLD = 2                                       # QWebEngineScript.UserWorld
+CONSENT_SCRIPT = r"""(function () {
+  if (window.__huginnConsent) return;
+  window.__huginnConsent = true;
+  // [banner, reject button(s), first open the settings with (optional)]
+  var RULES = [
+    ['#onetrust-banner-sdk, #onetrust-pc-sdk', '#onetrust-reject-all-handler, .ot-pc-refuse-all-handler', '#onetrust-pc-btn-handler'],
+    ['#CybotCookiebotDialog', '#CybotCookiebotDialogBodyButtonDecline, #CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll'],
+    ['#didomi-notice, #didomi-popup', '#didomi-notice-disagree-button, .didomi-continue-without-agreeing, #didomi-popup .didomi-components-button--secondary'],
+    ['.qc-cmp2-container, #qc-cmp2-ui', '.qc-cmp2-summary-buttons button[mode="secondary"], #qc-cmp2-ui button[mode="secondary"]'],
+    ['.fc-consent-root', '.fc-cta-do-not-consent'],
+    ['#truste-consent-track, #truste-consent-content', '#truste-consent-required'],
+    ['.cky-consent-container', '.cky-btn-reject'],
+    ['.cmplz-cookiebanner', '.cmplz-btn.cmplz-deny, .cmplz-deny'],
+    ['.osano-cm-dialog', '.osano-cm-denyAll, .osano-cm-deny'],
+    ['.klaro .cookie-notice, .klaro .cookie-modal', '.cm-btn-decline, .cn-decline'],
+    ['#iubenda-cs-banner', '.iubenda-cs-reject-btn'],
+    ['[data-tid="banner"], #termly-code-snippet-support', '[data-tid="banner-decline"]'],
+    ['#axeptio_overlay', '#axeptio_btn_dismiss'],
+    ['#cmpbox', '.cmpboxbtnno'],
+    ['#BorlabsCookieBox', 'a[data-cookie-refuse], ._brlbs-refuse-btn a'],
+    ['#lanyard_root, #ketch-banner', '#ketch-banner-button-secondary'],
+    ['#shopify-pc__banner', '#shopify-pc__banner__btn-decline'],
+    ['#ccc', '#ccc-reject-settings, #ccc-notify-reject'],
+    ['#cookiescript_injected', '#cookiescript_reject'],
+    ['.cc-window, .cc-banner', '.cc-deny'],
+    ['#moove_gdpr_cookie_info_bar', '.moove-gdpr-infobar-reject-btn'],
+    ['#cookie-law-info-bar', '#cookie_action_close_header_reject, .cli_action_button[data-cli_action="reject"]'],
+    ['.sp_choice_type_13', '.sp_choice_type_13'],
+    ['form[action*="consent.youtube.com"], form[action*="consent.google."]', 'form[action*="consent"] button[aria-label^="Reject"]']
+  ];
+  var REJECT = /^(reject|reject all|reject all cookies|reject cookies|reject optional cookies|reject non-essential( cookies)?|decline|decline all|decline cookies|decline optional cookies|deny|deny all|refuse|refuse all|necessary only|only necessary|only necessary cookies|strictly necessary only|use necessary cookies only|necessary cookies only|essential cookies only|only essential cookies|accept only essential( cookies)?|accept only necessary( cookies)?|allow necessary only|allow only necessary( cookies)?|continue without accepting|do not accept|i do not accept|no,? thanks|alle ablehnen|ablehnen|nur notwendige|nur essenzielle cookies|tout refuser|refuser|continuer sans accepter|rechazar|rechazar todo|rechazar todas|rifiuta|rifiuta tutto|alles weigeren|weigeren|odrzuć|recusar|rejeitar)$/i;
+  var BANNER = /cookie|consent|gdpr|ccpa|privacy-?banner|cmp/i;
+  var HIDE = ['#onetrust-consent-sdk', '#CybotCookiebotDialog', '#didomi-host', '.qc-cmp2-container', '.fc-consent-root',
+              '.cky-consent-container', '.cmplz-cookiebanner', '.osano-cm-window', '#iubenda-cs-banner', '#cmpbox',
+              '#cmpbox2', '#BorlabsCookieBox', '#cookiescript_injected', '.cc-window', '#cookie-law-info-bar',
+              '#moove_gdpr_cookie_info_bar', '#truste-consent-track', '#usercentrics-root', '#axeptio_overlay'];
+  var LOCKS = ['ot-overflow-hidden', 'didomi-popup-open', 'qc-cmp-ui-showing', 'cmplz-hidden', 'cky-modal-open',
+               'cookiebanner-open', 'modal-open', 'no-scroll', 'noscroll', 'overflow-hidden'];
+  var start = Date.now(), finished = false, clicks = 0, settingsOpened = {};
+  function visible(el) {
+    if (!el || !el.isConnected) return false;
+    var s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  function clickable(el) {
+    if (!el) return false;
+    if (el.tagName === 'A') {
+      var href = (el.getAttribute('href') || '').trim();
+      if (href && href !== '#' && !/^javascript:/i.test(href)) return false;   // never follow links
+    }
+    return visible(el) && !el.disabled;
+  }
+  function find(root, selectors) {
+    var list = root.querySelectorAll(selectors);
+    for (var i = 0; i < list.length; i++) if (clickable(list[i])) return list[i];
+    return null;
+  }
+  function click(el) {
+    clicks += 1;
+    if (clicks === 1) try { console.debug('huginn-consent:refused'); } catch (e) {}
+    try { el.click(); } catch (e) {}
+  }
+  function unlock() {
+    [document.documentElement, document.body].forEach(function (el) {
+      if (!el) return;
+      LOCKS.forEach(function (c) { el.classList.remove(c); });
+      var s = getComputedStyle(el);
+      if (s.overflow === 'hidden' || s.overflowY === 'hidden') el.style.setProperty('overflow', 'auto', 'important');
+      if (s.position === 'fixed' && el === document.body) el.style.setProperty('position', 'static', 'important');
+    });
+  }
+  function usercentrics() {
+    var host = document.querySelector('#usercentrics-root, #usercentrics-cmp-ui');
+    var root = host && host.shadowRoot;
+    var button = root && find(root, 'button[data-testid="uc-deny-all-button"], button.deny');
+    if (button) { click(button); return true; }
+    return false;
+  }
+  function byRules() {
+    for (var i = 0; i < RULES.length; i++) {
+      var rule = RULES[i], banner = document.querySelector(rule[0]);
+      if (!banner || !visible(banner) && !find(document, rule[1])) continue;
+      var reject = find(document, rule[1]);
+      if (reject) { click(reject); return true; }
+      if (rule[2] && !settingsOpened[i]) {
+        var open = find(document, rule[2]);
+        if (open) { settingsOpened[i] = true; click(open); return false; }
+      }
+    }
+    return false;
+  }
+  function generic() {
+    var candidates = document.querySelectorAll('[id], [class], [aria-label], [role="dialog"], [aria-modal="true"]');
+    for (var i = 0; i < candidates.length && i < 6000; i++) {
+      var box = candidates[i];
+      var label = (box.id || '') + ' ' + (typeof box.className === 'string' ? box.className : '') + ' ' + (box.getAttribute('aria-label') || '');
+      if (!BANNER.test(label) || !visible(box)) continue;
+      var pos = getComputedStyle(box).position;
+      if (pos !== 'fixed' && pos !== 'sticky' && box.getAttribute('role') !== 'dialog' && box.getAttribute('aria-modal') !== 'true') continue;
+      var buttons = box.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]');
+      for (var j = 0; j < buttons.length; j++) {
+        var b = buttons[j], text = (b.innerText || b.value || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        if (text.length < 40 && REJECT.test(text) && clickable(b)) { click(b); return true; }
+      }
+    }
+    return false;
+  }
+  function hideLeftovers() {
+    HIDE.forEach(function (sel) {
+      var el = document.querySelector(sel);
+      if (el && visible(el)) el.style.setProperty('display', 'none', 'important');
+    });
+    // Other banners named for cookies that stay on screen with no way to refuse.
+    var named = document.querySelectorAll('[id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [id*="gdpr" i], [class*="gdpr" i]');
+    for (var i = 0; i < named.length && i < 400; i++) {
+      var el = named[i], pos = getComputedStyle(el).position;
+      if ((pos === 'fixed' || pos === 'sticky') && visible(el) && (el.innerText || '').length < 1500)
+        el.style.setProperty('display', 'none', 'important');
+    }
+    unlock();
+  }
+  var timer = null;
+  function check() {
+    timer = null;
+    if (finished) return;
+    if (usercentrics() || byRules() || generic()) {
+      setTimeout(function () { unlock(); }, 600);
+      if (clicks >= 3) finished = true;
+      return;
+    }
+    if (Date.now() - start > 8000) hideLeftovers();
+    if (Date.now() - start > 20000) { finished = true; observer.disconnect(); }
+  }
+  function schedule() { if (!timer && !finished) timer = setTimeout(check, 350); }
+  var observer = new MutationObserver(schedule);
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+  schedule();
+  setTimeout(schedule, 1500);
+  setTimeout(schedule, 8200);
+  setTimeout(function () { finished = true; observer.disconnect(); }, 21000);
+})();"""
+
+
+def set_consent_script(profile: QWebEngineProfile, on: bool) -> None:
+    scripts = profile.scripts()
+    for script in scripts.find(CONSENT_SCRIPT_NAME):
+        scripts.remove(script)
+    if on:
+        script = QWebEngineScript()
+        script.setName(CONSENT_SCRIPT_NAME)
+        script.setSourceCode(CONSENT_SCRIPT)
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+        script.setWorldId(CONSENT_WORLD)
+        script.setRunsOnSubFrames(True)
+        scripts.insert(script)
+
+
+def purge_cookie_db(storage_path: str, keep: set[str]) -> int:
+    """'Delete cookies when Huginn closes': removes every cookie except those of the sites
+    you stay signed in to, straight from the cookie database before the profile opens it
+    (so it happens even if Huginn was closed by a crash or a shutdown). Returns how many."""
+    path = os.path.join(storage_path, "Cookies")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        con = sqlite3.connect(path, timeout=2)
+        try:
+            rows = con.execute("SELECT rowid, host_key FROM cookies").fetchall()
+            doomed = [(rowid,) for rowid, host in rows
+                      if registrable_domain(str(host or "").lstrip(".").lower()) not in keep]
+            con.executemany("DELETE FROM cookies WHERE rowid = ?", doomed)
+            con.commit()
+            return len(doomed)
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return 0
+
+
+def set_gpc_script(profile: QWebEngineProfile, on: bool) -> None:
+    """navigator.globalPrivacyControl = true in every frame (the header's JS counterpart)."""
+    scripts = profile.scripts()
+    for script in scripts.find(GPC_SCRIPT_NAME):
+        scripts.remove(script)
+    if on:
+        script = QWebEngineScript()
+        script.setName(GPC_SCRIPT_NAME)
+        script.setSourceCode(GPC_SCRIPT)
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        script.setRunsOnSubFrames(True)
+        scripts.insert(script)
+
+
+def wipe_site_data(storage_path: str) -> None:
+    """Deletes a profile's website data (local storage, IndexedDB, service workers, its own
+    history and favicon databases...). Only safe before the profile is created."""
+    for entry in SITE_DATA_ENTRIES:
+        path = os.path.join(storage_path, entry)
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+# Request types as bit flags, named like EasyList's options.
+AD_TYPES = {"other": 1, "script": 2, "image": 4, "stylesheet": 8, "object": 16, "subdocument": 32,
+      "document": 64, "xmlhttprequest": 128, "ping": 256, "media": 512, "font": 1024, "websocket": 2048}
+_AD_TYPE_ALIAS = {"css": "stylesheet", "frame": "subdocument", "xhr": "xmlhttprequest", "beacon": "ping",
+             "doc": "document", "object-subrequest": "object"}
+_AD_TYPE_DEFAULT = sum(AD_TYPES.values()) & ~AD_TYPES["document"]           # filters don't block pages unless they say so
+PAGE_DOCUMENT, PAGE_ELEMHIDE, PAGE_GENERICHIDE = 1, 2, 4
+_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+_HOST_RULE_RE = re.compile(r"\|\|([a-z0-9.\-]+)")
+_COSMETIC_RE = re.compile(r"#@?[$?%]?#")
+# Very common URL tokens make poor index keys (huge buckets); used only as a last resort.
+_WEAK_TOKENS = frozenset({"http", "https", "www", "com", "net", "org", "html", "htm", "php", "js", "jpg",
+                          "png", "gif", "css", "ad", "ads", "api", "cdn", "static", "assets", "img", "images"})
+# Element-hiding selectors that need uBO/ABP's own engines (not plain CSS): skipped.
+_PROCEDURAL = (":has-text(", ":-abp-", ":upward(", ":remove(", ":style(", ":matches-css", ":xpath(",
+               ":min-text-length(", ":watch-attr(", ":matches-path(", ":matches-attr(", ":others(",
+               ":contains(", ":nth-ancestor(", ":if(", ":if-not(", ":remove-attr(", ":remove-class(",
+               ":matches-prop(", ":shadow(")
+
+
+def host_suffixes(host: str) -> list[str]:
+    """'a.b.example.com' -> ['a.b.example.com', 'b.example.com', 'example.com', 'com']."""
+    parts = host.split(".")
+    return [".".join(parts[i:]) for i in range(len(parts))]
+
+
+def _compile_pattern(pattern: str, match_case: bool):
+    flags = 0 if match_case else re.IGNORECASE
+    if len(pattern) > 2 and pattern.startswith("/") and pattern.endswith("/"):
+        return re.compile(pattern[1:-1], flags)             # a regular-expression filter
+    prefix = suffix = ""
+    if pattern.startswith("||"):
+        prefix, pattern = r"^[a-z][a-z0-9+.\-]*://(?:[^/?#]*\.)?", pattern[2:]
+    elif pattern.startswith("|"):
+        prefix, pattern = "^", pattern[1:]
+    if pattern.endswith("|"):
+        suffix, pattern = "$", pattern[:-1]
+    out = []
+    for ch in pattern:
+        if ch == "*":
+            out.append(".*")
+        elif ch == "^":
+            out.append(r"(?:[^\w\-.%]|$)")              # the "separator" placeholder
+        else:
+            out.append(re.escape(ch))
+    return re.compile(prefix + "".join(out) + suffix, flags)
+
+
+class NetFilter:
+    __slots__ = ("pattern", "regex", "types", "party", "include", "exclude", "important", "match_case",
+                 "host_only", "page_flags")
+
+    def __init__(self, pattern: str) -> None:
+        self.pattern = pattern
+        self.regex = None
+        self.types = _AD_TYPE_DEFAULT
+        self.party = 0                    # 1: first-party only, 2: third-party only
+        self.include = self.exclude = None
+        self.important = self.match_case = self.host_only = False
+        self.page_flags = 0
+
+    def _domain_ok(self, site_host: str) -> bool:
+        for suffix in host_suffixes(site_host):            # most specific entry decides
+            if self.exclude and suffix in self.exclude:
+                return False
+            if self.include and suffix in self.include:
+                return True
+        return not self.include
+
+    def matches_page(self, url: str, host: str) -> bool:
+        """For page-wide exceptions: the page's own URL against the pattern and domains."""
+        if (self.include or self.exclude) and not self._domain_ok(host):
+            return False
+        if self.host_only or self.pattern in ("", "*"):
+            return True
+        if self.regex is None:
+            self.regex = _compile_pattern(self.pattern, self.match_case)
+        return self.regex.search(url) is not None
+
+    def matches(self, url: str, site_host: str, rtype: int, third_party: bool) -> bool:
+        if not self.types & rtype:
+            return False
+        if (self.party == 1 and third_party) or (self.party == 2 and not third_party):
+            return False
+        if (self.include or self.exclude) and not self._domain_ok(site_host):
+            return False
+        if self.host_only or self.pattern in ("", "*"):
+            return True
+        if self.regex is None:
+            self.regex = _compile_pattern(self.pattern, self.match_case)
+        return self.regex.search(url) is not None
+
+
+class _Bucket:
+    """Filters indexed by host (for '||host^' rules) and by a token every URL they can
+    match must contain, so a request is only checked against a handful of filters."""
+    __slots__ = ("hosts", "tokens", "generic")
+
+    def __init__(self) -> None:
+        self.hosts: dict[str, list] = {}
+        self.tokens: dict[str, list] = {}
+        self.generic: list = []
+
+    def add(self, f: NetFilter) -> None:
+        pattern = f.pattern
+        lower = pattern.lower()
+        m = _HOST_RULE_RE.match(lower)
+        if m and not (len(pattern) > 2 and pattern.startswith("/") and pattern.endswith("/")):
+            host, rest = m.group(1), pattern[m.end(1):]
+            if "." in host and not host.endswith(".") and not host.startswith(".") and (not rest or rest[0] in "^/:|"):
+                f.host_only = rest in ("", "^", "^|")
+                self.hosts.setdefault(host, []).append(f)
+                return
+        token = _best_token(lower)
+        if token is None:
+            self.generic.append(f)
+        else:
+            self.tokens.setdefault(token, []).append(f)
+
+    def first(self, url: str, tokens: set, host: str, site_host: str, rtype: int, third: bool):
+        for suffix in host_suffixes(host):
+            for f in self.hosts.get(suffix, ()):
+                if f.matches(url, site_host, rtype, third):
+                    return f
+        for token in tokens:
+            for f in self.tokens.get(token, ()):
+                if f.matches(url, site_host, rtype, third):
+                    return f
+        for f in self.generic:
+            if f.matches(url, site_host, rtype, third):
+                return f
+        return None
+
+
+def _best_token(lower: str):
+    if len(lower) > 2 and lower.startswith("/") and lower.endswith("/"):
+        return None                                         # regex filter: can't tell
+    start_anchor = lower.startswith("|")
+    body = lower.lstrip("|")
+    end_anchor = body.endswith("|")
+    if end_anchor:
+        body = body[:-1]
+    best, best_score = None, 0
+    for m in _TOKEN_RE.finditer(body):
+        s, e = m.span()
+        before = body[s - 1] if s else ("|" if start_anchor else "*")
+        after = body[e] if e < len(body) else ("|" if end_anchor else "*")
+        if before == "*" or after == "*":
+            continue                                        # may be part of a longer URL token
+        token = m.group(0)
+        score = len(token) + (0 if token in _WEAK_TOKENS else 100)
+        if score > best_score:
+            best, best_score = token, score
+    return best
+
+
+_ENGINE_SERIAL = itertools.count(1)
+
+
+class FilterEngine:
+    """Network blocking + element hiding from EasyList-format text."""
+
+    def __init__(self) -> None:
+        self.serial = next(_ENGINE_SERIAL)        # identifies this engine (ids can be reused)
+        self.block = _Bucket()
+        self.allow = _Bucket()
+        self.page = _Bucket()                 # @@...$document / $elemhide / $generichide
+        self.hide_generic: dict[str, None] = {}               # ordered set
+        self.hide_specific: dict[str, list] = {}              # domain -> [(selector, excluded domains)]
+        self.hide_exceptions: dict[str, set] = {}             # domain -> selectors not to hide there
+        self.network_rules = 0
+        self.cosmetic_rules = 0
+        self.skipped = 0
+        self._generic_css: str | None = None
+        self._css_cache: dict[str, str] = {}
+        self._cosmetic_bundle: dict | None = None
+
+    # -- parsing ------------------------------------------------------------------------------
+    def add_text(self, text: str) -> None:
+        bad = set()
+        if "badfilter" in text:
+            for line in text.splitlines():
+                if "$" in line and "badfilter" in line:
+                    head, opts = line.strip().rsplit("$", 1)
+                    rest = ",".join(o for o in opts.split(",") if o != "badfilter")
+                    bad.add(head + ("$" + rest if rest else ""))
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line[0] in "![" or line in bad:
+                continue
+            m = _COSMETIC_RE.search(line)
+            if m and not any(c in line[:m.start()] for c in "/|*$^"):
+                self._add_cosmetic(line[:m.start()], m.group(0), line[m.end():])
+            else:
+                self._add_network(line)
+        self._generic_css = self._cosmetic_bundle = None
+        self._css_cache.clear()
+
+    def _add_cosmetic(self, domains: str, marker: str, selector: str) -> None:
+        if marker not in ("##", "#@#") or not selector or selector[0] in "+^" or "{" in selector:
+            self.skipped += 1                                   # scriptlets, snippets, procedural, CSS injection
+            return
+        if any(p in selector for p in _PROCEDURAL):
+            self.skipped += 1
+            return
+        include = [d.strip().lower() for d in domains.split(",") if d.strip() and not d.strip().startswith("~")]
+        exclude = frozenset(d.strip()[1:].lower() for d in domains.split(",") if d.strip().startswith("~"))
+        if any(d.endswith(".*") for d in include):              # uBO "entity" syntax: not supported
+            self.skipped += 1
+            return
+        self.cosmetic_rules += 1
+        if marker == "#@#":
+            for d in include or [""]:
+                self.hide_exceptions.setdefault(d, set()).add(selector)
+            return
+        if include:
+            for d in include:
+                self.hide_specific.setdefault(d, []).append((selector, exclude))
+        else:
+            self.hide_generic[selector] = None
+            for d in exclude:                                   # "~site##.ad": generic, except there
+                self.hide_exceptions.setdefault(d, set()).add(selector)
+
+    def _add_network(self, line: str) -> None:
+        allow = line.startswith("@@")
+        if allow:
+            line = line[2:]
+        pattern, options = line, ""
+        dollar = line.rfind("$")
+        if dollar > 0 and not (line.startswith("/") and line.endswith("/")):
+            pattern, options = line[:dollar], line[dollar + 1:]
+        f = NetFilter(pattern)
+        if options and not self._apply_options(f, options, allow):
+            self.skipped += 1
+            return
+        if not f.types and not f.page_flags:
+            self.skipped += 1                                   # e.g. a $document-only block rule
+            return
+        if not pattern.strip("*|^") and not (f.include or f.exclude or f.page_flags):
+            self.skipped += 1                                   # would match everything everywhere
+            return
+        self.network_rules += 1
+        if f.page_flags:
+            self.page.add(f)
+            if not f.types:
+                return
+            f = _copy_filter(f)
+        (self.allow if allow else self.block).add(f)
+
+    @staticmethod
+    def _apply_options(f: NetFilter, options: str, allow: bool) -> bool:
+        positive = negative = 0
+        for opt in options.split(","):
+            opt = opt.strip()
+            neg = opt.startswith("~")
+            name, _, value = (opt[1:] if neg else opt).partition("=")
+            name = _AD_TYPE_ALIAS.get(name.lower(), name.lower())
+            if name in AD_TYPES:
+                if neg:
+                    negative |= AD_TYPES[name]
+                else:
+                    positive |= AD_TYPES[name]
+            elif name in ("third-party", "3p"):
+                f.party = 1 if neg else 2
+            elif name in ("first-party", "1p"):
+                f.party = 2 if neg else 1
+            elif name in ("domain", "from"):
+                domains = [d.strip().lower() for d in value.split("|") if d.strip()]
+                if any(d.lstrip("~").endswith(".*") for d in domains):
+                    return False
+                f.include = frozenset(d for d in domains if not d.startswith("~")) or None
+                f.exclude = frozenset(d[1:] for d in domains if d.startswith("~")) or None
+            elif name == "match-case":
+                f.match_case = True
+            elif name == "important":
+                f.important = True
+            elif name == "redirect":
+                pass                                            # we simply block
+            elif allow and name in ("elemhide", "ehide"):
+                f.page_flags |= PAGE_ELEMHIDE
+            elif allow and name in ("generichide", "ghide"):
+                f.page_flags |= PAGE_GENERICHIDE
+            elif name == "all":
+                positive |= sum(AD_TYPES.values())
+            else:
+                return False                                    # csp=, removeparam=, popup...: not supported
+        types = positive or (_AD_TYPE_DEFAULT if not f.page_flags else 0)
+        if negative:
+            types = (positive or _AD_TYPE_DEFAULT) & ~negative
+        if types & AD_TYPES["document"]:
+            if allow:
+                f.page_flags |= PAGE_DOCUMENT                   # "@@||site^$document": allow the whole page
+            types &= ~AD_TYPES["document"]                            # page loads themselves are never blocked
+        f.types = types
+        return True
+
+    # -- matching -------------------------------------------------------------------------------
+    def match(self, url: str, host: str, site_host: str, rtype: int, third_party: bool):
+        """The blocking filter that applies (None if the request may go ahead)."""
+        tokens = set(_TOKEN_RE.findall(url.lower()))
+        f = self.block.first(url, tokens, host, site_host, rtype, third_party)
+        if f is None:
+            return None
+        if not f.important and self.allow.first(url, tokens, host, site_host, rtype, third_party):
+            return None
+        return f
+
+    def page_flags(self, page_url: str, page_host: str) -> int:
+        """PAGE_* exceptions that apply to a whole page (allowed, or no element hiding)."""
+        if not page_host:
+            return 0
+        flags = 0
+        candidates = [f for s in host_suffixes(page_host) for f in self.page.hosts.get(s, ())]
+        for token in set(_TOKEN_RE.findall(page_url.lower())):
+            candidates.extend(self.page.tokens.get(token, ()))
+        for f in candidates + self.page.generic:
+            if f.page_flags & ~flags and f.matches_page(page_url, page_host):
+                flags |= f.page_flags
+        return flags
+
+    def css_for(self, host: str, generic: bool = True) -> str:
+        """Element-hiding style sheet for a site: its own rules plus the generic ones
+        (minus any exceptions for it)."""
+        key = f"{host}|{int(generic)}"
+        cached = self._css_cache.get(key)
+        if cached is not None:
+            return cached
+        suffixes = host_suffixes(host) if host else []
+        exceptions = set()
+        for s in suffixes:
+            exceptions |= self.hide_exceptions.get(s, set())
+        selectors = []
+        for s in suffixes:
+            for selector, excluded in self.hide_specific.get(s, ()):
+                if selector not in exceptions and not (excluded and any(x in excluded for x in suffixes)):
+                    selectors.append(selector)
+        css = hiding_css(selectors)
+        if generic:
+            if exceptions & self.hide_generic.keys():
+                css += hiding_css([sel for sel in self.hide_generic if sel not in exceptions])
+            else:
+                if self._generic_css is None:
+                    self._generic_css = hiding_css(list(self.hide_generic))
+                css += self._generic_css
+        if len(self._css_cache) > 64:
+            self._css_cache.clear()
+        self._css_cache[key] = css
+        return css
+
+    def cosmetic_bundle(self) -> dict:
+        """What the in-page element-hiding script needs (built once per rule set): the generic
+        style sheet as finished CSS, and a plain-text index of the sites that have rules of their
+        own - one line per site: site, page flags, its rules, its exceptions. The script finds
+        its site with indexOf, so a page pays almost nothing to start."""
+        if self._cosmetic_bundle is None:
+            everywhere = self.hide_exceptions.get("", set())          # "#@#sel": never hidden
+            plain = lambda text: not _CONTROL_CHARS.search(text)      # noqa: E731 (keeps the index parseable)
+            generic = [sel for sel in self.hide_generic if sel not in everywhere and plain(sel)]
+            simple = sum(1 for sel in generic if _SIMPLE_SELECTOR.match(sel))
+            flags: dict[str, int] = {}
+            for host, filters in self.page.hosts.items():
+                for f in filters:
+                    if f.host_only and not (f.include or f.exclude):
+                        flags[host] = flags.get(host, 0) | f.page_flags
+            lines = []
+            for site in sorted(set(self.hide_specific) | {d for d in self.hide_exceptions if d} | set(flags)):
+                if not site or not plain(site) or "\t" in site:
+                    continue
+                rules = [sel + ("\x1e" + "\x1d".join(sorted(excluded)) if excluded else "")
+                         for sel, excluded in self.hide_specific.get(site, ())
+                         if sel not in everywhere and plain(sel) and all(plain(x) for x in excluded)]
+                exceptions = sorted(sel for sel in self.hide_exceptions.get(site, ()) if plain(sel))
+                if rules or exceptions or flags.get(site):
+                    lines.append(f"{site}\t{flags.get(site, 0)}\t{chr(31).join(rules)}\t{chr(31).join(exceptions)}")
+            self._cosmetic_bundle = {"generic": hiding_css(generic), "simple_lines": (simple + 399) // 400,
+                                     "map": "\n" + "\n".join(lines) + "\n"}
+        return self._cosmetic_bundle
+
+
+_AD_TYPE_OF: dict | None = None
+
+
+def ad_request_type(resource_type) -> int:
+    """WebEngine's resource type as the filter lists' request type."""
+    global _AD_TYPE_OF
+    if _AD_TYPE_OF is None:
+        kinds = {"SubFrame": "subdocument", "Stylesheet": "stylesheet", "Script": "script", "Image": "image",
+                 "FontResource": "font", "Object": "object", "Media": "media", "Worker": "script",
+                 "SharedWorker": "script", "ServiceWorker": "script", "Favicon": "image", "Xhr": "xmlhttprequest",
+                 "Ping": "ping", "CspReport": "ping", "PluginResource": "object", "WebSocket": "websocket",
+                 "MainFrame": "document", "NavigationPreloadMainFrame": "document",
+                 "NavigationPreloadSubFrame": "subdocument", "Json": "xmlhttprequest"}
+        R = QWebEngineUrlRequestInfo.ResourceType
+        _AD_TYPE_OF = {getattr(R, "ResourceType" + name): AD_TYPES[kind]
+                       for name, kind in kinds.items() if hasattr(R, "ResourceType" + name)}
+    return _AD_TYPE_OF.get(resource_type, AD_TYPES["other"])
+
+
+_SIMPLE_SELECTOR = re.compile(r"^[.#]-?[A-Za-z_][A-Za-z0-9_-]*$")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f]")
+
+
+def hiding_css(selectors: list[str]) -> str:
+    """display:none rules. Plain .class / #id selectors are grouped (an invalid selector
+    would void its whole group, and these can't be invalid); anything fancier gets a rule
+    of its own."""
+    simple = [s for s in selectors if _SIMPLE_SELECTOR.match(s)]
+    out = [",".join(simple[i:i + 400]) + "{display:none!important}\n" for i in range(0, len(simple), 400)]
+    out.extend(f"{s}{{display:none!important}}\n" for s in selectors if not _SIMPLE_SELECTOR.match(s))
+    return "".join(out)
+
+
+def _copy_filter(f: NetFilter) -> NetFilter:
+    g = NetFilter(f.pattern)
+    for slot in NetFilter.__slots__:
+        setattr(g, slot, getattr(f, slot))
+    g.page_flags = 0
+    return g
+
+
+class AdBlocker(QObject):
+    """Owns the filter engine, shared by every window. Built-in rules apply at once;
+    EasyList and EasyPrivacy are read from disk on a background thread and refreshed
+    from the internet every few days. The engine is swapped whole, never edited in
+    place, so the request interceptor always sees a complete one.
+
+    Because blocking happens inside the browser (not in an extension), none of Chrome's
+    Manifest V3 limits on ad blockers apply: every rule of every list is used."""
+
+    changed = Signal()
+    _built = Signal(object, int)
+
+    def __init__(self, directory: str | None, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.directory = directory                 # None: built-in rules only (tests)
+        self.engine = FilterEngine()
+        self.engine.add_text(BUILTIN_FILTERS)
+        self.loading = self.downloading = False
+        self.problem = ""
+        self._generation = 0
+        self._pending: list = []
+        self._got_any = False
+        self._network: QNetworkAccessManager | None = None
+        self._built.connect(self._install)
+        self._timer = QTimer(self)
+        self._timer.setInterval(6 * 3600 * 1000)   # long sessions still get fresh lists
+        self._timer.timeout.connect(self.update_if_due)
+
+    def start(self) -> None:
+        """Load what's on disk, then check for newer lists a little after startup."""
+        if self.directory:
+            self.reload()
+            QTimer.singleShot(8000, self.update_if_due)
+            self._timer.start()
+
+    # -- lists on disk ------------------------------------------------------------------------
+    def list_path(self, key: str) -> str | None:
+        return os.path.join(self.directory, key + ".txt") if self.directory else None
+
+    def _age(self, key: str) -> float | None:
+        path = self.list_path(key)
+        try:
+            return time.time() - os.path.getmtime(path) if path else None
+        except OSError:
+            return None
+
+    def last_updated(self) -> float | None:
+        """When the most recently downloaded list arrived (None: no lists yet)."""
+        ages = [a for a in (self._age(k) for k in FILTER_LISTS) if a is not None]
+        return time.time() - min(ages) if ages else None
+
+    def reload(self) -> None:
+        """Rebuild the engine from the lists on disk, off the UI thread."""
+        self._generation += 1
+        generation, self.loading = self._generation, True
+        paths = [p for p in (self.list_path(k) for k in FILTER_LISTS) if p and os.path.exists(p)]
+
+        def work() -> None:
+            # Compiling ~130,000 rules holds Python's lock; handing it back every 1 ms (not 5)
+            # keeps the window smooth meanwhile (worst stall measured 46 ms -> 14 ms).
+            sys.setswitchinterval(0.001)
+            try:
+                engine = FilterEngine()
+                engine.add_text(BUILTIN_FILTERS)
+                for path in paths:
+                    try:
+                        with open(path, encoding="utf-8", errors="replace") as f:
+                            engine.add_text(f.read())
+                    except OSError:
+                        pass
+                engine.css_for("")                 # pre-build the generic style sheet
+                engine.cosmetic_bundle()           # and the in-page one, off the UI thread
+            finally:
+                sys.setswitchinterval(0.005)
+            self._built.emit(engine, generation)
+        threading.Thread(target=work, name="filter-lists", daemon=True).start()
+
+    def _install(self, engine: FilterEngine, generation: int) -> None:
+        if generation != self._generation:
+            return                                 # a newer rebuild is on its way
+        self.engine = engine
+        self.loading = False
+        self.changed.emit()
+
+    def load_text(self, text: str) -> None:
+        """Use these rules (plus the built-in ones) right away. For tests."""
+        engine = FilterEngine()
+        engine.add_text(BUILTIN_FILTERS)
+        engine.add_text(text)
+        self._generation += 1
+        self.engine = engine
+        self.changed.emit()
+
+    # -- downloads ----------------------------------------------------------------------------
+    def update_if_due(self) -> None:
+        if self.directory and any(self._age(k) is None or self._age(k) > FILTER_MAX_AGE for k in FILTER_LISTS):
+            self.update()
+
+    def update(self, force: bool = False) -> None:
+        if not self.directory or self.downloading:
+            return
+        keys = [k for k in FILTER_LISTS if force or self._age(k) is None or self._age(k) > FILTER_MAX_AGE]
+        if not keys:
+            return
+        self.downloading, self.problem, self._got_any = True, "", False
+        self._pending = [(k, list(FILTER_LISTS[k][1])) for k in keys]
+        self.changed.emit()
+        self._next()
+
+    def _next(self) -> None:
+        if not self._pending:
+            self.downloading = False
+            self.reload() if self._got_any else self.changed.emit()
+            return
+        key, mirrors = self._pending[0]
+        if not mirrors:
+            self.problem = f"Couldn't download {FILTER_LISTS[key][0]}. Check your connection."
+            self._pending.pop(0)
+            self._next()
+            return
+        if self._network is None:
+            self._network = QNetworkAccessManager(self)
+        request = QNetworkRequest(QUrl(mirrors.pop(0)))
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                             QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
+        request.setTransferTimeout(30000)
+        reply = self._network.get(request)
+        reply.downloadProgress.connect(lambda got, _total, r=reply: r.abort() if got > 30_000_000 else None)
+        reply.finished.connect(partial(self._finished, reply, key))
+
+    def _finished(self, reply: QNetworkReply, key: str) -> None:
+        try:
+            data = bytes(reply.readAll()) if reply.error() == QNetworkReply.NetworkError.NoError else b""
+        finally:
+            reply.deleteLater()
+        # A captive portal or error page is not a filter list: keep the old copy then.
+        if len(data) > 10_000 and b"[Adblock" in data[:300]:
+            path = self.list_path(key)
+            try:
+                os.makedirs(self.directory, exist_ok=True)
+                with open(path + ".tmp", "wb") as f:
+                    f.write(data)
+                os.replace(path + ".tmp", path)
+                self._got_any = True
+                self._pending.pop(0)
+            except OSError:
+                pass                                   # try the next mirror
+        self._next()
+
+    def status_text(self) -> str:
+        if self.downloading:
+            return "Downloading the latest filter lists…"
+        if self.loading:
+            return "Loading filter lists…"
+        rules = f"{self.engine.network_rules + self.engine.cosmetic_rules:,} rules"
+        updated = self.last_updated()
+        if updated is None:
+            text = f"Built-in rules only ({rules}). EasyList downloads automatically."
+        else:
+            names = " + ".join(name for key, (name, _urls) in FILTER_LISTS.items() if self._age(key) is not None)
+            age = time.time() - updated
+            when = ("just now" if age < 120 else f"{int(age // 60)} minutes ago" if age < 7200
+                    else f"{int(age // 3600)} hours ago" if age < 172800 else f"{int(age // 86400)} days ago")
+            text = f"{names} · {rules} · updated {when}"
+        return f"{text} {self.problem}" if self.problem else text
+
+
+YOUTUBE_COLD_MODES = ("keep", "stream", "drop")
+YOUTUBE_COLD_DEFAULT = "keep"
+
+
+def youtube_cold_mode() -> str:
+    """How the YouTube defence treats a video opened from a link (see YOUTUBE_SCRIPT). A testing
+    aid can override it: test_out\\youtube-cold holding one of YOUTUBE_COLD_MODES."""
+    try:
+        with open(os.path.join(APP_DIR, "test_out", "youtube-cold"), encoding="utf-8", errors="replace") as f:
+            mode = f.read(16).strip().lower()
+        if mode in YOUTUBE_COLD_MODES:
+            return mode
+    except OSError:
+        pass
+    return YOUTUBE_COLD_DEFAULT
+
+
+def set_youtube_script(profile: QWebEngineProfile, on: bool) -> None:
+    """The YouTube defence runs in the page's own JavaScript world from the very start of
+    every YouTube document (it checks the address itself, so it can sit on the profile)."""
+    scripts = profile.scripts()
+    for script in scripts.find(ADBLOCK_YOUTUBE_NAME):
+        scripts.remove(script)
+    if on:
+        script = QWebEngineScript()
+        script.setName(ADBLOCK_YOUTUBE_NAME)
+        script.setSourceCode(YOUTUBE_SCRIPT.replace("__COLD__", youtube_cold_mode()))
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        script.setRunsOnSubFrames(True)              # embedded players on other sites too
+        scripts.insert(script)
+
+
+_cosmetic_cache: dict = {}
+
+
+def set_cosmetic_script(profile: QWebEngineProfile, guard: "PrivacyGuard") -> None:
+    """Installs (or removes) the element-hiding script on a profile. Its source embeds the
+    current engine's rules and the sites where ad blocking is off; it is rebuilt only when
+    one of those changes."""
+    scripts = profile.scripts()
+    on = guard.adblock is not None and guard.block_ads
+    key = (guard.adblock.engine.serial, tuple(sorted(guard.ad_allowlist))) if on else None
+    current = scripts.find(ADBLOCK_COSMETIC_NAME)
+    if current and profile.property("cosmeticKey") == repr(key):
+        return                                         # already up to date
+    for script in current:
+        scripts.remove(script)
+    profile.setProperty("cosmeticKey", repr(key))
+    if not on:
+        return
+    if _cosmetic_cache.get("key") != key:              # shared by every window's profile
+        _cosmetic_cache.clear()
+        _cosmetic_cache["key"] = key
+        bundle = guard.adblock.engine.cosmetic_bundle()
+        _cosmetic_cache["source"] = (COSMETIC_SCRIPT
+                                     .replace("__OFF__", json.dumps(sorted(guard.ad_allowlist)))
+                                     .replace("__SIMPLE_LINES__", str(bundle["simple_lines"]))
+                                     .replace("__MAP__", json.dumps(bundle["map"]))
+                                     .replace("__GENERIC__", json.dumps(bundle["generic"])))
+    script = QWebEngineScript()
+    script.setName(ADBLOCK_COSMETIC_NAME)
+    script.setSourceCode(_cosmetic_cache["source"])
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+    script.setRunsOnSubFrames(False)
+    scripts.insert(script)
+
+
+# Auto-play, the way Chrome decides it: a site may start videos with sound by itself once
+# you've played sound there yourself (a YouTube link then just plays, while a news site you
+# never watch anything on still can't blare at you). Per site in the page menu's site card.
+AUTOPLAY_LEARN_SECONDS = 4                # sound you started, playing this long, teaches a site
+
+
+def load_site_list(settings: QSettings, key: str) -> set[str]:
+    """A set of sites stored as a JSON list in the settings."""
+    raw = settings.value(key, "[]")
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else []
+    except ValueError:
+        items = []
+    return {i.lower() for i in items if isinstance(i, str) and i} if isinstance(items, list) else set()
+
+
+def load_ad_allowlist(settings: QSettings) -> set[str]:
+    """Sites where the user turned ad blocking off (stored as a JSON list)."""
+    raw = settings.value("adBlockAllowlist", "[]")
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else []
+    except ValueError:
+        items = []
+    return {i.lower() for i in items if isinstance(i, str) and i} if isinstance(items, list) else set()
+
+
+# --------------------------------------------------------------------------------------
+# Start Page, served from the internal safariqt: scheme
+# --------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# Passwords: an encrypted vault. AES-256-GCM; the key is sealed with the master password
+# (scrypt) and, if the user wants, also with their Windows sign-in (DPAPI). Import from other
+# browsers and password managers, export as an encrypted backup or a CSV, strong passwords.
+# --------------------------------------------------------------------------------------
+try:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:                                    # setup.bat installs it
+    AESGCM = None
+
+    class InvalidTag(Exception):
+        pass
+
+VAULT_FILE = "passwords.vault"
+VAULT_FORMAT = "SafariQt passwords"            # file-format markers: kept from the first name,
+EXPORT_FORMAT = "SafariQt passwords export"    # so existing vaults and backups still open
+EXPORT_SUFFIX = ".sqpw"
+SCRYPT_PARAMS = {"n": 2 ** 16, "r": 8, "p": 1}         # ~64 MB and a fraction of a second per try
+MIN_MASTER_LENGTH = 8
+CONFIRM_WINDOW = 5 * 60                                # re-entering the master password covers reveal/export this long
+PASSWORD_ALPHABET = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O, 1/l/I
+COMMON_PASSWORDS = frozenset("""123456 123456789 12345678 password qwerty 12345 1234567890 1234567 111111
+123123 abc123 password1 1234 qwerty123 iloveyou 000000 dragon monkey letmein football admin welcome
+sunshine princess login master hello freedom whatever qazwsx trustno1 654321 superman batman 1q2w3e4r
+passw0rd starwars michael shadow baseball 696969 hunter2 zaq12wsx""".split())
+
+
+class VaultError(Exception):
+    pass
+
+
+class WrongPassword(VaultError):
+    pass
+
+
+def _b64e(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _b64d(text: str) -> bytes:
+    return base64.b64decode(text.encode("ascii"))
+
+
+def derive_key(password: str, salt: bytes, params: dict | None = None) -> bytes:
+    p = params or SCRYPT_PARAMS
+    return hashlib.scrypt(password.encode("utf-8"), salt=salt, n=int(p["n"]), r=int(p["r"]), p=int(p["p"]),
+                          maxmem=512 * 1024 * 1024, dklen=32)
+
+
+def seal(key: bytes, plaintext: bytes, aad: bytes) -> str:
+    nonce = os.urandom(12)
+    return _b64e(nonce + AESGCM(key).encrypt(nonce, plaintext, aad))
+
+
+def unseal(key: bytes, token: str, aad: bytes) -> bytes:
+    raw = _b64d(token)
+    return AESGCM(key).decrypt(raw[:12], raw[12:], aad)       # InvalidTag if wrong key or altered
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """Windows DPAPI: data only this Windows account (on this PC) can decrypt."""
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    def blob(raw: bytes):
+        buffer = ctypes.create_string_buffer(raw, len(raw))
+        return Blob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char))), buffer
+    entropy = b"SafariQt password vault"
+    data_in, keep_in = blob(data)
+    extra, keep_extra = blob(entropy)
+    out = Blob()
+    crypt32 = ctypes.windll.crypt32
+    if protect:
+        ok = crypt32.CryptProtectData(ctypes.byref(data_in), ctypes.c_wchar_p("SafariQt"), ctypes.byref(extra),
+                                      None, None, 0x1, ctypes.byref(out))       # CRYPTPROTECT_UI_FORBIDDEN
+    else:
+        ok = crypt32.CryptUnprotectData(ctypes.byref(data_in), None, ctypes.byref(extra), None, None, 0x1,
+                                        ctypes.byref(out))
+    if not ok:
+        raise VaultError("Windows couldn't unlock the passwords for this account")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out.pbData)
+
+
+def dpapi_protect(data: bytes) -> bytes:
+    return _dpapi(data, True)
+
+
+def dpapi_unprotect(data: bytes) -> bytes:
+    return _dpapi(data, False)
+
+
+def login_origin(url: str) -> str:
+    """'https://accounts.example.com:8443/login?x' -> 'https://accounts.example.com:8443'."""
+    q = QUrl(url if "://" in url else "https://" + url)
+    if q.scheme() not in ("http", "https") or not q.host():
+        return ""
+    port = q.port()
+    default = 443 if q.scheme() == "https" else 80
+    return f"{q.scheme()}://{q.host().lower()}" + (f":{port}" if port not in (-1, default) else "")
+
+
+def login_site(host: str) -> str:
+    host = host.lower().strip(".")
+    if not host or "." not in host or re.fullmatch(r"[\d.]+|\[?[0-9a-f:]+\]?", host):
+        return host                                    # localhost, an IP address
+    return registrable_domain(host)
+
+
+def generate_password() -> str:
+    """Safari-style strong password: three groups of six, mixed case and digits (~100 bits)."""
+    while True:
+        groups = ["".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(6)) for _ in range(3)]
+        word = "-".join(groups)
+        if any(c.islower() for c in word) and any(c.isupper() for c in word) and any(c.isdigit() for c in word):
+            return word
+
+
+def password_is_weak(password: str) -> bool:
+    lower = password.lower()
+    if len(password) < 10 or lower in COMMON_PASSWORDS or lower.rstrip("0123456789!") in COMMON_PASSWORDS:
+        return True
+    if len(set(password)) <= 3:
+        return True
+    if len(password) < 14 and re.fullmatch(r"[A-Za-z]+[\d]{1,4}[!@#$%*.?]?", password):
+        return True                                    # Summer2026, Password1!
+    classes = sum(bool(re.search(pattern, password)) for pattern in (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"))
+    return classes < 2 and len(password) < 16
+
+
+# Column names other browsers and password managers use in their CSV exports.
+_CSV_COLUMNS = {
+    "url": ("url", "loginuri", "website", "origin", "hostname", "uri", "address", "loginurl", "web site", "site"),
+    "username": ("username", "loginusername", "login", "user", "username/email", "user name", "account", "email",
+                 "emailaddress"),
+    "password": ("password", "loginpassword", "pass"),
+    "title": ("name", "title", "accountname"),
+    "note": ("note", "notes", "extra", "comment", "comments"),
+    "type": ("type",),
+}
+
+
+def _column_map(header: list[str]) -> dict:
+    found = {}
+    norm = [re.sub(r"[\s_\-]", "", h.strip().lower().lstrip("﻿")) for h in header]
+    for field, names in _CSV_COLUMNS.items():
+        for name in names:
+            key = re.sub(r"[\s_\-]", "", name)
+            if key in norm and field not in found:
+                if field == "username" and name == "email" and "username" in found:
+                    continue
+                found[field] = norm.index(key)
+    if "username" in found and "email" in norm and found["username"] != norm.index("email"):
+        found["email"] = norm.index("email")           # Proton Pass: email when username is empty
+    return found
+
+
+def parse_password_csv(text: str) -> tuple[list[dict], int]:
+    """Logins from a CSV export (Chrome, Edge, Firefox, Safari, Bitwarden, 1Password, LastPass,
+    KeePass, Proton Pass...). Returns (logins, rows skipped)."""
+    text = text.lstrip("﻿")
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect))
+    if not rows:
+        return [], 0
+    columns = _column_map(rows[0])
+    if "password" not in columns or "url" not in columns:
+        raise VaultError("This file doesn't look like a password export (it needs url and password columns).")
+    logins, skipped = [], 0
+
+    def cell(row, field):
+        index = columns.get(field)
+        return row[index].strip() if index is not None and index < len(row) else ""
+    for row in rows[1:]:
+        if not any(c.strip() for c in row):
+            continue
+        kind = cell(row, "type").lower()
+        url, password = cell(row, "url"), cell(row, "password")
+        origin = login_origin(url.split("\n")[0]) if url else ""
+        if (kind and kind not in ("login", "1")) or not password or not origin:
+            skipped += 1                                 # cards, notes, app-only logins, empty rows
+            continue
+        username = cell(row, "username") or cell(row, "email")
+        logins.append({"url": origin, "username": username, "password": password,
+                       "title": cell(row, "title"), "note": cell(row, "note")})
+    return logins, skipped
+
+
+class PasswordVault:
+    """The saved logins, encrypted on disk. Unlocked (key in memory) for the session after the
+    master password - or the Windows sign-in, if turned on - has been given."""
+
+    def __init__(self, path: str, dpapi: tuple | None = None) -> None:
+        self.path = path
+        self.dpapi = dpapi if dpapi is not None else ((dpapi_protect, dpapi_unprotect) if IS_WINDOWS else None)
+        self.entries: list[dict] = []
+        self.never: set[str] = set()                 # sites the user said never to save for
+        self.confirmed_at = 0.0
+        self._key: bytes | None = None
+        self._header: dict = {}
+
+    # -- state ---------------------------------------------------------------------------------
+    @staticmethod
+    def available() -> bool:
+        return AESGCM is not None
+
+    def exists(self) -> bool:
+        return os.path.isfile(self.path)
+
+    def locked(self) -> bool:
+        return self._key is None
+
+    def windows_unlock(self) -> bool:
+        return bool(self._read_header().get("windows"))
+
+    def _read_header(self) -> dict:
+        if not self._header and self.exists():
+            with open(self.path, encoding="utf-8") as f:
+                header = json.load(f)
+            if header.get("format") != VAULT_FORMAT:
+                raise VaultError(f"The password file isn't a {BROWSER_NAME} vault.")
+            self._header = header
+        return self._header
+
+    def recently_confirmed(self) -> bool:
+        return not self.locked() and time.time() - self.confirmed_at < CONFIRM_WINDOW
+
+    # -- create / unlock / lock ----------------------------------------------------------------
+    def create(self, master: str, windows: bool = False) -> None:
+        if self.exists():
+            raise VaultError("A password vault already exists.")
+        if len(master) < MIN_MASTER_LENGTH:
+            raise VaultError(f"The master password needs at least {MIN_MASTER_LENGTH} characters.")
+        salt, key = os.urandom(16), os.urandom(32)
+        self._header = {"format": VAULT_FORMAT, "version": 1,
+                        "kdf": {"name": "scrypt", **SCRYPT_PARAMS, "salt": _b64e(salt)},
+                        "master": seal(derive_key(master, salt), key, b"master")}
+        self._key, self.entries, self.never = key, [], set()
+        if windows:
+            self._seal_windows()
+        self.confirmed_at = time.time()
+        self.save()
+
+    def _master_key(self, master: str) -> bytes:
+        header = self._read_header()
+        kdf = header["kdf"]
+        try:
+            return unseal(derive_key(master, _b64d(kdf["salt"]), kdf), header["master"], b"master")
+        except InvalidTag:
+            raise WrongPassword("That master password isn't right.") from None
+
+    def unlock(self, master: str) -> None:
+        key = self._master_key(master)
+        self._load(key)
+        self.confirmed_at = time.time()
+
+    def unlock_with_windows(self) -> bool:
+        header = self._read_header()
+        if not header.get("windows") or self.dpapi is None:
+            return False
+        try:
+            key = self.dpapi[1](_b64d(header["windows"]))
+        except Exception:
+            return False
+        self._load(key)
+        return True
+
+    def confirm(self, master: str) -> bool:
+        """Re-entering the master password before showing or exporting passwords."""
+        try:
+            key = self._master_key(master)
+        except WrongPassword:
+            return False
+        if self._key is None:
+            self._load(key)
+        self.confirmed_at = time.time()
+        return True
+
+    def lock(self) -> None:
+        self._key, self.entries, self.never, self.confirmed_at = None, [], set(), 0.0
+
+    def _load(self, key: bytes) -> None:
+        header = self._read_header()
+        try:
+            payload = json.loads(unseal(key, header["data"], b"data"))
+        except InvalidTag:
+            raise VaultError(f"The password file is damaged or was changed outside {BROWSER_NAME}.") from None
+        self._key = key
+        self.entries = [e for e in payload.get("entries", []) if isinstance(e, dict)]
+        self.never = set(payload.get("never", []))
+
+    def _seal_windows(self) -> None:
+        if self.dpapi is None:
+            raise VaultError("Unlocking with Windows isn't available here.")
+        self._header["windows"] = _b64e(self.dpapi[0](self._key))
+
+    def set_windows_unlock(self, on: bool) -> None:
+        self._require_unlocked()
+        if on:
+            self._seal_windows()
+        else:
+            self._header.pop("windows", None)
+        self.save()
+
+    def change_master(self, old: str, new: str) -> None:
+        self._master_key(old)
+        if len(new) < MIN_MASTER_LENGTH:
+            raise VaultError(f"The master password needs at least {MIN_MASTER_LENGTH} characters.")
+        self._require_unlocked()
+        salt = os.urandom(16)
+        self._header["kdf"] = {"name": "scrypt", **SCRYPT_PARAMS, "salt": _b64e(salt)}
+        self._header["master"] = seal(derive_key(new, salt), self._key, b"master")
+        self.confirmed_at = time.time()
+        self.save()
+
+    def _require_unlocked(self) -> None:
+        if self._key is None:
+            raise VaultError("The passwords are locked.")
+
+    def save(self) -> None:
+        self._require_unlocked()
+        payload = {"entries": self.entries, "never": sorted(self.never), "saved": time.time()}
+        self._header["data"] = seal(self._key, json.dumps(payload).encode("utf-8"), b"data")
+        folder = os.path.dirname(self.path) or "."
+        os.makedirs(folder, exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._header, f)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(self.path):
+            shutil.copy2(self.path, self.path + ".bak")   # the previous version, in case of a crash
+        os.replace(tmp, self.path)
+
+    # -- logins ----------------------------------------------------------------------------------
+    def find(self, origin: str, username: str) -> dict | None:
+        for entry in self.entries:
+            if entry["url"] == origin and entry["username"] == username:
+                return entry
+        return None
+
+    def matches(self, url: str) -> list[dict]:
+        """Logins for a page: same origin first, then the same site (https only, so a login
+        is never offered to a plain-http copy of a secure site)."""
+        origin = login_origin(url)
+        if not origin or self.locked():
+            return []
+        host = QUrl(origin).host()
+        site, secure = login_site(host), origin.startswith("https://")
+        exact = [e for e in self.entries if e["url"] == origin]
+        related = [e for e in self.entries if e["url"] != origin and secure and e["url"].startswith("https://")
+                   and login_site(QUrl(e["url"]).host()) == site]
+        key = lambda e: -float(e.get("used") or e.get("updated") or 0)       # noqa: E731
+        return sorted(exact, key=key) + sorted(related, key=key)
+
+    def add_or_update(self, url: str, username: str, password: str, title: str = "", note: str = "",
+                      save: bool = True) -> tuple[str, dict]:
+        """('added' | 'updated' | 'same', entry). An updated login keeps its previous password."""
+        self._require_unlocked()
+        origin = login_origin(url)
+        if not origin or not password:
+            raise VaultError("A login needs a web address and a password.")
+        now = time.time()
+        entry = self.find(origin, username)
+        if entry is None:
+            entry = {"id": uuid.uuid4().hex, "url": origin, "username": username, "password": password,
+                     "title": title, "note": note, "created": now, "updated": now, "used": 0}
+            self.entries.append(entry)
+            result = "added"
+        elif entry["password"] == password:
+            result = "same"
+        else:
+            entry["previous"] = entry["password"]
+            entry["password"], entry["updated"] = password, now
+            if note and not entry.get("note"):
+                entry["note"] = note
+            result = "updated"
+        if save and result != "same":
+            self.save()
+        return result, entry
+
+    def update(self, entry_id: str, **fields) -> dict:
+        self._require_unlocked()
+        entry = next(e for e in self.entries if e["id"] == entry_id)
+        if "url" in fields:
+            fields["url"] = login_origin(fields["url"]) or entry["url"]
+        if "password" in fields and fields["password"] != entry["password"]:
+            entry["previous"] = entry["password"]
+        entry.update(fields)
+        entry["updated"] = time.time()
+        self.save()
+        return entry
+
+    def delete(self, entry_id: str) -> None:
+        self._require_unlocked()
+        self.entries = [e for e in self.entries if e["id"] != entry_id]
+        self.save()
+
+    def mark_used(self, entry_id: str) -> None:
+        for entry in self.entries:
+            if entry["id"] == entry_id:
+                entry["used"] = time.time()
+        self.save()
+
+    def set_never(self, site: str, on: bool = True) -> None:
+        self._require_unlocked()
+        (self.never.add if on else self.never.discard)(site)
+        self.save()
+
+    def health(self) -> dict[str, set[str]]:
+        """Entry ids whose password is reused on another site, or weak."""
+        by_password: dict[str, set[str]] = {}
+        for e in self.entries:
+            by_password.setdefault(e["password"], set()).add(login_site(QUrl(e["url"]).host()))
+        reused = {e["id"] for e in self.entries if len(by_password[e["password"]]) > 1}
+        weak = {e["id"] for e in self.entries if password_is_weak(e["password"])}
+        return {"reused": reused, "weak": weak}
+
+    # -- import / export -----------------------------------------------------------------------------
+    def import_logins(self, logins: list[dict]) -> dict:
+        counts = {"added": 0, "updated": 0, "same": 0}
+        for login in logins:
+            result, _ = self.add_or_update(login["url"], login.get("username", ""), login["password"],
+                                           login.get("title", ""), login.get("note", ""), save=False)
+            counts[result] += 1
+        self.save()
+        return counts
+
+    def export_csv(self, path: str) -> int:
+        """Chrome's layout, which other browsers and password managers import."""
+        self._require_unlocked()
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["name", "url", "username", "password", "note"])
+            for e in sorted(self.entries, key=lambda e: (e["url"], e["username"])):
+                writer.writerow([e.get("title") or QUrl(e["url"]).host(), e["url"] + "/", e["username"],
+                                 e["password"], e.get("note", "")])
+        return len(self.entries)
+
+    def export_encrypted(self, path: str, password: str) -> int:
+        self._require_unlocked()
+        if len(password) < MIN_MASTER_LENGTH:
+            raise VaultError(f"The backup password needs at least {MIN_MASTER_LENGTH} characters.")
+        salt = os.urandom(16)
+        payload = json.dumps({"entries": self.entries, "never": sorted(self.never)}).encode("utf-8")
+        data = {"format": EXPORT_FORMAT, "version": 1, "kdf": {"name": "scrypt", **SCRYPT_PARAMS, "salt": _b64e(salt)},
+                "data": seal(derive_key(password, salt), payload, b"export")}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return len(self.entries)
+
+
+def read_password_file(path: str, password: str | None = None) -> tuple[list[dict], int, bool]:
+    """(logins, rows skipped, encrypted?) from a CSV export or a Huginn backup. A backup
+    without its password raises WrongPassword."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8-sig", errors="replace")
+    if text.lstrip().startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and data.get("format") == EXPORT_FORMAT:
+            if password is None:
+                raise WrongPassword("This backup is protected by a password.")
+            kdf = data["kdf"]
+            try:
+                payload = json.loads(unseal(derive_key(password, _b64d(kdf["salt"]), kdf), data["data"], b"export"))
+            except InvalidTag:
+                raise WrongPassword("That backup password isn't right.") from None
+            logins = [{k: e.get(k, "") for k in ("url", "username", "password", "title", "note")}
+                      for e in payload.get("entries", []) if isinstance(e, dict) and e.get("password")]
+            return logins, 0, True
+    logins, skipped = parse_password_csv(text)
+    return logins, skipped, False
+
+
+# --------------------------------------------------------------------------------------
+# iCloud Passwords: fills logins from your iCloud Keychain through iCloud for Windows' own
+# password helper (the one Apple's iCloud Passwords extension for Chrome and Edge talks to).
+# The helper shows a 6-digit code; entering it here pairs the browser for the session (SRP,
+# RFC 5054 3072-bit group); after that every request and answer is AES-GCM encrypted with
+# the session key. Protocol as implemented by the open-source "iCloud Passwords for
+# Firefox" (github.com/au2001/icloud-passwords-firefox, Apache 2.0).
+# --------------------------------------------------------------------------------------
+ICLOUD_HOST = "com.apple.passwordmanager"
+ICLOUD_ORIGIN = "chrome-extension://pejdijmoenmkgeppbflobdenhhabjlaj/"   # Apple's extension, as Chrome starts it
+ICLOUD_BROWSER = "Chrome"                     # the engine is Chromium; the helper knows Chrome, Edge, Firefox
+ICLOUD_VERSION = "1.0"
+ICLOUD_TIMEOUT = 6.0
+ICLOUD_CACHE_SECONDS = 60
+SRP_N = int(
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A0879"
+    "8E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B"
+    "0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA4836"
+    "1C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804"
+    "F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6"
+    "955817183995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64"
+    "ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D226"
+    "1AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E2"
+    "08E24FA074E5AB3143DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF", 16)   # RFC 5054 appendix A, 3072-bit
+SRP_G = 5
+SRP_BYTES = 384
+
+
+class ICloudError(Exception):
+    pass
+
+
+def _int_bytes(n: int) -> bytes:
+    """Big-endian bytes without leading zeros (how the protocol writes its numbers)."""
+    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n > 0 else b""
+
+
+def _pad(data: bytes, length: int) -> bytes:
+    return data[:length].rjust(length, b"\0")
+
+
+def _sha(*parts) -> bytes:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part.encode("utf-8") if isinstance(part, str) else part)
+    return digest.digest()
+
+
+def _json(obj) -> bytes:
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+class ICloudSession:
+    """One pairing with the helper: SRP from our side, then AES-GCM with its key."""
+
+    def __init__(self, use_base64: bool = False, username: bytes | None = None, secret: int | None = None) -> None:
+        self.use_base64 = bool(use_base64)
+        self.username = self.serialize(username if username is not None else os.urandom(16))     # I
+        self.secret = secret if secret is not None else int.from_bytes(os.urandom(32), "big")    # a
+        self.server_key: int | None = None        # B
+        self.salt: int | None = None              # s
+        self.shared: int | None = None            # K
+
+    def serialize(self, data: bytes, prefix: bool = True) -> str:
+        if self.use_base64:
+            return base64.b64encode(data).decode("ascii")
+        return ("0x" if prefix else "") + data.hex()
+
+    def deserialize(self, text: str) -> bytes:
+        text = str(text)
+        if self.use_base64:
+            return base64.b64decode(text + "=" * (-len(text) % 4))
+        return bytes.fromhex(text[2:] if text.startswith("0x") else text)
+
+    @property
+    def public_key(self) -> int:              # A
+        return pow(SRP_G, self.secret, SRP_N)
+
+    def set_server(self, server_key: int, salt: int) -> None:
+        if server_key % SRP_N == 0:
+            raise ICloudError("iCloud sent an invalid key.")
+        self.server_key, self.salt, self.shared = server_key, salt, None
+
+    def set_code(self, code: str) -> None:
+        if self.server_key is None or self.salt is None:
+            raise ICloudError("Ask iCloud for a code first.")
+        A, B = self.public_key, self.server_key
+        u = int.from_bytes(_sha(_pad(_int_bytes(A), SRP_BYTES), _pad(_int_bytes(B), SRP_BYTES)), "big")
+        k = int.from_bytes(_sha(_int_bytes(SRP_N), _pad(_int_bytes(SRP_G), SRP_BYTES)), "big")
+        x = int.from_bytes(_sha(_int_bytes(self.salt), _sha(self.username + ":" + code)), "big")
+        premaster = pow(B - k * pow(SRP_G, x, SRP_N), self.secret + u * x, SRP_N)
+        self.shared = int.from_bytes(_sha(_int_bytes(premaster)), "big")
+
+    def proof(self) -> bytes:                 # M
+        if self.shared is None:
+            raise ICloudError("No session key yet.")
+        hn, hg = _sha(_int_bytes(SRP_N)), _sha(_pad(_int_bytes(SRP_G), SRP_BYTES))
+        return _sha(bytes(a ^ b for a, b in zip(hn, hg)), _sha(self.username), _int_bytes(self.salt),
+                    _int_bytes(self.public_key), _int_bytes(self.server_key), _int_bytes(self.shared))
+
+    def server_proof(self, proof: bytes) -> bytes:    # HAMK, what iCloud must answer
+        return _sha(_int_bytes(self.public_key), proof, _int_bytes(self.shared))
+
+    def _key(self) -> bytes:
+        if self.shared is None:
+            raise ICloudError("Not paired with iCloud.")
+        return _int_bytes(self.shared)[:16]
+
+    def encrypt(self, obj, iv: bytes | None = None) -> bytes:
+        iv = iv if iv is not None else os.urandom(16)
+        return AESGCM(self._key()).encrypt(iv, _json(obj), None) + iv          # ciphertext + tag, then IV
+
+    def decrypt(self, data: bytes) -> bytes:
+        try:
+            return AESGCM(self._key()).decrypt(data[:16], data[16:], None)     # IV first in answers
+        except InvalidTag:
+            raise ICloudError("iCloud's answer couldn't be decrypted.") from None
+
+
+def find_icloud_helper() -> list[str] | None:
+    """The command that starts iCloud for Windows' password helper, from the native
+    messaging registration it makes for Chrome/Edge ('Install extension' in iCloud)."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    keys = []
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for base in (r"Software\Google\Chrome", r"Software\Microsoft\Edge", r"Software\Chromium",
+                     r"Software\WOW6432Node\Google\Chrome", r"Software\WOW6432Node\Microsoft\Edge"):
+            keys.append((root, base + r"\NativeMessagingHosts" + "\\" + ICLOUD_HOST))
+    for root, key in keys:
+        try:
+            with winreg.OpenKey(root, key) as handle:
+                manifest_path = winreg.QueryValueEx(handle, "")[0]
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+            exe = os.path.join(os.path.dirname(manifest_path), manifest["path"])
+            if os.path.isfile(exe):
+                return [exe, ICLOUD_ORIGIN, "--parent-window=0"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    common = os.environ.get("CommonProgramFiles", r"C:\Program Files\Common Files")
+    exe = os.path.join(common, "Apple", "Internet Services", "PasswordManagerBrowserExtensionHelper.exe")
+    return [exe, ICLOUD_ORIGIN, "--parent-window=0"] if os.path.isfile(exe) else None
+
+
+class ICloudHelper:
+    """The helper process, spoken to like a browser does: 4-byte length + JSON each way."""
+
+    def __init__(self, command: list[str]) -> None:
+        flags = _CREATE_NO_WINDOW if IS_WINDOWS else 0
+        try:
+            self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, creationflags=flags,
+                                            cwd=os.path.dirname(command[0]) or None)
+        except OSError as e:
+            raise ICloudError(f"iCloud for Windows' password helper couldn't start ({e.strerror or e}).") from None
+        self.messages: "queue.Queue[dict | None]" = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        out = self.process.stdout
+        try:
+            while True:
+                head = out.read(4)
+                if len(head) < 4:
+                    break
+                size = int.from_bytes(head, "little")
+                if size > 16 * 1024 * 1024:
+                    break
+                body = out.read(size)
+                try:
+                    message = json.loads(body.decode("utf-8"))
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    self.messages.put(message)
+        except (OSError, ValueError):
+            pass
+        self.messages.put(None)                   # closed
+
+    def alive(self) -> bool:
+        return self.process.poll() is None
+
+    def request(self, cmd: int, body: dict | None = None, timeout: float = ICLOUD_TIMEOUT) -> dict:
+        data = _json({"cmd": cmd, **(body or {})})
+        try:
+            self.process.stdin.write(len(data).to_bytes(4, "little") + data)
+            self.process.stdin.flush()
+        except (OSError, ValueError):
+            raise ICloudError("iCloud for Windows' password helper stopped.") from None
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            try:
+                message = self.messages.get(timeout=max(0.01, left))
+            except queue.Empty:
+                raise ICloudError("iCloud for Windows didn't answer. Is it running and signed in?") from None
+            if message is None:
+                raise ICloudError("iCloud for Windows' password helper stopped.")
+            if message.get("cmd") == cmd:
+                return message
+            if left <= 0:
+                raise ICloudError("iCloud for Windows didn't answer. Is it running and signed in?")
+
+    def discard(self) -> None:
+        """Lets go of a helper that has stopped (its pipes may already be broken)."""
+        for pipe in (self.process.stdin, self.process.stdout):
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+        if self.process.poll() is None:
+            self.process.kill()
+
+    def close(self) -> None:
+        try:
+            data = _json({"cmd": 0})
+            self.process.stdin.write(len(data).to_bytes(4, "little") + data)
+            self.process.stdin.flush()
+            self.process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            self.process.wait(1.5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+        self.discard()
+
+
+def _decode_pake(payload) -> dict:
+    try:
+        return json.loads(base64.b64decode(payload["PAKE"]).decode("utf-8"))
+    except (KeyError, TypeError, ValueError):
+        raise ICloudError("iCloud sent an unexpected answer.") from None
+
+
+class ICloudPasswords(QObject):
+    """iCloud Keychain logins for the session. States: unavailable (no iCloud for Windows),
+    off, disconnected, code (waiting for the 6-digit code), ready, error. Pairing is per
+    session: iCloud asks for a new code each time the browser starts."""
+
+    changed = Signal()
+    _done = Signal(object, object, object)        # callback, result, error -> main thread
+
+    GET_CAPABILITIES, HANDSHAKE, LOGIN_NAMES, PASSWORD = 14, 2, 4, 5
+    SEARCH, GHOST_SEARCH = 2, 5
+
+    def __init__(self, settings: QSettings, parent: QObject | None = None, command=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self._command = command                   # tests: a stand-in helper
+        self._found: list[str] | None | bool = False
+        self.helper: ICloudHelper | None = None
+        self.session: ICloudSession | None = None
+        self.paired = False
+        self.waiting_code = False
+        self.error = ""
+        self.cache: dict[str, tuple[float, list[dict]]] = {}
+        self._lock = threading.Lock()
+        self._jobs: "queue.Queue" = queue.Queue()
+        self._worker: threading.Thread | None = None
+        self._done.connect(self._deliver)
+
+    # -- state -------------------------------------------------------------------------------
+    def command(self) -> list[str] | None:
+        if self._command is not None:
+            return self._command
+        if self._found is False:
+            self._found = find_icloud_helper()
+        return self._found or None
+
+    def available(self) -> bool:
+        return AESGCM is not None and self.command() is not None
+
+    def enabled(self) -> bool:
+        return self.settings.value("icloudPasswords", False, type=bool)
+
+    def set_enabled(self, on: bool) -> None:
+        self.settings.setValue("icloudPasswords", bool(on))
+        if not on:
+            self.disconnect()
+        self.changed.emit()
+
+    def ready(self) -> bool:
+        return self.paired and self.helper is not None and self.helper.alive()
+
+    def state(self) -> str:
+        if not self.available():
+            return "unavailable"
+        if not self.enabled():
+            return "off"
+        if self.ready():
+            return "ready"
+        if self.waiting_code:
+            return "code"
+        return "error" if self.error else "disconnected"
+
+    def describe(self) -> str:
+        return {"unavailable": "Needs iCloud for Windows with Passwords turned on. In iCloud, also choose "
+                               f"“Install extension” for Chrome or Edge - {BROWSER_NAME} uses the same helper.",
+                "off": "Fill logins saved in your iCloud Keychain (on your iPhone, iPad or Mac).",
+                "disconnected": f"On. iCloud asks for a code the first time you use it after {BROWSER_NAME} starts.",
+                "code": "Waiting for the code iCloud for Windows is showing.",
+                "ready": "Connected for this session.",
+                "error": self.error}[self.state()]
+
+    # -- talking to the helper -------------------------------------------------------------------
+    def _ensure_helper(self) -> ICloudHelper:
+        if self.helper is None or not self.helper.alive():
+            command = self.command()
+            if command is None:
+                raise ICloudError("iCloud for Windows' password helper wasn't found.")
+            if self.helper is not None:
+                self.helper.discard()
+            self.helper, self.session, self.paired = ICloudHelper(command), None, False
+        return self.helper
+
+    def _request_code(self) -> None:
+        helper = self._ensure_helper()
+        if self.session is None:
+            answer = helper.request(self.GET_CAPABILITIES)
+            capabilities = answer.get("capabilities") or {}
+            version = capabilities.get("secretSessionVersion")
+            if version is not None and version != 1:
+                raise ICloudError(f"This version of iCloud for Windows uses a pairing {BROWSER_NAME} doesn't know.")
+            self.session = ICloudSession(bool(capabilities.get("shouldUseBase64")))
+        session = self.session
+        pake = {"TID": session.username, "MSG": 0, "A": session.serialize(_int_bytes(session.public_key)),
+                "VER": ICLOUD_VERSION, "PROTO": [1]}
+        answer = helper.request(self.HANDSHAKE, {"msg": {"QID": "m0", "PAKE": base64.b64encode(_json(pake)).decode("ascii"),
+                                                          "HSTBRSR": ICLOUD_BROWSER}})
+        reply = _decode_pake(answer.get("payload"))
+        if reply.get("TID") != session.username:
+            raise ICloudError("iCloud answered another session.")
+        if reply.get("ErrCode") is not None:
+            raise ICloudError(f"iCloud refused to pair (error {reply.get('ErrCode')}).")
+        if str(reply.get("MSG")) != "1" or reply.get("PROTO") != 1:
+            raise ICloudError("iCloud sent an unexpected answer.")
+        session.set_server(int.from_bytes(session.deserialize(reply["B"]), "big"),
+                           int.from_bytes(session.deserialize(reply["s"]), "big"))
+
+    def _verify_code(self, code: str) -> None:
+        session, helper = self.session, self.helper
+        if session is None or helper is None or session.server_key is None:
+            raise ICloudError("Ask iCloud for a new code.")
+        session.set_code(code)
+        proof = session.proof()
+        pake = {"TID": session.username, "MSG": 2, "M": session.serialize(proof, prefix=False)}
+        answer = helper.request(self.HANDSHAKE, {"msg": {"QID": "m2", "PAKE": base64.b64encode(_json(pake)).decode("ascii")}})
+        reply = _decode_pake(answer.get("payload"))
+        if reply.get("TID") != session.username or str(reply.get("MSG")) != "3":
+            raise ICloudError("iCloud sent an unexpected answer.")
+        if reply.get("ErrCode") == 1:
+            session.shared = None
+            raise ICloudError("That code isn't right. iCloud shows a new one - try again.")
+        if reply.get("ErrCode") not in (0, None):
+            session.shared = None
+            raise ICloudError(f"iCloud refused the code (error {reply.get('ErrCode')}).")
+        expected = int.from_bytes(session.server_proof(proof), "big")
+        if int.from_bytes(session.deserialize(reply.get("HAMK", "")), "big") != expected:
+            session.shared = None
+            raise ICloudError(f"iCloud's answer didn't check out, so {BROWSER_NAME} didn't pair with it.")
+
+    def _query(self, cmd: int, qid: str, host: str, url: str, request: dict) -> dict:
+        session, helper = self.session, self.helper
+        if not self.paired or session is None or helper is None:
+            raise ICloudError("Not connected to iCloud.")
+        smsg = json.dumps({"TID": session.username, "SDATA": session.serialize(session.encrypt(request))},
+                          separators=(",", ":"))
+        answer = helper.request(cmd, {"tabId": 1, "frameId": 0, "url": url,
+                                      "payload": {"QID": qid, "SMSG": smsg}})
+        payload = answer.get("payload") or {}
+        message = payload.get("SMSG")
+        if isinstance(message, str):
+            try:
+                message = json.loads(message)
+            except ValueError:
+                message = None
+        if not isinstance(message, dict) or message.get("TID") != session.username:
+            raise ICloudError("iCloud sent an unexpected answer.")
+        try:
+            result = json.loads(session.decrypt(session.deserialize(message["SDATA"])).decode("utf-8"))
+        except (KeyError, ValueError):
+            raise ICloudError("iCloud sent an unexpected answer.") from None
+        if not isinstance(result, dict):
+            raise ICloudError("iCloud sent an unexpected answer.")
+        return result
+
+    def _login_names(self, host: str) -> list[dict]:
+        result = self._query(self.LOGIN_NAMES, "CmdGetLoginNames4URL", host, host,
+                             {"ACT": self.GHOST_SEARCH, "URL": host})
+        status = result.get("STATUS")
+        if status == 3:
+            return []
+        if status != 0:
+            raise ICloudError(f"iCloud couldn't look up logins (status {status}).")
+        return [{"username": str(e.get("USR") or ""), "sites": [str(s) for s in (e.get("sites") or [])]}
+                for e in result.get("Entries") or [] if isinstance(e, dict)]
+
+    def _password(self, host: str, username: str, sites: list[str]) -> dict:
+        result = self._query(self.PASSWORD, "CmdGetPassword4LoginName", host, (sites or [host])[0],
+                             {"ACT": self.SEARCH, "URL": host, "USR": username})
+        if result.get("STATUS") != 0:
+            raise ICloudError(f"iCloud couldn't find that password (status {result.get('STATUS')}).")
+        for entry in result.get("Entries") or []:
+            if isinstance(entry, dict) and entry.get("PWD"):
+                return {"username": str(entry.get("USR") or username), "password": str(entry["PWD"])}
+        raise ICloudError("iCloud didn't send a password for that login.")
+
+    # -- for the browser (main thread) --------------------------------------------------------------
+    def request_code(self) -> bool:
+        """Asks iCloud for Windows to show a pairing code. Blocks briefly."""
+        self.error = ""
+        try:
+            with self._lock:
+                self._request_code()
+            self.waiting_code = True
+            return True
+        except ICloudError as e:
+            self._fail(str(e))
+            return False
+        finally:
+            self.changed.emit()
+
+    def verify_code(self, code: str) -> str:
+        """'' when paired, else what went wrong."""
+        code = re.sub(r"\D", "", code or "")
+        try:
+            with self._lock:
+                self._verify_code(code)
+        except ICloudError as e:
+            message = str(e)
+            if "isn't right" in message:
+                try:                                  # iCloud shows a fresh code for the next try
+                    with self._lock:
+                        self._request_code()
+                except ICloudError as again:
+                    self._fail(str(again))
+            else:
+                self._fail(message)
+            self.changed.emit()
+            return message
+        self.paired, self.waiting_code, self.error = True, False, ""
+        self.cache.clear()
+        self.changed.emit()
+        return ""
+
+    def cached_logins(self, host: str) -> list[dict] | None:
+        hit = self.cache.get(host)
+        return hit[1] if hit and time.time() - hit[0] < ICLOUD_CACHE_SECONDS else None
+
+    def fetch_logins(self, host: str, callback) -> None:
+        def work():
+            return self._login_names(host)
+
+        def done(result, error):
+            if error is None:
+                self.cache[host] = (time.time(), result)
+            callback(result or [], error)
+        self._submit(work, done)
+
+    def fetch_password(self, host: str, username: str, sites: list[str], callback) -> None:
+        self._submit(lambda: self._password(host, username, sites), callback)
+
+    def disconnect(self) -> None:
+        with self._lock:
+            helper, self.helper, self.session = self.helper, None, None
+        self.paired = self.waiting_code = False
+        self.cache.clear()
+        if helper is not None:
+            helper.close()
+
+    def _fail(self, message: str) -> None:
+        self.error, self.paired, self.waiting_code = message, False, False
+        if self.helper is not None and not self.helper.alive():
+            self.helper.discard()
+            self.helper = None
+
+    def _submit(self, work, callback) -> None:
+        self._jobs.put((work, callback))
+        if self._worker is None or not self._worker.is_alive():
+            self._worker = threading.Thread(target=self._work, daemon=True)
+            self._worker.start()
+
+    def _work(self) -> None:
+        while True:
+            try:
+                work, callback = self._jobs.get(timeout=30)
+            except queue.Empty:
+                return
+            try:
+                with self._lock:
+                    result, error = work(), None
+            except ICloudError as e:
+                result, error = None, str(e)
+            except Exception as e:                   # never let a bad answer kill the worker
+                result, error = None, f"iCloud: {e}"
+            self._done.emit(callback, result, error)
+
+    def _deliver(self, callback, result, error) -> None:
+        if error is not None and ("stopped" in error or "didn't answer" in error):
+            self._fail(error)
+            self.changed.emit()
+        callback(result, error)
+
+
+# --------------------------------------------------------------------------------------
+# Passwords in pages: suggestions under login fields and 'Save password?' after signing in
+# --------------------------------------------------------------------------------------
+PASSWORD_SCRIPT_NAME = "safariqt-passwords"
+WEBCHANNEL_SCRIPT_NAME = "safariqt-webchannel"
+APPLICATION_WORLD = 1                                  # QWebEngineScript.ApplicationWorld: hidden from the page
+CLIPBOARD_CLEAR_MS = 30_000
+AUTO_LOCK_MS = 60 * 60_000                             # passwords lock after an hour unused
+SUGGESTION_CLICK_DELAY = 0.4                           # ignore clicks on a list that just appeared
+
+# Runs in an isolated JavaScript world the page can't see, in the main frame only. It tells the
+# browser (over a private web channel) when a login field is clicked and when a login is sent,
+# and fills fields only when the browser asks - which happens only after the user picks a
+# suggestion from the browser's own menu.
+PASSWORD_SCRIPT = r"""(function () {
+  'use strict';
+  if (window.__safariqtPasswords) return;
+  window.__safariqtPasswords = true;
+  var bridge = null, current = null, last = null, sent = '', open = false, highlighted = false,
+      filling = false, tookEnter = false;
+  var connect = function () {
+    if (bridge || !window.__safariqtObjects) return;
+    window.__safariqtObjects(function (objects) { bridge = objects.safariqtPasswords; });
+  };
+  connect();
+  var shown = function (el) {
+    var r = el.getBoundingClientRect(), style = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0.1;
+  };
+  var isPassword = function (el) { return el instanceof HTMLInputElement && el.type === 'password'; };
+  var isText = function (el) {
+    return el instanceof HTMLInputElement && /^(text|email|tel|)$/.test(el.getAttribute('type') || '');
+  };
+  var scope = function (el) { return el.form || (el.closest && el.closest('form')) || document; };
+  var passwords = function (root) {
+    return Array.prototype.filter.call(root.querySelectorAll('input[type=password]'), shown);
+  };
+  var usernameFor = function (pw) {
+    var inputs = Array.prototype.filter.call(scope(pw).querySelectorAll('input'), function (i) {
+      return shown(i) && (isText(i) || isPassword(i));
+    });
+    for (var i = inputs.indexOf(pw) - 1; i >= 0; i--) if (isText(inputs[i])) return inputs[i];
+    var tagged = document.querySelector('input[autocomplete~="username"]');
+    return tagged && shown(tagged) ? tagged : null;
+  };
+  var isNew = function (pw) {
+    var ac = (pw.getAttribute('autocomplete') || '').toLowerCase();
+    if (ac.indexOf('new-password') >= 0) return true;
+    if (ac.indexOf('current-password') >= 0) return false;
+    var list = passwords(scope(pw));
+    if (list.length >= 3) return list.indexOf(pw) > 0;   // current, new, confirm: a change form
+    return list.length === 2;                            // password + confirm: a sign-up form
+  };
+  var userActive = function () {
+    return !navigator.userActivation || navigator.userActivation.isActive;
+  };
+  var close = function () {
+    if (open && bridge) bridge.dismiss();
+    open = highlighted = false;
+  };
+  // The browser says whether its suggestion list is showing for the field.
+  window.__safariqtMenu = function (on) { open = !!on; if (!open) highlighted = false; };
+  var ask = function (el, typing) {
+    connect();
+    if (!bridge || filling || !(el instanceof HTMLInputElement) || !(typing || userActive())) return;
+    var pw = isPassword(el) ? el : null;
+    if (!pw && isText(el)) {
+      var list = passwords(scope(el));
+      if (!list.length || usernameFor(list[0]) !== el) return;   // a text field outside a login form
+      pw = list[0];
+    }
+    if (!pw || !shown(el)) return;
+    current = {field: el, password: pw, user: usernameFor(pw), fresh: isNew(pw)};
+    highlighted = false;
+    var r = el.getBoundingClientRect();
+    bridge.suggest(JSON.stringify({origin: location.origin, kind: current.fresh ? 'new' : 'login',
+                                   field: isPassword(el) ? 'password' : 'username',
+                                   rect: {x: r.left, y: r.top, w: r.width, h: r.height},
+                                   username: current.user ? current.user.value : '', typing: !!typing}));
+  };
+  document.addEventListener('focusin', function (e) { ask(e.target, false); }, true);
+  document.addEventListener('mousedown', function (e) {
+    if (e.target === document.activeElement) setTimeout(function () { ask(e.target, false); }, 0);
+  }, true);
+  document.addEventListener('focusout', function (e) {
+    if (current && e.target === current.field && !filling) close();
+  }, true);
+  window.addEventListener('scroll', function () { if (open) close(); }, true);
+  window.addEventListener('resize', function () { if (open) close(); }, true);
+  // Arrow keys, Enter and Escape move through the browser's list while it's showing.
+  document.addEventListener('keydown', function (e) {
+    tookEnter = false;
+    if (!open || !current || e.target !== current.field || !bridge) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      highlighted = true;
+      bridge.key(e.key === 'ArrowDown' ? 'down' : 'up');
+    } else if (e.key === 'Enter' && highlighted) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      tookEnter = true;
+      bridge.key('enter');
+    } else if (e.key === 'Escape' || e.key === 'Tab') {
+      close();
+    }
+  }, true);
+  var remember = function () {
+    var list = passwords(document).filter(function (p) { return p.value; });
+    if (!list.length) return;
+    var pw = list[0], user = usernameFor(pw);
+    last = {origin: location.origin, username: user ? user.value : '', password: pw.value, fresh: isNew(pw),
+            newPassword: list.length >= 2 ? list[list.length - 1].value : ''};
+  };
+  document.addEventListener('input', function (e) {
+    remember();
+    if (filling || !current || e.target !== current.field || !e.isTrusted) return;
+    if (current.field === current.user) ask(current.field, true);   // narrow the list as you type
+    else close();
+  }, true);
+  document.addEventListener('change', remember, true);
+  var report = function () {
+    remember();
+    connect();
+    if (!last || !last.password || !bridge) return;
+    var key = last.username + '\n' + last.password + '\n' + last.newPassword;
+    if (key === sent) return;
+    sent = key;
+    bridge.submitted(JSON.stringify(last));
+  };
+  document.addEventListener('submit', report, true);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && isPassword(e.target)) setTimeout(function () { if (!tookEnter) report(); }, 0);
+  }, true);
+  document.addEventListener('click', function (e) {
+    var target = e.target.closest && e.target.closest('button, input[type=submit], [role=button]');
+    if (target && last && last.password) setTimeout(report, 0);
+  }, true);
+  window.addEventListener('pagehide', report, true);
+  var setValue = function (el, value) {
+    var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    el.focus();
+    setter.call(el, value);                            // so frameworks like React notice
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  // Called by the browser only after the user picked a suggestion, and only for this site.
+  window.__safariqtFill = function (data) {
+    if (!current || !data || data.origin !== location.origin || !document.contains(current.password)) return false;
+    filling = true;
+    try {
+      if (typeof data.username === 'string' && data.username && current.user) setValue(current.user, data.username);
+      if (typeof data.password === 'string') {
+        setValue(current.password, data.password);
+        if (data.confirm) passwords(scope(current.password)).forEach(function (p) {
+          if (p !== current.password) setValue(p, data.password);
+        });
+      }
+    } finally {
+      filling = false;
+    }
+    open = highlighted = false;
+    remember();
+    return true;
+  };
+})();"""
+
+
+# One web channel per page, shared by the browser's scripts (a second QWebChannel on the
+# same transport would take its messages away from the first).
+CHANNEL_BOOTSTRAP = r"""(function () {
+  if (window.__safariqtObjects) return;
+  var waiting = [], objects = null;
+  window.__safariqtObjects = function (callback) {
+    if (objects) { callback(objects); return; }
+    waiting.push(callback);
+    if (waiting.length > 1) return;
+    if (typeof QWebChannel === 'undefined' || !window.qt || !qt.webChannelTransport) { waiting = []; return; }
+    new QWebChannel(qt.webChannelTransport, function (channel) {
+      objects = channel.objects;
+      var ready = waiting; waiting = [];
+      ready.forEach(function (f) { f(objects); });
+    });
+  };
+})();"""
+
+
+def _webchannel_js() -> str:
+    from PySide6.QtCore import QFile, QIODevice
+    f = QFile(":/qtwebchannel/qwebchannel.js")
+    if not f.open(QIODevice.OpenModeFlag.ReadOnly):
+        return ""
+    try:
+        return bytes(f.readAll().data()).decode("utf-8") + "\n;" + CHANNEL_BOOTSTRAP
+    finally:
+        f.close()
+
+
+def set_password_scripts(profile: QWebEngineProfile, on: bool) -> None:
+    """(Kept for callers that only care about passwords; tint stays as the profile has it.)"""
+    set_isolated_scripts(profile, on, bool(profile.scripts().find(TINT_SCRIPT_NAME)))
+
+
+class PasswordBridge(QObject):
+    """What the password script may tell the browser - nothing it can ask for."""
+
+    def __init__(self, view: "WebView") -> None:
+        super().__init__(view)
+        self.view = view
+
+    @Slot(str)
+    def suggest(self, payload: str) -> None:
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            return
+        if isinstance(data, dict):
+            self.view.browser.on_password_field(self.view, data)
+
+    @Slot(str)
+    def key(self, name: str) -> None:
+        if name in ("down", "up", "enter"):
+            self.view.browser.on_password_key(self.view, name)
+
+    @Slot()
+    def dismiss(self) -> None:
+        self.view.browser.hide_password_suggestions(self.view)
+
+    @Slot(str)
+    def submitted(self, payload: str) -> None:
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            return
+        if isinstance(data, dict):
+            self.view.browser.on_password_submitted(self.view, data)
+
+
+def copy_secret(text: str) -> None:
+    """Copies a password, kept out of Windows clipboard history and cloud clipboard, and
+    cleared after 30 seconds if it's still there."""
+    mime = QMimeData()
+    mime.setText(text)
+    for name, value in (("ExcludeClipboardContentFromMonitorProcessing", b"\x01\x00\x00\x00"),
+                        ("CanIncludeInClipboardHistory", b"\x00\x00\x00\x00"),
+                        ("CanUploadToCloudClipboard", b"\x00\x00\x00\x00")):
+        mime.setData(f'application/x-qt-windows-mime;value="{name}"', QByteArray(value))
+    clipboard = QGuiApplication.clipboard()
+    clipboard.setMimeData(mime)
+    QTimer.singleShot(CLIPBOARD_CLEAR_MS, lambda: clipboard.text() == text and clipboard.clear())
+
+
+class PasswordManager(QObject):
+    """The password vault for the whole app (every window, private ones too) plus its
+    settings. Windows ask it to unlock through BrowserWindow.ensure_passwords_unlocked()."""
+
+    changed = Signal()
+
+    def __init__(self, path: str, settings: QSettings, parent: QObject | None = None, dpapi: tuple | None = None) -> None:
+        super().__init__(parent)
+        self.vault = PasswordVault(path, dpapi)
+        self.settings = settings
+        self.session_never: set[str] = set()         # 'Never for This Website' while locked
+        self.icloud = ICloudPasswords(settings, self)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(AUTO_LOCK_MS)
+        self._idle.timeout.connect(self.lock)
+
+    def available(self) -> bool:
+        return self.vault.available()
+
+    def offer_save(self) -> bool:
+        return self.settings.value("offerSavePasswords", True, type=bool)
+
+    def set_offer_save(self, on: bool) -> None:
+        self.settings.setValue("offerSavePasswords", bool(on))
+        self.changed.emit()
+
+    def touch(self) -> None:
+        """Passwords were used: the hour before they lock again starts over."""
+        if not self.vault.locked():
+            self._idle.start()
+
+    def try_windows_unlock(self) -> bool:
+        vault = self.vault
+        if not vault.locked() or not vault.exists():
+            return not vault.locked()
+        try:
+            if vault.windows_unlock() and vault.unlock_with_windows():
+                self.touch()
+                self.changed.emit()
+                return True
+        except (VaultError, OSError, ValueError):
+            pass
+        return False
+
+    def lock(self) -> None:
+        self._idle.stop()
+        self.vault.lock()
+        self.changed.emit()
+
+    def notify(self) -> None:
+        self.touch()
+        self.changed.emit()
+
+
+# --------------------------------------------------------------------------------------
+# Page colour in the tab bar (page menu > Theme > Tint With Page Colour), like Safari's
+# coloured tab bar and the Firefox add-on "Adaptive Tab Bar Colour" (MIT). The colour is
+# the site's theme-color, else the background at the top of the page; it is kept light
+# (or dark) enough for the window's text to stay readable.
+# --------------------------------------------------------------------------------------
+TINT_SCRIPT_NAME = "safariqt-tint"
+TINT_MIN_CONTRAST = 6.0                  # WCAG contrast between the tint and the window's text
+
+# Runs in the hidden world, main frame only: reports the page's colours to the browser
+# (they're re-read as the page scrolls or changes, at most four times a second).
+TINT_SCRIPT = r"""(function () {
+  'use strict';
+  if (window.__safariqtTint) return;
+  window.__safariqtTint = true;
+  var bridge = null, last = '', timer = null, lastAt = 0;
+  var canvas = document.createElement('canvas').getContext('2d');
+  var normal = function (text) {             // any CSS colour -> '#rrggbb' or 'rgba(r, g, b, a)'
+    if (!text || !canvas) return '';
+    canvas.fillStyle = '#010203';
+    canvas.fillStyle = String(text).trim();
+    var out = canvas.fillStyle;
+    return out === '#010203' && !/^#010203$/i.test(String(text).trim()) ? '' : out;
+  };
+  var themeColour = function () {
+    var metas = document.querySelectorAll('meta[name="theme-color"]');
+    for (var i = 0; i < metas.length; i++) {
+      var media = metas[i].getAttribute('media');
+      if (!media || matchMedia(media).matches) return normal(metas[i].getAttribute('content'));
+    }
+    return '';
+  };
+  var background = function (el) {
+    if (!(el instanceof Element)) return '';
+    var style = getComputedStyle(el);
+    if (style.opacity === '0' || style.visibility === 'hidden') return '';
+    var c = normal(style.backgroundColor);
+    return c && c !== 'rgba(0, 0, 0, 0)' ? c : '';
+  };
+  var pageColours = function () {
+    var out = [];
+    var stack = document.elementsFromPoint(window.innerWidth / 2, 3);
+    for (var i = 0; i < stack.length && out.length < 6; i++) {
+      var el = stack[i];
+      if (el instanceof HTMLElement && el.offsetWidth >= window.innerWidth * 0.9 && el.offsetHeight >= 20) {
+        var c = background(el);
+        if (c) out.push(c);
+      }
+    }
+    [document.body, document.documentElement].forEach(function (el) { var c = background(el); if (c) out.push(c); });
+    return out;
+  };
+  var report = function () {
+    timer = null;
+    if (!bridge || document.visibilityState !== 'visible') return;
+    lastAt = Date.now();
+    var data = JSON.stringify({theme: themeColour(), page: pageColours(),
+                               dark: matchMedia('(prefers-color-scheme: dark)').matches});
+    if (data === last) return;
+    last = data;
+    bridge.colours(data);
+  };
+  var soon = function () {
+    if (timer) return;
+    timer = setTimeout(report, Math.max(0, 250 - (Date.now() - lastAt)));
+  };
+  var connect = function () {
+    if (bridge || !window.__safariqtObjects) return;
+    window.__safariqtObjects(function (objects) { bridge = objects.safariqtTint; report(); });
+  };
+  connect();
+  ['scroll', 'resize', 'click', 'transitionend', 'animationend', 'visibilitychange', 'load', 'pageshow']
+    .forEach(function (name) { window.addEventListener(name, soon, {capture: true, passive: true}); });
+  var watch = new MutationObserver(soon);
+  if (document.head) watch.observe(document.head, {childList: true, subtree: true, attributes: true,
+                                                   attributeFilter: ['content', 'media']});
+  watch.observe(document.documentElement, {attributes: true, attributeFilter: ['class', 'style', 'data-theme']});
+  if (document.body) watch.observe(document.body, {attributes: true, attributeFilter: ['class', 'style']});
+  setTimeout(soon, 600);                       // after late styles and fonts
+})();"""
+
+
+def parse_css_colour(text: str) -> tuple[float, float, float, float] | None:
+    """'#rgb', '#rrggbb', '#rrggbbaa', 'rgb(...)'/'rgba(...)' (comma or space syntax) or a
+    colour name -> (r, g, b, alpha) with r, g, b in 0..255 and alpha in 0..1."""
+    text = str(text or "").strip().lower()
+    if not text or len(text) > 64:
+        return None
+    m = re.fullmatch(r"rgba?\(\s*([\d.]+%?)[\s,]+([\d.]+%?)[\s,]+([\d.]+%?)(?:\s*[,/]\s*([\d.]+%?))?\s*\)", text)
+    if m:
+        def channel(v: str) -> float:
+            return min(255.0, float(v[:-1]) * 2.55 if v.endswith("%") else float(v))
+        alpha = m.group(4)
+        a = 1.0 if alpha is None else min(1.0, float(alpha[:-1]) / 100 if alpha.endswith("%") else float(alpha))
+        try:
+            return channel(m.group(1)), channel(m.group(2)), channel(m.group(3)), a
+        except ValueError:
+            return None
+    if re.fullmatch(r"#[0-9a-f]{3,8}", text) or re.fullmatch(r"[a-z]{3,24}", text):
+        if text.startswith("#") and len(text) == 9:               # #rrggbbaa (Qt reads #aarrggbb)
+            text = "#" + text[7:9] + text[1:7]
+        if text.startswith("#") and len(text) not in (4, 7, 9):
+            return None
+        colour = QColor(text)
+        if colour.isValid():
+            return float(colour.red()), float(colour.green()), float(colour.blue()), colour.alphaF()
+    return None
+
+
+def composite_colours(layers: list[str], base: tuple[float, float, float]) -> tuple[float, float, float] | None:
+    """Blends see-through backgrounds (topmost first) over each other and over base."""
+    parsed = [c for c in (parse_css_colour(text) for text in layers) if c is not None and c[3] > 0]
+    if not parsed:
+        return None
+    r, g, b = base
+    for cr, cg, cb, a in reversed(parsed):                       # bottom layer first
+        r, g, b = cr * a + r * (1 - a), cg * a + g * (1 - a), cb * a + b * (1 - a)
+    return r, g, b
+
+
+def relative_luminance(rgb: tuple[float, float, float]) -> float:
+    def linear(c: float) -> float:
+        c /= 255.0
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (linear(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    la, lb = sorted((relative_luminance(a), relative_luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def readable_tint(rgb: tuple[float, float, float], theme: dict) -> QColor:
+    """The colour, lightened (light windows) or darkened (dark ones) just enough to keep
+    the window's text readable on it. The hue stays."""
+    text = qc(theme["text"])
+    text_rgb = (float(text.red()), float(text.green()), float(text.blue()))
+    colour = QColor.fromRgbF(*(min(1.0, max(0.0, c / 255.0)) for c in rgb))
+    h, s, l, _ = colour.getHslF()
+    h = max(0.0, h)                                              # -1 for greys
+    step = -0.02 if theme["dark"] else 0.02
+    for _ in range(60):
+        current = (colour.redF() * 255, colour.greenF() * 255, colour.blueF() * 255)
+        if contrast_ratio(current, text_rgb) >= TINT_MIN_CONTRAST:
+            break
+        l = min(1.0, max(0.0, l + step))
+        s = s * 0.97                                             # very bright colours calm down a little
+        colour = QColor.fromHslF(h, s, l)
+    return QColor(colour.name())
+
+
+def choose_tint(data: dict | None, theme: dict, use_theme_colour: bool = True) -> QColor | None:
+    """The tab bar colour for what a page reported, or None (use the theme's own)."""
+    if not isinstance(data, dict):
+        return None
+    content = qc(theme["content"])
+    base = (float(content.red()), float(content.green()), float(content.blue()))
+    rgb = None
+    if use_theme_colour and data.get("theme"):
+        parsed = parse_css_colour(data["theme"])
+        if parsed is not None and parsed[3] > 0:
+            rgb = composite_colours([data["theme"]], base)
+    if rgb is None:
+        page = data.get("page")
+        if isinstance(page, list):
+            rgb = composite_colours([str(c) for c in page[:8]], base)
+    return readable_tint(rgb, theme) if rgb is not None else None
+
+
+# --------------------------------------------------------------------------------------
+# Reader (F9, or the Reader button in the address field when a page looks like an
+# article): the article alone, in clean type, over the page. Article detection and
+# extraction are Mozilla's Readability (readability.js next to this file, Apache 2.0).
+# --------------------------------------------------------------------------------------
+READER_FILE = "readability.js"
+READER_THEMES = {                      # background, text, secondary, link
+    "light": ("#FFFFFF", "#1D1D1F", "#6E6E73", "#0B7A6E"),
+    "sepia": ("#F8F1E3", "#3B2F23", "#7A6A57", "#8A5A12"),
+    "dark": ("#1C1E21", "#E6E6E8", "#9A9AA0", "#5ED3C0"),
+}
+READER_SIZES = (15, 17, 19, 21, 24, 28, 32)
+_reader_source_cache: list = []
+
+
+def reader_source() -> str:
+    """Readability's code ('' when the file is missing: no Reader then)."""
+    if not _reader_source_cache:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), READER_FILE), encoding="utf-8") as f:
+                _reader_source_cache.append(f.read())
+        except OSError:
+            _reader_source_cache.append("")
+    return _reader_source_cache[0]
+
+
+READER_CHECK_JS = r"""(function () {
+%SOURCE%
+  try { return isProbablyReaderable(document, { minContentLength: 140, minScore: 20 }); } catch (e) { return false; }
+})()"""
+
+READER_TOGGLE_JS = r"""(function (prefs, themes) {
+  var existing = window.__huginnReader;
+  if (existing) { existing.close(); return 'closed'; }
+  if (prefs.check) return 'off';
+%SOURCE%
+  var article = null;
+  try { article = new Readability(document.cloneNode(true), { charThreshold: 300 }).parse(); } catch (e) {}
+  if (!article || !article.content) return 'none';
+  function report(kind, value) {
+    try { window.__safariqtObjects && window.__safariqtObjects(function (o) { o.safariqtReader && o.safariqtReader[kind](value); }); } catch (e) {}
+  }
+  var tpl = document.createElement('template');
+  tpl.innerHTML = article.content;
+  tpl.content.querySelectorAll('script, style, iframe, object, embed, form, link, meta').forEach(function (n) { n.remove(); });
+  tpl.content.querySelectorAll('*').forEach(function (el) {
+    Array.prototype.slice.call(el.attributes).forEach(function (a) { if (/^on/i.test(a.name) || a.name === 'style') el.removeAttribute(a.name); });
+  });
+  var host = document.createElement('huginn-reader');
+  host.style.cssText = 'all: initial; position: fixed; inset: 0; z-index: 2147483647; display: block;';
+  var root = host.attachShadow({ mode: 'closed' });
+  root.innerHTML = '<style>' +
+    ':host { all: initial; }' +
+    '.hr-page:focus { outline: none; }' +
+    '.hr-page { position: fixed; inset: 0; overflow-y: auto; background: var(--bg); color: var(--fg); transition: background .2s, color .2s; }' +
+    '.hr-bar { position: sticky; top: 0; display: flex; justify-content: center; gap: 6px; padding: 10px; ' +
+    '  background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(12px); z-index: 1; ' +
+    '  font: 13px "Segoe UI Variable Text", "Segoe UI", sans-serif; }' +
+    '.hr-bar button { border: 1px solid color-mix(in srgb, var(--fg) 16%, transparent); background: transparent; color: var(--fg); ' +
+    '  border-radius: 8px; padding: 4px 11px; font: inherit; cursor: pointer; min-width: 34px; }' +
+    '.hr-bar button:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }' +
+    '.hr-bar .sw { width: 26px; min-width: 26px; height: 26px; padding: 0; border-radius: 13px; }' +
+    '.hr-bar .on { outline: 2px solid var(--link); outline-offset: 1px; }' +
+    '.hr-bar .gap { width: 14px; }' +
+    '.hr-article { max-width: 38em; margin: 0 auto; padding: 18px 28px 90px; font-size: var(--size); line-height: 1.6; ' +
+    '  font-family: var(--font); -webkit-font-smoothing: antialiased; }' +
+    'h1.hr-title { font-size: 1.75em; line-height: 1.2; margin: .4em 0 .2em; font-weight: 700; }' +
+    '.hr-meta { color: var(--muted); font-size: .8em; margin-bottom: 1.6em; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; }' +
+    '.hr-body article, .hr-body section { all: unset; display: block; }' +
+    '.hr-article a { color: var(--link); }' +
+    '.hr-article img, .hr-article video, .hr-article figure, .hr-article picture { max-width: 100%; height: auto; }' +
+    '.hr-article figure { margin: 1.2em 0; } .hr-article figcaption { color: var(--muted); font-size: .8em; }' +
+    '.hr-article pre, .hr-article code { font-family: "Cascadia Mono", Consolas, monospace; font-size: .85em; }' +
+    '.hr-article pre { overflow-x: auto; padding: 12px; border-radius: 8px; background: color-mix(in srgb, var(--fg) 6%, transparent); }' +
+    '.hr-article blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid color-mix(in srgb, var(--fg) 20%, transparent); color: var(--muted); }' +
+    '.hr-article table { border-collapse: collapse; max-width: 100%; display: block; overflow-x: auto; }' +
+    '.hr-article td, .hr-article th { border: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); padding: 4px 8px; }' +
+    '</style><div class="hr-page"><div class="hr-bar">' +
+    '<button data-a="smaller" title="Smaller text">A−</button><button data-a="larger" title="Larger text">A+</button>' +
+    '<span class="gap"></span><button data-a="font" title="Switch font"></button><span class="gap"></span>' +
+    '<button class="sw" data-a="light" title="White"></button><button class="sw" data-a="sepia" title="Sepia"></button>' +
+    '<button class="sw" data-a="dark" title="Night"></button><span class="gap"></span>' +
+    '<button data-a="listen" title="Read the article aloud">Listen</button><span class="gap"></span>' +
+    '<button data-a="close" title="Close Reader (F9 or Esc)">Done</button></div>' +
+    '<article class="hr-article"><h1 class="hr-title"></h1><div class="hr-meta"></div><div class="hr-body"></div></article></div>';
+  var page = root.querySelector('.hr-page');
+  root.querySelector('.hr-title').textContent = article.title || document.title;
+  root.querySelector('.hr-meta').textContent = [article.byline, article.siteName].filter(Boolean).join(' · ');
+  root.querySelector('.hr-body').appendChild(document.importNode(tpl.content, true));
+  var sizes = %SIZES%;
+  function apply() {
+    var t = themes[prefs.theme] || themes.light;
+    page.style.setProperty('--bg', t[0]); page.style.setProperty('--fg', t[1]);
+    page.style.setProperty('--muted', t[2]); page.style.setProperty('--link', t[3]);
+    page.style.setProperty('--size', sizes[prefs.size] + 'px');
+    page.style.setProperty('--font', prefs.font === 'sans' ? '"Segoe UI Variable Text", "Segoe UI", sans-serif'
+                                                         : 'Charter, "Iowan Old Style", Georgia, "Times New Roman", serif');
+    root.querySelector('[data-a="font"]').textContent = prefs.font === 'sans' ? 'Serif' : 'Sans';
+    ['light', 'sepia', 'dark'].forEach(function (k) {
+      var b = root.querySelector('[data-a="' + k + '"]');
+      b.style.background = themes[k][0];
+      b.classList.toggle('on', prefs.theme === k);
+    });
+  }
+  var listening = false;
+  var html = document.documentElement, oldOverflow = html.style.getPropertyValue('overflow'),
+      oldPriority = html.style.getPropertyPriority('overflow');
+  function close() {
+    if (listening) report('speak', '');
+    host.remove();
+    document.removeEventListener('keydown', onKey, true);
+    html.style.setProperty('overflow', oldOverflow, oldPriority);
+    window.__huginnReader = null;
+    report('closed', '');
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+  }
+  root.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('button');
+    if (!b) return;
+    var a = b.getAttribute('data-a');
+    if (a === 'close') { close(); return; }
+    if (a === 'listen') {
+      listening = !listening;
+      b.textContent = listening ? 'Stop' : 'Listen';
+      report('speak', listening ? (article.title ? article.title + '.\n\n' : '') + (article.textContent || '') : '');
+      return;
+    }
+    if (a === 'smaller') prefs.size = Math.max(0, prefs.size - 1);
+    else if (a === 'larger') prefs.size = Math.min(sizes.length - 1, prefs.size + 1);
+    else if (a === 'font') prefs.font = prefs.font === 'sans' ? 'serif' : 'sans';
+    else if (themes[a]) prefs.theme = a;
+    apply();
+    report('prefs', JSON.stringify(prefs));
+  });
+  apply();
+  html.style.setProperty('overflow', 'hidden', 'important');
+  html.appendChild(host);
+  document.addEventListener('keydown', onKey, true);
+  page.tabIndex = -1;
+  page.focus();
+  window.__huginnReader = { close: close, stopped: function () {      // reading aloud ended
+    listening = false;
+    var b = root.querySelector('[data-a="listen"]');
+    if (b) b.textContent = 'Listen';
+  } };
+  return 'open';
+})(%PREFS%, %THEMES%)"""
+
+
+class ReaderBridge(QObject):
+    """What the Reader may tell the browser: it was closed, or new text settings."""
+
+    def __init__(self, view: "WebView") -> None:
+        super().__init__(view)
+        self.view = view
+
+    @Slot(str)
+    def closed(self, _payload: str = "") -> None:
+        self.view.browser.on_reader_closed(self.view)
+
+    @Slot(str)
+    def speak(self, text: str) -> None:
+        self.view.browser.speak(text[:200000])
+
+    @Slot(str)
+    def prefs(self, payload: str) -> None:
+        if len(payload) > 512:
+            return
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            return
+        if isinstance(data, dict):
+            self.view.browser.save_reader_prefs(data)
+
+
+class TintBridge(QObject):
+    """What the tint script may tell the browser: the page's colours, nothing else."""
+
+    def __init__(self, view: "WebView") -> None:
+        super().__init__(view)
+        self.view = view
+
+    @Slot(str)
+    def colours(self, payload: str) -> None:
+        if len(payload) > 4096:
+            return
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            return
+        if isinstance(data, dict):
+            self.view.browser.on_page_colours(self.view, data)
+
+
+def set_isolated_scripts(profile: QWebEngineProfile, passwords: bool, tint: bool) -> None:
+    """The browser's own scripts in the hidden JavaScript world (main frame only): the web
+    channel they talk over, the password script and the tint script, as turned on."""
+    scripts = profile.scripts()
+    for name in (WEBCHANNEL_SCRIPT_NAME, PASSWORD_SCRIPT_NAME, TINT_SCRIPT_NAME):
+        for script in scripts.find(name):
+            scripts.remove(script)
+    wanted = [(WEBCHANNEL_SCRIPT_NAME, _webchannel_js(), QWebEngineScript.InjectionPoint.DocumentCreation)]
+    if passwords:
+        wanted.append((PASSWORD_SCRIPT_NAME, PASSWORD_SCRIPT, QWebEngineScript.InjectionPoint.DocumentReady))
+    if tint:
+        wanted.append((TINT_SCRIPT_NAME, TINT_SCRIPT, QWebEngineScript.InjectionPoint.DocumentReady))
+    if len(wanted) == 1:
+        return
+    for name, source, point in wanted:
+        script = QWebEngineScript()
+        script.setName(name)
+        script.setSourceCode(source)
+        script.setInjectionPoint(point)
+        script.setWorldId(APPLICATION_WORLD)
+        script.setRunsOnSubFrames(False)                # never into embedded frames from other sites
+        scripts.insert(script)
+
+
+# --------------------------------------------------------------------------------------
+# Typing sounds (page menu > Typing Sounds): a key sound for every key typed - in the
+# address field and in web pages - like Opera GX. Every sound is two strokes, as on a real
+# keyboard and in GX's packs: the key going down and, about 90 ms later, coming back up.
+# They're synthesised here (no recordings): a short contact pulse rings the resonances of
+# keycap and switch (the click), the case thumps, and the plate rings on as soft noise
+# between the strokes. Tactile and Clicky are tuned to measurements of Opera's own GX
+# packs of those names (levels, timing, frequency balance); nothing of theirs is used.
+# The files are written once, at GX's level (about -19 dBFS over the loudest 20 ms,
+# peaks at most -3.3 dBFS), and played with QSoundEffect.
+# --------------------------------------------------------------------------------------
+TYPING_SOUNDS = {"off": "Off", "tactile": "Tactile", "clicky": "Clicky", "thocky": "Thocky",
+                 "typewriter": "Typewriter", "bubble": "Bubble"}
+# At Loud even two sounds landing exactly together stay under full scale (2 x -3.3 dBFS x 0.72).
+TYPING_VOLUMES = {"quiet": ("Quiet", 0.25), "medium": ("Medium", 0.45), "loud": ("Loud", 0.72)}
+SOUND_RATE = 48000                      # what Windows mixes at, so nothing is resampled
+SOUND_VERSION = 2                       # bump to regenerate the files after changing the synthesis
+SOUND_KINDS = {"key": 4, "space": 2, "enter": 2, "backspace": 2}     # kind -> variants, played in turn
+SOUND_POOL = 2                          # players per file, so fast typing overlaps
+SOUND_LOUDNESS = -19.0                  # dBFS over the loudest 20 ms (GX's packs: -18 to -20)
+SOUND_CEILING = -3.3                    # dBFS; peaks above SOUND_KNEE are rounded off under it
+SOUND_KNEE = -6.5
+
+# Recipes. click/low/bed/ring: (Hz, dB, decay ms). down/up: the hits of each stroke as
+# (ms, dB, part); parts: "click" (keycap and switch), "tick" (a click leaf: the bright half),
+# "bottom" (click + body + case thump + plate ring), "top" (click + body + plate ring),
+# "bell", "pop". "like" starts from another kind's recipe, "pitch" moves it up or down;
+# "level" (dB) evens out how loud packs sound (low sounds seem quieter at the same level).
+KEY_RECIPES = {
+    "tactile": {
+        "key": {
+            "ms": 135, "contact": 0.06,
+            "click": [(1099, -2.6, 3.37), (1673, 5.3, 3.37), (2036, 6.1, 3.37), (2672, -2.7, 3.37), (3173, 5.0, 3.37),
+                      (3741, -1.0, 3.37), (4354, -5.2, 2.07), (10093, 6.7, 1.3), (10834, -1.0, 1.3)],
+            "low": [(302, -23.5, 18.4), (398, -22.2, 18.4), (794, -23.7, 18.4)],
+            "bed": [(1688, -26.1, 52.8), (1816, -27.9, 52.8), (2042, -24.1, 52.8), (2183, -23.7, 52.8), (3343, -23.6, 42.2),
+                    (3501, -24.4, 42.2), (3896, -29.3, 42.2)],
+            "thump": (82, -5.5), "hiss": -38.0, "up_at": 85.0, "up_gain": -5.5, "up_bed": 3.5,
+            "down": [(0, -16.5, "click"), (4.0, -2.5, "click"), (4.0, 0, "bottom"), (5.1, -1.5, "click")],
+            "up": [(0, -16.5, "click"), (4.5, -2.5, "click"), (4.5, 0, "top"), (5.6, -2.5, "click")],
+        },
+        "space": {
+            "ms": 163, "contact": 0.06,
+            "click": [(1878, -14.0, 3.2), (2408, -17.0, 3.2), (2915, 0.8, 3.2), (3938, -4.4, 3.2), (4562, -5.1, 1.97)],
+            "low": [(281, -18.4, 18.4), (451, -16.5, 18.4), (753, -23.6, 18.4)],
+            "bed": [(1711, -30.4, 74.7), (1825, -34.4, 74.7), (1928, -31.9, 74.7), (2054, -32.8, 74.7), (2323, -31.3, 74.7),
+                    (2534, -34.8, 59.7), (3270, -34.8, 59.7)],
+            "thump": (85, -10.0), "hiss": -29.0, "up_at": 90.0, "up_gain": 0.0, "up_bed": 8.0,
+            "down": [(0, -16.0, "click"), (4.0, 4.0, "click"), (4.4, 0, "bottom"), (6.1, 1.0, "click")],
+            "up": [(0, -21.0, "click"), (3.0, -1.0, "click"), (3.4, 0, "top"), (5.1, 0.0, "click")],
+        },
+        "enter": {
+            "ms": 160, "contact": 0.06,
+            "click": [(1274, 4.0, 2.6), (2265, -4.1, 2.6), (2988, -7.2, 2.6), (3814, -3.1, 2.6)],
+            "low": [(278, -23.6, 18.4), (606, -24.8, 18.4), (817, -23.6, 18.4)],
+            "bed": [(855, -35.8, 98.5), (973, -32.2, 98.5), (1178, -28.3, 98.5), (1304, -27.1, 98.5), (1553, -32.7, 98.5),
+                    (1808, -34.9, 98.5), (2165, -35.7, 98.5)],
+            "thump": (88, -9.5), "hiss": -39.0, "up_at": 96.0, "up_gain": -1.0, "up_bed": -2.5,
+            "down": [(0, -5.5, "click"), (2.0, 1.0, "click"), (2.0, 0, "bottom"), (2.5, -15.0, "click")],
+            "up": [(0, -11.0, "click"), (1.0, -4.5, "click"), (1.0, 0, "top"), (1.5, -16.0, "click")],
+        },
+        "backspace": {
+            "ms": 118, "contact": 0.06,
+            "click": [(1140, -0.1, 3.37), (2042, 0.0, 3.37), (7890, -4.5, 2.07), (9390, -11.1, 1.3)],
+            "low": [(442, -21.4, 9.8), (554, -21.2, 9.8), (741, -9.3, 9.8)],
+            "bed": [(984, -29.1, 42.9), (1172, -28.9, 42.9), (1559, -30.0, 42.9), (1828, -25.2, 42.9), (2013, -27.8, 42.9),
+                    (2268, -32.8, 42.9), (2997, -30.4, 34.3)],
+            "thump": (79, -8.5), "hiss": -34.0, "up_at": 72.0, "up_gain": -2.0, "up_bed": 4.0,
+            "down": [(0, -21.5, "click"), (1.2, -14.0, "click"), (4.0, 0, "bottom"), (4.2, 2.0, "click")],
+            "up": [(0, -17.5, "click"), (0.7, -10.0, "click"), (3.5, 0, "top"), (3.7, 1.0, "click")],
+        },
+    },
+    "clicky": {
+        "key": {
+            "ms": 145, "contact": 0.06, "tick": 1.0,
+            "click": [(1424, -1.5, 4.85), (1890, -1.6, 4.85), (2253, -3.0, 4.85), (3117, -1.0, 4.85), (3943, -9.0, 4.85),
+                      (6615, 2.0, 2.99), (7260, 2.0, 2.99), (9574, 4.5, 1.87), (10690, -1.9, 1.87), (11449, -2.8, 1.87)],
+            "low": [(363, -22.3, 14.9), (738, -13.6, 14.9)],
+            "bed": [(1104, -29.5, 65.0), (1289, -33.6, 65.0), (1635, -28.0, 65.0), (1822, -25.6, 65.0), (2112, -29.4, 65.0),
+                    (2271, -29.4, 65.0), (2473, -35.5, 65.0)],
+            "thump": (146, -7.0), "hiss": -32.0, "up_at": 98.0, "up_gain": -3.5, "up_bed": 10.0,
+            "down": [(3.8, -2.0, "tick"), (6.4, -5.0, "tick"), (7.0, 0, "bottom"), (7.4, -3.0, "click")],
+            "up": [(0, -2.5, "tick"), (4.0, 0, "top"), (4.4, -5.0, "click")],
+        },
+        "space": {
+            "ms": 205, "contact": 0.06, "tick": 2.0,
+            "click": [(1729, -15.6, 5.2), (2268, -4.5, 5.2), (2833, -13.8, 5.2), (3589, -12.3, 5.2), (3923, -10.4, 5.2),
+                      (4228, -7.7, 3.2), (4787, -12.9, 3.2), (6331, -5.8, 3.2), (10644, -4.4, 2.0), (11145, -11.1, 2.0)],
+            "low": [],
+            "bed": [(873, -31.5, 42.9), (999, -27.5, 42.9), (1198, -31.4, 42.9), (1304, -32.2, 42.9), (1397, -32.3, 42.9),
+                    (1699, -31.1, 42.9), (2165, -31.2, 42.9)],
+            "thump": (117, -9.5), "hiss": -38.0, "up_at": 104.0, "up_gain": -5.0, "up_bed": 7.0,
+            "down": [(0, -21.5, "click"), (2.0, -4.5, "tick"), (4.6, -7.5, "tick"), (9.0, 0, "bottom"), (10.1, -5.0, "click")],
+            "up": [(0, -6.5, "tick"), (3.5, 0, "top"), (4.6, -7.0, "click")],
+        },
+        "enter": {
+            "ms": 200, "contact": 0.06, "tick": -0.5,
+            "click": [(2142, -7.9, 5.2), (2546, -16.0, 5.2), (3580, -18.9, 5.2), (4318, -23.5, 3.2), (4573, -24.8, 3.2),
+                      (4822, -21.5, 3.2), (5373, -10.0, 3.2), (7175, -14.5, 3.2), (7409, -10.8, 3.2), (7998, -9.7, 3.2)],
+            "low": [(530, -24.7, 6.7), (645, -24.4, 6.7), (891, -12.5, 6.7)],
+            "bed": [(694, -34.4, 37.3), (896, -31.8, 37.3), (1014, -31.0, 37.3), (1172, -32.8, 37.3), (1359, -32.2, 37.3),
+                    (1482, -32.9, 37.3), (2021, -33.9, 37.3)],
+            "thump": (146, -14.5), "hiss": -11.5, "up_at": 106.0, "up_gain": -4.5, "up_bed": 12.0,
+            "down": [(0, -12.0, "click"), (5.0, 0.0, "tick"), (8.0, -3.0, "tick"), (11.5, 0, "bottom"), (12.2, -4.0, "click")],
+            "up": [(0, 0.0, "tick"), (2.5, 0, "top"), (3.2, -1.0, "click")],
+        },
+        "backspace": {
+            "ms": 190, "contact": 0.06, "tick": 3.0,
+            "click": [(1104, 2.1, 4.69), (1597, 0.0, 4.69), (2165, 1.8, 4.69), (2672, 2.0, 4.69), (3996, -1.7, 4.69),
+                      (5285, 0.9, 2.88), (6472, -0.2, 2.88), (7163, 5.0, 2.88), (10251, 2.4, 1.8), (10934, 1.2, 1.8)],
+            "low": [],
+            "bed": [(589, -28.3, 130.0), (706, -34.3, 130.0), (1110, -25.0, 130.0), (1556, -33.3, 130.0), (1922, -33.5, 130.0),
+                    (2112, -30.3, 130.0), (3727, -35.0, 104.0)],
+            "thump": (135, -7.5), "hiss": -31.0, "up_at": 106.0, "up_gain": -2.0, "up_bed": 10.0,
+            "down": [(1.8, 3.0, "tick"), (4.4, 0.0, "tick"), (7.8, 0, "bottom"), (9.4, 1.0, "click")],
+            "up": [(0, -12.0, "tick"), (5.2, 0, "top"), (6.8, -1.0, "click")],
+        },
+    },
+    "thocky": {                     # a lubed linear switch under thick keycaps: deep, muted, soft on the way up
+        "key": {
+            "ms": 125, "contact": 0.22, "level": 1.0,
+            "click": [(560, 0, 3.6), (820, 2, 3.4), (1080, 0, 3.0), (1420, -4, 2.6), (1900, -8, 2.2), (2500, -13, 1.8),
+                      (3400, -19, 1.4)],
+            "low": [(190, -10, 14), (270, -12, 12), (420, -9, 10)],
+            "bed": [(640, -27, 40), (880, -27, 40), (1200, -29, 35), (1560, -31, 30)],
+            "thump": (112, -5), "hiss": -40, "up_at": 80, "up_gain": -7, "up_bed": 0,
+            "down": [(0, -18, "click"), (3.0, -9, "click"), (4.2, 0, "bottom"), (5.3, -5, "click")],
+            "up": [(0, -20, "click"), (3.2, 0, "top"), (4.3, -6, "click")],
+        },
+        "space": {"like": "key", "pitch": 0.8, "ms": 150, "up_gain": -4, "thump": (98, -3)},
+        "enter": {"like": "key", "pitch": 0.88, "ms": 140, "up_gain": -5},
+        "backspace": {"like": "key", "pitch": 0.94},
+    },
+    "typewriter": {                 # a type bar striking the platen; the key and bar falling back after
+        "key": {
+            "ms": 175, "contact": 0.05,
+            "click": [(1850, 0, 6), (2650, 2, 7), (3500, 0, 6), (4700, -3, 5), (6200, -6, 4), (8100, -10, 3)],
+            "low": [(165, -6, 18), (240, -10, 14), (480, -14, 10)],
+            "ring": [(2650, -16, 40), (3720, -18, 32), (5150, -22, 25)],
+            "bed": [(1250, -26, 55), (2100, -26, 50), (3000, -28, 45)],
+            "thump": (150, -6), "hiss": -24, "up_at": 105, "up_gain": -9, "up_bed": -4,
+            "down": [(0, -16, "click"), (6.0, 0, "bottom"), (7.1, -7, "click")],
+            "up": [(0, -6, "click"), (2.6, -9, "click"), (5.0, 0, "top")],
+        },
+        "space": {"like": "key", "pitch": 0.72, "ring": [], "up_gain": -6},
+        "enter": {"like": "key", "ms": 700, "bell": [(2093, -4, 330), (4186, -14, 180), (6279, -24, 90)],
+                  "down": [(0, -16, "click"), (6.0, 0, "bottom"), (7.1, -7, "click"), (40, 0, "bell")]},
+        "backspace": {"like": "key", "pitch": 0.9},
+    },
+    "bubble": {                     # soft pops: one rising as the key goes down, a smaller one as it comes up
+        "key": {"ms": 110, "pop": (380, 1050, 35), "up_at": 62, "up_gain": -9, "up_pitch": 1.35, "level": 3.0,
+                "down": [(0, 0, "pop")], "up": [(0, 0, "pop")]},
+        "space": {"like": "key", "pitch": 0.68, "ms": 130, "pop": (380, 1050, 50)},
+        "enter": {"like": "key", "pitch": 0.8, "ms": 150, "down": [(0, 0, "pop"), (55, -4, "pop")], "up_at": 110},
+        "backspace": {"like": "key", "pop": (900, 420, 35)},
+    },
+}
+
+
+def key_recipe(pack: str, kind: str) -> dict:
+    kinds = KEY_RECIPES.get(pack, KEY_RECIPES["tactile"])
+    recipe = dict(kinds.get(kind) or kinds["key"])
+    if "like" in recipe:
+        base = dict(kinds[recipe.pop("like")])
+        pitch = recipe.pop("pitch", 1.0)
+        for field in ("click", "low", "bed", "ring", "bell"):
+            if field in base:
+                base[field] = [(f * pitch, db, ms) for f, db, ms in base[field]]
+        if "pop" in base:
+            f0, f1, ms = base["pop"]
+            base["pop"] = (f0 * pitch, f1 * pitch, ms)
+        if "pop" in recipe:
+            f0, f1, ms = recipe["pop"]
+            recipe["pop"] = (f0 * pitch, f1 * pitch, ms)
+        base.update(recipe)
+        recipe = base
+    return recipe
+
+
+def _contact(contact_ms: float) -> list[float]:
+    """The force of a hit over time: a half-sine summing to 1 (harder materials: shorter)."""
+    n = max(1, int(round(contact_ms * SOUND_RATE / 1000)))
+    p = [math.sin(math.pi * (i + 0.5) / n) for i in range(n)]
+    total = sum(p)
+    return [v / total for v in p]
+
+
+def _ring(out: list[float], start: int, push: list[float], freq: float, tau: float, amp: float) -> None:
+    """A resonance at freq Hz dying away with time constant tau (s), set ringing by push;
+    amp is its loudness for a sharp push. A band-pass: nothing is added at 0 Hz."""
+    if not 20 < freq < SOUND_RATE * 0.45 or amp == 0 or start >= len(out):
+        return
+    w = 2 * math.pi * freq / SOUND_RATE
+    r = math.exp(-1 / (tau * SOUND_RATE))
+    a1, a2, g = 2 * r * math.cos(w), r * r, amp / 2
+    end = min(len(out), start + len(push) + 2 + int(tau * SOUND_RATE * 9.2))     # to -80 dB
+    y1 = y2 = x1 = x2 = 0.0
+    i = start
+    for x in push + [0.0, 0.0]:
+        if i >= end:
+            return
+        x *= g
+        y = a1 * y1 - a2 * y2 + x - x2
+        out[i] += y
+        y2, y1, x2, x1 = y1, y, x1, x
+        i += 1
+    for i in range(i, end):
+        y = a1 * y1 - a2 * y2
+        out[i] += y
+        y2, y1 = y1, y
+
+
+def _noise_band(out: list[float], start: int, noise: list[float], freq: float, tau: float, amp: float, q: float = 5) -> None:
+    """Noise dying away with time constant tau (s) through a band-pass at freq: the soft,
+    noisy ring of plate and case. amp is its loudness (RMS) at the start."""
+    if not 20 < freq < SOUND_RATE * 0.45 or start >= len(out):
+        return
+    w = 2 * math.pi * freq / SOUND_RATE
+    alpha = math.sin(w) / (2 * q)
+    b0, a1, a2 = alpha / (1 + alpha), -2 * math.cos(w) / (1 + alpha), (1 - alpha) / (1 + alpha)
+    env = amp / (0.577 * math.sqrt(2 * (freq / q) / SOUND_RATE))
+    d = math.exp(-1 / (tau * SOUND_RATE))
+    rise = 1 - math.exp(-1 / (0.0008 * SOUND_RATE))          # swells in under the click
+    swell = x1 = x2 = y1 = y2 = 0.0
+    for i in range(min(len(out) - start, len(noise))):
+        swell += (1 - swell) * rise
+        x = noise[i] * env * swell
+        env *= d
+        y = b0 * (x - x2) - a1 * y1 - a2 * y2
+        out[start + i] += y
+        x2, x1, y2, y1 = x1, x, y1, y
+
+
+def _hiss(out: list[float], start: int, rnd: random.Random, tau: float, amp: float, highpass: float = 8000) -> None:
+    """A puff of high noise: the crisp edge of a click."""
+    a = 1 / (1 + 2 * math.pi * highpass / SOUND_RATE)
+    d = math.exp(-1 / (tau * SOUND_RATE))
+    env, prev, y = amp, 0.0, 0.0
+    for i in range(start, min(len(out), start + int(tau * SOUND_RATE * 7))):
+        x = rnd.uniform(-1, 1) * env
+        y = a * (y + x - prev)
+        prev = x
+        out[i] += y
+        env *= d
+
+
+def _pop(out: list[float], start: int, f0: float, f1: float, ms: float, amp: float) -> None:
+    """A bubble pop: a tone gliding from f0 to f1 Hz."""
+    m = int(SOUND_RATE * ms / 1000)
+    phase = 0.0
+    for i in range(min(m, len(out) - start)):
+        t = i / m
+        phase += 2 * math.pi * (f0 + (f1 - f0) * t ** 0.6) / SOUND_RATE
+        out[start + i] += amp * math.sin(phase) * min(1.0, i / (0.002 * SOUND_RATE)) * math.exp(-t * 4)
+
+
+def _db(value: float) -> float:
+    return 10 ** (value / 20)
+
+
+def _hit(out: list[float], at: float, rnd: random.Random, recipe: dict, part: str, gain: float, pitch: float,
+         up: bool = False) -> None:
+    """One hit of a stroke, `at` seconds in."""
+    start = int(at * SOUND_RATE)
+    if part == "pop":
+        f0, f1, ms = recipe["pop"]
+        _pop(out, start, f0 * pitch, f1 * pitch, ms * rnd.uniform(0.9, 1.1), gain * 0.5)
+        return
+    if part == "bell":
+        for freq, db, ms in recipe.get("bell", ()):
+            _ring(out, start, [1.0], freq, ms / 1000, gain * _db(db))
+        return
+    push = _contact(recipe.get("contact", 0.06))
+    for freq, db, ms in recipe["click"]:
+        if part == "tick":                                   # a click leaf: bright, short
+            db, ms = (db + recipe.get("tick", 0)) if freq >= 2500 else db - 12, ms * 0.6
+        _ring(out, start, push, freq * pitch * rnd.uniform(0.975, 1.025), ms / 1000 * rnd.uniform(0.85, 1.15),
+              gain * _db(db + rnd.uniform(-2.5, 2.5)))
+    if recipe.get("hiss", -99) > -60:
+        _hiss(out, start, rnd, 0.0007, gain * _db(recipe["hiss"]))
+    if part not in ("bottom", "top"):
+        return
+    for freq, db, ms in recipe.get("low", ()):
+        _ring(out, start, push, freq * pitch * rnd.uniform(0.98, 1.02), ms / 1000, gain * _db(db + rnd.uniform(-2, 2)))
+    if part == "bottom":
+        if recipe.get("thump"):
+            freq, db = recipe["thump"]
+            _ring(out, start, _contact(1.5), freq * rnd.uniform(0.96, 1.04), 0.022, gain * _db(db))
+        for freq, db, ms in recipe.get("ring", ()):
+            _ring(out, start, push, freq * pitch * rnd.uniform(0.99, 1.01), ms / 1000, gain * _db(db))
+    if recipe.get("bed"):
+        noise = [rnd.uniform(-1, 1) for _ in range(len(out) - start)]
+        extra = recipe.get("up_bed", 0) if up else 0
+        for freq, db, ms in recipe["bed"]:
+            _noise_band(out, start, noise, freq * pitch * rnd.uniform(0.98, 1.02), ms / 1000,
+                        gain * _db(db + extra + rnd.uniform(-1.5, 1.5)))
+
+
+def finish_sound(out: list[float], loudness: float = SOUND_LOUDNESS) -> list[float]:
+    """Rumble removed, a short fade at the end, then levelled to `loudness` (dBFS over the
+    loudest 20 ms) with any peak above SOUND_KNEE rounded off below SOUND_CEILING - so no
+    pack, key or variant is louder than another and nothing clips."""
+    a = 1 / (1 + 2 * math.pi * 35 / SOUND_RATE)
+    y = prev = 0.0
+    for i, x in enumerate(out):
+        y = a * (y + x - prev)
+        prev = x
+        out[i] = y
+    n = len(out)
+    fade = min(n, int(0.008 * SOUND_RATE))
+    for i in range(fade):
+        out[n - 1 - i] *= (i / fade) ** 2
+    win = max(1, min(n, int(0.02 * SOUND_RATE)))
+    energy = sum(v * v for v in out[:win])
+    loudest = energy
+    for i in range(win, n):
+        energy += out[i] * out[i] - out[i - win] * out[i - win]
+        loudest = max(loudest, energy)
+    g = _db(loudness) / max(1e-12, math.sqrt(max(loudest, 0.0) / win))
+    knee, ceiling = _db(SOUND_KNEE), _db(SOUND_CEILING)
+    span = ceiling - knee
+    result = []
+    for v in out:
+        v *= g
+        if abs(v) > knee:                                     # soft knee: never past the ceiling
+            v = math.copysign(knee + span * math.tanh((abs(v) - knee) / span), v)
+        result.append(v)
+    return result
+
+
+def synth_key_sound(pack: str, kind: str, variant: int) -> list[float]:
+    """One key sound (both strokes) as samples in -1..1. The variants of a kind differ a
+    little - pitch, timing, which resonances ring loudest - so typing doesn't sound looped."""
+    recipe = key_recipe(pack, kind)
+    seed = int.from_bytes(hashlib.sha256(f"{pack}:{kind}:{variant}:v{SOUND_VERSION}".encode()).digest()[:4], "big")
+    rnd = random.Random(seed)
+    out = [0.0] * int(recipe["ms"] / 1000 * SOUND_RATE)
+    pitch = 1 + rnd.uniform(-0.04, 0.04)
+    for ms, db, part in recipe["down"]:
+        _hit(out, ms / 1000 * rnd.uniform(0.85, 1.15), rnd, recipe, part, _db(db), pitch)
+    if recipe.get("up"):
+        up_at = (recipe["up_at"] + rnd.uniform(-5, 5)) / 1000
+        up_gain = recipe.get("up_gain", 0) + rnd.uniform(-1.5, 1.5)
+        up_pitch = pitch * recipe.get("up_pitch", 1.03)
+        for ms, db, part in recipe["up"]:
+            _hit(out, up_at + ms / 1000 * rnd.uniform(0.85, 1.15), rnd, recipe, part, _db(db + up_gain), up_pitch, up=True)
+    return finish_sound(out, SOUND_LOUDNESS + recipe.get("level", 0))
+
+
+def wav_bytes(samples: list[float]) -> bytes:
+    pcm = array("h", (max(-32767, min(32767, round(s * 32767))) for s in samples))
+    if sys.byteorder != "little":
+        pcm.byteswap()
+    data = pcm.tobytes()
+    return (b"RIFF" + (36 + len(data)).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little")
+            + (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + SOUND_RATE.to_bytes(4, "little")
+            + (SOUND_RATE * 2).to_bytes(4, "little") + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+            + b"data" + len(data).to_bytes(4, "little") + data)
+
+
+_SOUND_EFFECT: object = False                  # QSoundEffect, None if missing; False: not looked up yet
+
+
+def sound_effect_class():
+    """Qt Multimedia is loaded only once typing sounds are turned on."""
+    global _SOUND_EFFECT
+    if _SOUND_EFFECT is False:
+        try:
+            from PySide6.QtMultimedia import QSoundEffect as effect
+        except ImportError:                    # PySide6 without its add-ons
+            effect = None
+        _SOUND_EFFECT = effect
+    return _SOUND_EFFECT
+
+
+class TypingSounds(QObject):
+    """Plays a key sound for each key you type anywhere in the browser. Watches key presses
+    only while turned on, and only to choose a sound - nothing is recorded. It listens on
+    the widget you're typing in (followed via focusChanged): an application-wide event
+    filter in Python crashes Qt WebEngine. Like GX, each kind of key goes through its
+    variants in turn; a sound that's still playing is never restarted (that pops)."""
+
+    changed = Signal()
+    _written = Signal(int, str)                          # (generation, pack), from the writer thread
+
+    def __init__(self, settings: QSettings, folder: str, parent: QObject | None = None, player=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.folder = folder
+        self._player = player                  # tests: a stand-in for QSoundEffect
+        pack = str(settings.value("typingSounds", "off"))
+        volume = str(settings.value("typingVolume", "medium"))
+        self.pack = pack if pack in TYPING_SOUNDS else "off"
+        self.volume = volume if volume in TYPING_VOLUMES else "medium"
+        self.players: dict[str, list[list]] = {}         # kind -> variants -> copies of that file
+        self.played: Counter[str] = Counter()          # what was played (for tests and the menu)
+        self.skipped = 0                                 # sounds left out: every copy still playing
+        self._next: Counter[str] = Counter()
+        self._generation = 0
+        self._sample_pending = False
+        self._watching = False
+        self._hooked: set = set()
+        self._written.connect(self._on_written)
+        self._apply()
+
+    def supported(self) -> bool:
+        if self._player is not None:
+            return True
+        if _SOUND_EFFECT is False:                   # don't load Qt Multimedia just to ask
+            return importlib.util.find_spec("PySide6.QtMultimedia") is not None
+        return _SOUND_EFFECT is not None
+
+    def ready(self) -> bool:
+        return bool(self.players)
+
+    def all_players(self) -> list:
+        return [p for variants in self.players.values() for pool in variants for p in pool]
+
+    def set_pack(self, pack: str, *_) -> None:
+        if pack not in TYPING_SOUNDS:
+            return
+        self.pack = pack
+        self.settings.setValue("typingSounds", pack)
+        self._apply()
+        if pack != "off":
+            self._sample()                               # a sample of the new sound
+        self.changed.emit()
+
+    def set_volume(self, volume: str, *_) -> None:
+        if volume not in TYPING_VOLUMES:
+            return
+        self.volume = volume
+        self.settings.setValue("typingVolume", volume)
+        for player in self.all_players():
+            player.setVolume(TYPING_VOLUMES[volume][1])
+        if self.pack != "off":
+            self._sample()
+        self.changed.emit()
+
+    def _sample(self) -> None:
+        if self.ready():
+            self.play("key")
+        else:
+            self._sample_pending = True                  # once the files are written
+
+    def path(self, pack: str, kind: str, variant: int) -> str:
+        return os.path.join(self.folder, f"{pack}-{kind}-{variant}-v{SOUND_VERSION}.wav")
+
+    def _written_already(self, pack: str) -> bool:
+        return all(os.path.isfile(self.path(pack, kind, v)) for kind, n in SOUND_KINDS.items() for v in range(n))
+
+    def files(self, pack: str) -> dict[str, list[str]]:
+        """Writes the pack's WAV files if they aren't there yet: kind -> paths. (Synthesis
+        takes a few tenths of a second, so the browser does this on a worker thread.)"""
+        os.makedirs(self.folder, exist_ok=True)
+        result: dict[str, list[str]] = {}
+        for kind, variants in SOUND_KINDS.items():
+            for v in range(variants):
+                path = self.path(pack, kind, v)
+                if not os.path.isfile(path):
+                    tmp = f"{path}.{threading.get_ident()}.tmp"
+                    with open(tmp, "wb") as f:
+                        f.write(wav_bytes(synth_key_sound(pack, kind, v)))
+                    os.replace(tmp, path)
+                result.setdefault(kind, []).append(path)
+        return result
+
+    def tidy(self) -> None:
+        """Removes sound files from older versions and unfinished ones (only the browser's own)."""
+        try:
+            names = os.listdir(self.folder)
+        except OSError:
+            return
+        current = f"-v{SOUND_VERSION}.wav"
+        for name in names:
+            ours = re.fullmatch(r"[a-z]+-[a-z]+-\d+-v\d+\.wav(\.\d+\.tmp)?", name)
+            if ours and (name.endswith(".tmp") or not name.endswith(current)):
+                try:
+                    os.remove(os.path.join(self.folder, name))
+                except OSError:
+                    pass
+
+    def _write(self, generation: int, pack: str) -> None:              # on the worker thread
+        try:
+            self.tidy()
+            self.files(pack)
+        except OSError:
+            return
+        self._written.emit(generation, pack)
+
+    @Slot(int, str)
+    def _on_written(self, generation: int, pack: str) -> None:
+        if generation == self._generation and pack == self.pack:
+            self._load(pack)
+
+    def _apply(self) -> None:
+        self._generation += 1
+        self._sample_pending = False
+        for player in self.all_players():
+            player.stop()
+            player.deleteLater()
+        self.players = {}
+        self._next.clear()
+        if self.pack == "off" or not self.supported():
+            self._watch(False)
+            return
+        self._watch(True)
+        if self._written_already(self.pack):
+            self._load(self.pack)
+        else:
+            threading.Thread(target=self._write, args=(self._generation, self.pack), daemon=True,
+                             name="typing-sounds").start()
+
+    def _load(self, pack: str) -> None:
+        for kind, n in SOUND_KINDS.items():
+            variants = []
+            for v in range(n):
+                pool = []
+                for _ in range(SOUND_POOL):
+                    player = self._player(self) if self._player is not None else sound_effect_class()(self)
+                    player.setSource(QUrl.fromLocalFile(self.path(pack, kind, v)))
+                    player.setVolume(TYPING_VOLUMES[self.volume][1])
+                    pool.append(player)
+                variants.append(pool)
+            self.players[kind] = variants
+        if self._sample_pending:
+            self._sample_pending = False
+            self.play("key")
+
+    def _watch(self, on: bool) -> None:
+        app = QApplication.instance()
+        if app is None or on == self._watching:
+            return
+        self._watching = on
+        if on:
+            app.focusChanged.connect(self._on_focus)
+            self._hook(QApplication.focusWidget())
+            return
+        app.focusChanged.disconnect(self._on_focus)
+        for widget in list(self._hooked):
+            try:
+                widget.removeEventFilter(self)
+            except RuntimeError:                         # already deleted
+                pass
+        self._hooked.clear()
+
+    def _on_focus(self, _old, new) -> None:
+        self._hook(new)
+
+    def _hook(self, widget) -> None:
+        if widget is None or widget in self._hooked:
+            return
+        widget.installEventFilter(self)
+        self._hooked.add(widget)
+        widget.destroyed.connect(lambda *_, w=widget: self._hooked.discard(w))
+
+    paused = False                                  # Game Mode keeps quiet
+
+    def play(self, kind: str) -> None:
+        if TypingSounds.paused:
+            return
+        variants = self.players.get(kind) or self.players.get("key")
+        if not variants:
+            return
+        first = self._next[kind] % len(variants)        # the variants in turn, like GX
+        self._next[kind] = first + 1
+        for step in range(len(variants)):
+            for player in variants[(first + step) % len(variants)]:
+                if not player.isPlaying():
+                    player.play()
+                    self.played[kind] += 1
+                    return
+        self.skipped += 1                                # all still sounding: cutting one off would pop
+
+    @staticmethod
+    def kind_for(event) -> str | None:
+        key = event.key()
+        if event.isAutoRepeat() or key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta,
+                                           Qt.Key.Key_AltGr, Qt.Key.Key_CapsLock, Qt.Key.Key_unknown):
+            return None
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                                | Qt.KeyboardModifier.MetaModifier):
+            return None                                  # shortcuts, not typing
+        if key == Qt.Key.Key_Space:
+            return "space"
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return "enter"
+        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            return "backspace"
+        return "key"
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress and obj is QApplication.focusWidget():
+            kind = self.kind_for(event)
+            if kind:
+                self.play(kind)
+        return False
+
+
+# --------------------------------------------------------------------------------------
+# H.264 / AAC video: the engine can be rebuilt with them on this PC by engine\build_engine.py
+# (from Qt's open-source code). The browser starts it, shows its progress and finishes it.
+# --------------------------------------------------------------------------------------
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ENGINE_DIR = os.path.join(APP_DIR, "engine")
+ENGINE_PYTHON = os.path.join(APP_DIR, "python", "python.exe")
+ENGINE_STEPS = 9
+ENGINE_BUILD_DISK_GB = 60                 # release build measured ~45-85 GB incl. tools; most is deleted after
+UPDATE_CHECK_INTERVAL = 24 * 3600         # how often an H.264 engine checks for security fixes
+RESTART_MAX_AGE = 6 * 3600
+ENGINE_REQUEST_FILE = "build-requested.json"   # left by the installer's "H.264 video" switch
+CODEC_EVENT = "⁣safariqt:codec:"
+CODEC_WATCH_NAME = "safariqt-codec-watch"
+_CREATE_NO_WINDOW = 0x08000000
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+CODEC_WATCH_SCRIPT = r"""(function () {
+  'use strict';
+  // Notices a page that needs H.264/AAC video, which the standard engine can't play: it asks
+  // for H.264 and is told no, and never finds an open format (VP9, AV1, WebM) that works - or
+  // a video fails to load an MP4/HLS source. Reports once per page. YouTube, which falls back
+  // to VP9/AV1, doesn't trigger it.
+  if (window.__safariqtCodecWatch) return;
+  try { Object.defineProperty(window, '__safariqtCodecWatch', { value: true }); } catch (e) { return; }
+  var debug = console.debug.bind(console);
+  var H264 = /avc[13]|mp4a|aac|mpegurl|\bmp4\b|m4v|m4a|quicktime/i;
+  var OPEN = /vp0?[89]|av01|opus|vorbis|webm|flac|theora/i;
+  var refused = false, openWorks = false, reported = false, timer = null;
+  var report = function () {
+    if (reported) return;
+    reported = true;
+    try { debug('⁣safariqt:codec:needed'); } catch (e) {}
+  };
+  var note = function (type, answer) {
+    type = String(type || '');
+    var yes = answer === true || answer === 'probably' || answer === 'maybe';
+    if (OPEN.test(type)) { if (yes) openWorks = true; return; }
+    if (H264.test(type) && !yes) {
+      refused = true;
+      if (!timer) timer = setTimeout(function () { if (refused && !openWorks) report(); }, 4000);
+    }
+  };
+  var wrap = function (owner, name) {
+    try {
+      if (!owner || typeof owner[name] !== 'function') return;
+      owner[name] = new Proxy(owner[name], { apply: function (target, self, args) {
+        var answer = Reflect.apply(target, self, args);
+        try { note(args[0], answer); } catch (e) {}
+        return answer;
+      } });
+    } catch (e) {}
+  };
+  wrap(window.HTMLMediaElement && HTMLMediaElement.prototype, 'canPlayType');
+  wrap(window.MediaSource, 'isTypeSupported');
+  wrap(window.ManagedMediaSource, 'isTypeSupported');
+  document.addEventListener('error', function (event) {
+    var el = event.target;
+    var media = el instanceof HTMLSourceElement ? el.parentElement : el;
+    if (!(media instanceof HTMLMediaElement)) return;
+    var src = String(el.src || media.currentSrc || '').split(',')[0].slice(0, 400);   // data: payload ignored
+    var hint = ((el.getAttribute && el.getAttribute('type')) || '') + ' ' + src;
+    var unsupported = !media.error || media.error.code === 4;
+    if (unsupported && !OPEN.test(hint) && (H264.test(hint) || /\.(mp4|m4v|mov|m3u8)(\?|#|$)/i.test(src))) report();
+  }, true);
+})();"""
+
+
+# --------------------------------------------------------------------------------------
+# Performance probe (a testing aid; off unless test_out\perf-probe in Huginn's folder
+# says "on"): each page reports its timings - first paint, load, and for videos how long from
+# opening the page to the first frame - and they're added to test_out\perf-probe.log.
+# --------------------------------------------------------------------------------------
+PERF_EVENT = "\u2063huginn:perf:"
+PERF_PROBE_NAME = "huginn-perf-probe"
+PERF_PROBE_SCRIPT = r"""(function () {
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+  var t0 = performance.timeOrigin, sent = {}, out = function (kind, data) {
+    data.kind = kind; data.url = location.href.slice(0, 200);
+    try { console.debug('\u2063huginn:perf:' + JSON.stringify(data)); } catch (e) {}
+  };
+  var lcp = 0;
+  try { new PerformanceObserver(function (l) { l.getEntries().forEach(function (e) { lcp = e.startTime; }); })
+          .observe({ type: 'largest-contentful-paint', buffered: true }); } catch (e) {}
+  addEventListener('load', function () {
+    setTimeout(function () {
+      var n = performance.getEntriesByType('navigation')[0] || {}, fcp = 0;
+      performance.getEntriesByType('paint').forEach(function (e) { if (e.name === 'first-contentful-paint') fcp = e.startTime; });
+      out('page', { ttfb: Math.round(n.responseStart || 0), fcp: Math.round(fcp), lcp: Math.round(lcp),
+                    dcl: Math.round(n.domContentLoadedEventEnd || 0), load: Math.round(n.loadEventEnd || 0),
+                    requests: performance.getEntriesByType('resource').length });
+    }, 2500);
+  });
+  var started = performance.now();                    // reset on in-page navigations (YouTube)
+  var lastUrl = location.href;
+  setInterval(function () { if (location.href !== lastUrl) { lastUrl = location.href; started = performance.now(); sent = {}; } }, 50);
+  var asked = new WeakMap();                            // when play was asked for, per video
+  document.addEventListener('play', function (e) {
+    if (e.target && e.target.tagName === 'VIDEO' && !asked.has(e.target)) asked.set(e.target, performance.now());
+  }, true);
+  document.addEventListener('playing', function (e) {
+    var v = e.target;
+    if (!v || v.tagName !== 'VIDEO' || sent[location.href]) return;
+    sent[location.href] = true;
+    var now = performance.now();
+    out('video', { firstFrame: Math.round(now - started), playToFrame: Math.round(now - (asked.get(v) || now)),
+                   sinceOpen: Math.round(now), width: v.videoWidth, height: v.videoHeight,
+                   ad: !!document.querySelector('.ad-showing, .ad-interrupting') });
+  }, true);
+})();"""
+
+
+def perf_probe_log() -> str | None:
+    """Where the probe writes, when test_out\\perf-probe says "on" (None: off, the normal case)."""
+    try:
+        with open(os.path.join(APP_DIR, "test_out", "perf-probe"), encoding="utf-8", errors="replace") as f:
+            on = f.read(16).strip().lower().startswith("on")
+    except OSError:
+        return None
+    return os.path.join(APP_DIR, "test_out", "perf-probe.log") if on else None
+
+
+def set_perf_probe_script(profile: QWebEngineProfile) -> None:
+    scripts = profile.scripts()
+    for script in scripts.find(PERF_PROBE_NAME):
+        scripts.remove(script)
+    if perf_probe_log() is None:
+        return
+    script = QWebEngineScript()
+    script.setName(PERF_PROBE_NAME)
+    script.setSourceCode(PERF_PROBE_SCRIPT)
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)    # sees the page's own timings
+    script.setRunsOnSubFrames(False)
+    scripts.insert(script)
+
+
+def write_perf_probe(page: "QWebEnginePage", text: str) -> None:
+    path = perf_probe_log()
+    if path is None:
+        return
+    try:
+        data = json.loads(text)
+        view = getattr(page, "_view", None)
+        browser = getattr(view, "browser", None)
+        guard = getattr(browser, "blocker", None)
+        if guard is not None:
+            host = QUrl(str(data.get("url", ""))).host()
+            data["adblock"] = bool(guard.block_ads and not guard.ads_allowed_on(host)) if host else guard.block_ads
+        data["time"] = time.strftime("%H:%M:%S")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data) + "\n")
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+
+
+def set_codec_watch_script(profile: QWebEngineProfile, on: bool) -> None:
+    scripts = profile.scripts()
+    for script in scripts.find(CODEC_WATCH_NAME):
+        scripts.remove(script)
+    if on:
+        script = QWebEngineScript()
+        script.setName(CODEC_WATCH_NAME)
+        script.setSourceCode(CODEC_WATCH_SCRIPT)
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        script.setRunsOnSubFrames(True)              # embedded players on other sites
+        scripts.insert(script)
+
+
+def process_alive(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if not IS_WINDOWS:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = ctypes.c_void_p             # a HANDLE (64-bit), not an int
+    raw = kernel32.OpenProcess(0x1000, False, pid)             # PROCESS_QUERY_LIMITED_INFORMATION
+    if not raw:
+        return False
+    handle = ctypes.c_void_p(raw)
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:   # STILL_ACTIVE
+            return False
+        buffer = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(len(buffer))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return os.path.basename(buffer.value).lower().startswith("python")
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def total_memory_gb() -> float:
+    if IS_WINDOWS:
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(MemoryStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status.ullTotalPhys / 2 ** 30
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30
+    except (ValueError, OSError, AttributeError):
+        return 8.0
+
+
+def build_hours_estimate(cpus: int | None = None, ram_gb: float | None = None) -> tuple[int, int]:
+    """Rough whole-build range in hours (downloads + compiling), from this PC's cores and
+    memory. Calibrated on a 24-thread / 32 GB PC that took about two and a half hours."""
+    cpus = cpus or os.cpu_count() or 4
+    ram_gb = total_memory_gb() if ram_gb is None else ram_gb
+    jobs = max(1, min(cpus, int((ram_gb - 2) // 2.5)))
+    hours = 22 / jobs + 0.5
+    return max(1, round(hours * 0.75)), max(2, round(hours * 1.4))
+
+
+def short_duration(seconds) -> str:
+    seconds = int(max(0, seconds or 0))
+    hours, minutes = seconds // 3600, (seconds % 3600) // 60
+    if hours:
+        return f"{hours} h {minutes:02d} min"
+    return f"{max(1, minutes)} min"
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+class EngineManager(QObject):
+    """The engine builder as the browser sees it: which engine is in use, whether a build is
+    running and how far it is, and starting, stopping, finishing and updating one. The builder
+    is its own process (it carries on if the browser closes) and reports in engine/status.json."""
+
+    changed = Signal()
+
+    def __init__(self, settings: QSettings, parent: QObject | None = None, *, engine_dir: str = ENGINE_DIR,
+                 python: str = ENGINE_PYTHON, core_dll: str | None = None, platform_ok: bool = IS_WINDOWS) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.engine_dir = engine_dir
+        self.python = python
+        if core_dll is None:
+            import PySide6
+            core_dll = os.path.join(os.path.dirname(PySide6.__file__), "Qt6WebEngineCore.dll")
+        self.core_dll = core_dll
+        self.platform_ok = platform_ok
+        self.status: dict = {}
+        self.update_info: dict = {}
+        self.declined_sites: set[str] = set()      # "Not Now" on the H.264 bar, this session
+        self.restart_notice_dismissed = False
+        self._checker: subprocess.Popen | None = None
+        self._builder: subprocess.Popen | None = None
+        self._snapshot = None
+        self._codecs_cache: tuple | None = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.refresh)
+        self.refresh(emit=False)
+
+    # -- files ------------------------------------------------------------------------------
+    def path(self, name: str) -> str:
+        return os.path.join(self.engine_dir, name)
+
+    def can_build(self) -> bool:
+        return (self.platform_ok and os.path.isfile(self.path("build_engine.py"))
+                and os.path.isfile(self.python))
+
+    def installed(self) -> dict:
+        return _read_json(self.path("installed.json"))
+
+    def has_codecs(self) -> bool:
+        """Whether the engine in use is one this PC built with H.264/AAC (installed.json
+        describes the engine file; a PySide6 update would have replaced it)."""
+        record = self.installed()
+        if not record or not os.path.isfile(self.core_dll):
+            return False
+        stat = os.stat(self.core_dll)
+        if "core_size" in record:
+            return stat.st_size == record["core_size"] and abs(stat.st_mtime - record.get("core_mtime", 0)) < 2
+        key = (stat.st_size, int(stat.st_mtime), record.get("core_sha256"))
+        if self._codecs_cache and self._codecs_cache[0] == key:
+            return self._codecs_cache[1]
+        cached = str(self.settings.value("engineCodecsCheck", ""))
+        if cached.startswith(f"{key[0]}:{key[1]}:{key[2]}:"):
+            result = cached.endswith(":1")
+        else:                                       # older record: hash once, then remember
+            import hashlib
+            digest = hashlib.sha256()
+            with open(self.core_dll, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+            result = digest.hexdigest() == record.get("core_sha256")
+            self.settings.setValue("engineCodecsCheck", f"{key[0]}:{key[1]}:{key[2]}:{int(result)}")
+        self._codecs_cache = (key, result)
+        return result
+
+    # -- state ------------------------------------------------------------------------------
+    def builder_alive(self) -> bool:
+        pid = self.status.get("pid")
+        if self._builder is not None and self._builder.pid == pid:
+            return self._builder.poll() is None
+        return process_alive(pid)
+
+    def phase(self) -> str:
+        """unavailable / standard / running / waiting_permission / waiting_browser / paused /
+        failed / installed."""
+        state = self.status.get("state")
+        if state in ("running", "waiting"):
+            if self.builder_alive():
+                waiting = self.status.get("waiting_for") if state == "waiting" else None
+                return {"browser": "waiting_browser", "permission": "waiting_permission"}.get(waiting, "running")
+            if not self.has_codecs() or self.status.get("key") not in ("verify", "cleanup"):
+                return "paused" if self.can_build() else "unavailable"
+        if self.has_codecs():
+            return "installed"
+        if not self.can_build():
+            return "unavailable"
+        if state == "failed":
+            return "failed"
+        return "standard"
+
+    def busy(self) -> bool:
+        return self.phase() in ("running", "waiting_permission", "waiting_browser")
+
+    def update_available(self) -> bool:
+        info = self.update_info
+        return bool(info.get("update_available")) and info.get("checked", 0) >= self._installed_time()
+
+    def checking(self) -> bool:
+        return self._checker is not None and self._checker.poll() is None
+
+    def _installed_time(self) -> float:
+        try:
+            return os.path.getmtime(self.path("installed.json"))
+        except OSError:
+            return 0.0
+
+    def refresh(self, emit: bool = True) -> None:
+        self.status = _read_json(self.path("status.json"))
+        self.update_info = _read_json(self.path("update-check.json"))
+        if self._checker is not None and self._checker.poll() is not None:
+            self._checker = None
+        phase = self.phase()
+        snapshot = (phase, self.status.get("title"), self.status.get("detail"), round(self.status.get("progress") or 0, 3),
+                    self.status.get("error"), self.update_available(), self.checking())
+        interval = 2000 if phase in ("running", "waiting_permission", "waiting_browser") or self.checking() else 15000
+        if self._timer.interval() != interval or not self._timer.isActive():
+            self._timer.start(interval)
+        if snapshot != self._snapshot:
+            self._snapshot = snapshot
+            if emit:
+                self.changed.emit()
+
+    # -- actions ----------------------------------------------------------------------------
+    def _spawn(self, *args: str) -> subprocess.Popen | None:
+        flags = (_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP) if IS_WINDOWS else 0
+        try:
+            return subprocess.Popen([self.python, self.path("build_engine.py"), *args], cwd=APP_DIR,
+                                    creationflags=flags, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError:
+            return None
+
+    def start(self) -> bool:
+        """Starts (or resumes) a build in the background."""
+        if not self.can_build() or self.busy():
+            return False
+        process = self._spawn("--relaunch")
+        if process is None:
+            return False
+        self._builder = process
+        self.status = {"state": "running", "title": "Starting", "pid": process.pid, "key": "check", "number": 0}
+        self._snapshot = None
+        self.refresh_soon()
+        self.changed.emit()
+        return True
+
+    def refresh_soon(self) -> None:
+        self._timer.start(2000)
+
+    def stop(self) -> None:
+        """Stops the build; starting again carries on where it stopped."""
+        pid = self.status.get("pid")
+        if not self.builder_alive():
+            return
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], creationflags=_CREATE_NO_WINDOW,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except OSError:
+                pass
+        QTimer.singleShot(500, self.refresh)
+
+    def check_for_update(self, force: bool = False) -> bool:
+        """Asks the builder whether Qt has published a newer engine (security fixes) for an
+        H.264 engine built here. At most once a day unless forced."""
+        if not self.can_build() or not self.has_codecs() or self.busy() or self.checking():
+            return False
+        if not force and time.time() - float(self.update_info.get("checked", 0)) < UPDATE_CHECK_INTERVAL:
+            return False
+        self._checker = self._spawn("--check-only")
+        self.refresh()
+        return self._checker is not None
+
+    def write_restart(self, tabs: list[str], current: int) -> None:
+        data = {"created": time.time(), "tabs": tabs, "current": current}
+        tmp = self.path("restart.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, self.path("restart.json"))
+
+    def take_restart(self) -> dict | None:
+        """The tabs to bring back after 'Restart to finish' (read once, then removed)."""
+        path = self.path("restart.json")
+        data = _read_json(path)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        if not data or time.time() - float(data.get("created", 0)) > RESTART_MAX_AGE:
+            return None
+        return data
+
+    def take_build_request(self) -> bool:
+        """The installer's "Build H.264 video support" switch leaves a note in engine/; the first
+        start picks it up (once) and starts the build in the background. True if one started."""
+        path = self.path(ENGINE_REQUEST_FILE)
+        if not os.path.isfile(path):
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            return False
+        if self.has_codecs() or self.busy() or not self.can_build():
+            return False
+        return self.start()
+
+    def open_details(self) -> None:
+        path = self.path("last-error.txt")
+        if os.path.isfile(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    # -- words --------------------------------------------------------------------------------
+    def security_level(self) -> str:
+        try:
+            return qWebEngineChromiumSecurityPatchVersion() if qWebEngineChromiumSecurityPatchVersion else ""
+        except Exception:
+            return ""
+
+    def describe(self) -> dict:
+        """What the Video settings row shows: text, button label, progress (None = no bar)."""
+        phase, st = self.phase(), self.status
+        number = st.get("number") or 0
+        title = re.sub(r"^\d+(/\d+)?\s*", "", str(st.get("title") or "")).strip() or "Working"
+        if phase == "running":
+            text = f"Step {max(1, number)} of {ENGINE_STEPS}: {title}"
+            progress = st.get("progress")
+            if progress:
+                text += f" - {int(progress * 100)}%"
+            if st.get("eta"):
+                text += f", about {short_duration(st['eta'])} left"
+            return {"text": text + ". You can keep browsing.", "button": "Stop", "progress": progress or 0.0}
+        if phase == "waiting_permission":
+            return {"text": "Windows is asking for permission to install Microsoft's C++ Build Tools - "
+                            "look for the shield in the taskbar.", "button": "Stop", "progress": 0.0}
+        if phase == "waiting_browser":
+            return {"text": f"Ready. Restart {BROWSER_NAME} to switch to the new engine - your tabs come back.",
+                    "button": "Restart", "progress": None}
+        if phase == "paused":
+            return {"text": f"Paused at step {max(1, number)} of {ENGINE_STEPS}. It carries on from there.",
+                    "button": "Continue", "progress": None}
+        if phase == "failed":
+            error = str(st.get("error") or st.get("title") or "it stopped").rstrip(".")
+            return {"text": f"The build stopped: {error}.", "button": "Try Again", "progress": None, "details": True}
+        if phase == "installed":
+            record = self.installed()
+            security = self.security_level() or record.get("source", {}).get("security") or ""
+            text = f"On - built on this PC (Qt WebEngine {record.get('webengine', '')}"
+            text += f", security fixes up to Chromium {security})." if security else ")."
+            if self.update_available():
+                newer = self.update_info.get("available_security") or self.update_info.get("available")
+                return {"text": text + f" Qt has published newer security fixes ({newer}).",
+                        "button": "Update…", "progress": None}
+            if self.checking():
+                return {"text": text, "button": "Checking…", "progress": None, "disabled": True}
+            if st.get("state") == "failed":
+                return {"text": text + " The last update stopped; this engine is still in use.",
+                        "button": "Check Now", "progress": None, "details": True}
+            return {"text": text, "button": "Check Now", "progress": None}
+        return {"text": "Plays YouTube-style video (VP9, AV1). Twitch, Reddit, X and many news sites use "
+                        f"H.264, which {BROWSER_NAME} can build into its engine on this PC from Qt's open-source code.",
+                "button": "Build…", "progress": None}
+
+
+def aurora_curtain(bottom: str, top: str, seed: int, waves: int = 2, period: int = 1600, height: int = 440,
+                   reach: float = 0.42) -> str:
+    """One aurora curtain as an SVG data URI: rays of light, brightest just above a wavy lower
+    edge and fading upward from the `bottom` colour into the `top` colour. The tile repeats
+    seamlessly every `period` units (every wave and ripple has a whole number of cycles in it),
+    so the Start Page can slide it sideways forever."""
+    rng = random.Random(seed)
+    tau = 2 * math.pi
+
+    def wave(terms: list[tuple[int, float]], x: float) -> float:          # periodic, -1 .. 1
+        total = sum(a * math.sin(tau * k * x / period + ph) for (k, a), ph in zip(terms, phases[id(terms)]))
+        return total / sum(a for _, a in terms)
+
+    edge_terms = [(waves, 1.0), (waves * 2 + 1, 0.32), (waves * 5 + 2, 0.08)]
+    reach_terms = [(3, 1.0), (5, 0.6), (8, 0.4)]
+    glow_terms = [(11, 1.0), (17, 0.7), (29, 0.5)]
+    phases = {id(t): [rng.uniform(0, tau) for _ in t] for t in (edge_terms, reach_terms, glow_terms)}
+    base, amp, gap = height * 0.80, height * 0.07, 8     # gap divides period: rays line up across the seam
+    rays = []
+    for x in range(-6 * gap, period + 6 * gap, gap):     # a few past each end, so the blur wraps seamlessly
+        edge = base + amp * wave(edge_terms, x)
+        length = height * reach * (0.62 + 0.38 * wave(reach_terms, x))
+        bright = 0.74 + 0.26 * (0.5 + 0.5 * wave(glow_terms, x))
+        rays.append(f"<rect x='{x}' y='{edge - length:.0f}' width='{gap - 1}' height='{length + 6:.0f}' "
+                    f"opacity='{bright:.2f}'/>")
+    svg = (f"<svg xmlns='http://www.w3.org/2000/svg' width='{period}' height='{height}' "
+           f"viewBox='0 0 {period} {height}' preserveAspectRatio='none'><defs>"
+           f"<linearGradient id='r' x1='0' y1='1' x2='0' y2='0'>"
+           f"<stop offset='0' stop-color='{bottom}' stop-opacity='0'/>"
+           f"<stop offset='.14' stop-color='{bottom}' stop-opacity='.7'/>"
+           f"<stop offset='.36' stop-color='{bottom}' stop-opacity='.48'/>"
+           f"<stop offset='.7' stop-color='{top}' stop-opacity='.18'/>"
+           f"<stop offset='1' stop-color='{top}' stop-opacity='0'/></linearGradient>"
+           f"<filter id='b' x='-2%' y='-12%' width='104%' height='124%'>"
+           f"<feGaussianBlur stdDeviation='4.5 9'/></filter></defs>"
+           f"<g fill='url(#r)' filter='url(#b)'>{''.join(rays)}</g></svg>")
+    data = svg.replace("#", "%23").replace("<", "%3C").replace(">", "%3E")
+    return f'url("data:image/svg+xml,{data}")'
+
+
+def aurora_curtains(theme: dict) -> tuple[str, str]:
+    """The Start Page's two curtains in the theme's aurora colours (cached: they only change
+    with the colours)."""
+    key = (theme["glow_a"], theme["glow_b"])
+    if key not in _CURTAINS:
+        a, b = (QColor(c).name() for c in key)
+        _CURTAINS.clear()
+        _CURTAINS[key] = (aurora_curtain(a, b, seed=7, waves=2), aurora_curtain(b, a, seed=19, waves=3, reach=0.34))
+    return _CURTAINS[key]
+
+
+_CURTAINS: dict = {}
+
+
+def start_page_colours(theme: dict) -> dict:
+    """The Start Page's background and mountains. In dark mode they're the theme's own; in
+    light mode the page takes a breath of the realm: a wash of the frame's tint at the top
+    fading to a tinted white, and mountains in the accent colour (not grey)."""
+    if theme["dark"]:
+        return {"bg": theme["start_bg"], "bg_top": theme["start_bg"],
+                "ridge_a": theme["ridge_a"], "ridge_b": theme["ridge_b"]}
+
+    def mix(a: str, b: str, t: float) -> str:
+        ca, cb = QColor(a), QColor(b)
+        return QColor(round(ca.red() + (cb.red() - ca.red()) * t), round(ca.green() + (cb.green() - ca.green()) * t),
+                      round(ca.blue() + (cb.blue() - ca.blue()) * t)).name()
+
+    accent = QColor(theme["accent"])
+    rgb = f"{accent.red()}, {accent.green()}, {accent.blue()}"
+    return {"bg": mix(theme["tint_b"], "#FFFFFF", 0.54), "bg_top": mix(theme["tint_a"], "#FFFFFF", 0.08),
+            "ridge_a": f"rgba({rgb}, 0.16)", "ridge_b": f"rgba({rgb}, 0.085)"}
+
+
+START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="$scheme">
+<title>Start Page</title>
+<style>
+  :root { --bg: $bg; --text: $text; --muted: $muted; --label: $label; --card: $card; --hover: $hover;
+          --accent: $accent; --tile: $tile; --glow-a: $glow_a; --glow-b: $glow_b;
+          --glow-opacity: $glow_opacity; --ridge-a: $ridge_a; --ridge-b: $ridge_b; --bg-top: $bg_top;
+          --tile-shadow: $tile_shadow; --card-shadow: $card_shadow;
+          --curtain-a: $curtain_a; --curtain-b: $curtain_b; --curtain-opacity: $curtain_opacity;
+          --curtain-blend: $curtain_blend; }
+  * { box-sizing: border-box; }
+  html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); overflow-x: hidden;
+    font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
+                 "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  body { background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 55%) fixed; }
+  /* Aurora: two soft glows drifting slowly across the top of the page. */
+  .aurora { position: fixed; left: -15%; right: -15%; top: -42vh; height: 92vh; pointer-events: none;
+    background: radial-gradient(42% 52% at 28% 58%, var(--glow-a), transparent 70%),
+                radial-gradient(38% 48% at 70% 48%, var(--glow-b), transparent 72%);
+    opacity: var(--glow-opacity); filter: blur(48px); animation: drift 34s ease-in-out infinite alternate; }
+  @keyframes drift { from { transform: translate3d(-4%, 0, 0) scale(1); }
+                     to   { transform: translate3d(4%, 3vh, 0) scale(1.1); } }
+  /* Curtains: rays of light along a wavy edge, sliding sideways (two of them, opposite ways,
+     so their waves cross and ripple), slowly swaying and shimmering. Only transform and
+     opacity move, which the graphics card does on its own. */
+  .sky { display: $sky_display; position: fixed; left: 0; right: 0; top: 0; height: 50vh; pointer-events: none;
+    overflow: hidden;
+    opacity: var(--curtain-opacity); mix-blend-mode: var(--curtain-blend);
+    -webkit-mask-image: radial-gradient(95% 130% at 44% 0%, #000 52%, rgba(0,0,0,.6) 74%, transparent 100%);
+    mask-image: radial-gradient(95% 130% at 44% 0%, #000 52%, rgba(0,0,0,.6) 74%, transparent 100%); }
+  .sway { position: absolute; inset: 0; transform-origin: 50% 80%;
+    animation: sway 64s ease-in-out infinite alternate; }
+  .sway.far { top: -9%; animation-duration: 88s; animation-delay: -31s; }
+  .curtain { position: absolute; left: 0; top: 0; width: 200%; height: 100%; background-repeat: repeat-x;
+    background-size: 50% 100%; will-change: transform, opacity;
+    animation: ripple 320s linear infinite, shimmer 22s ease-in-out infinite alternate; }
+  .curtain.near { background-image: var(--curtain-a); }
+  .curtain.far { background-image: var(--curtain-b); animation-duration: 480s, 29s;
+    animation-direction: reverse, alternate; animation-delay: 0s, -11s; }
+  .sway.far .curtain { opacity: .7; }
+  @keyframes ripple { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(-50%, 0, 0); } }
+  @keyframes sway { from { transform: translateY(-1.5%) scaleY(.95) skewX(-1.5deg); }
+                    to   { transform: translateY(1%) scaleY(1.04) skewX(1.5deg); } }
+  @keyframes shimmer { from { opacity: .82; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .aurora, .sway, .curtain { animation: none; } }
+  .ridge { position: fixed; left: 0; bottom: 0; width: 100%; height: 24vh; pointer-events: none; }
+  main { position: relative; max-width: 760px; margin: 0 auto; padding: 10vh 32px 26vh; }
+  header { margin: 0 0 40px 4px; }
+  .runes { font-family: "Segoe UI Historic", "Noto Sans Runic", serif; font-size: 14px;
+    letter-spacing: .45em; color: var(--accent); opacity: .8; }
+  h1 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif; font-weight: 300;
+    font-size: 40px; letter-spacing: -.6px; margin: 4px 0 2px; }
+  .date { font-size: 13px; color: var(--muted); letter-spacing: .02em; }
+  section + section { margin-top: 34px; }
+  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif;
+       font-size: 17px; font-weight: 700; letter-spacing: -0.1px; margin: 0 0 12px 4px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 14px 4px; }
+  a.fav { display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 8px 4px;
+    border-radius: 12px; color: var(--label); text-decoration: none;
+    transition: background-color .15s ease, transform .12s ease; }
+  a.fav:hover { background: var(--hover); transform: translateY(-1px); }
+  a.fav:active { transform: scale(0.97); }
+  .tile { position: relative; width: 60px; height: 60px; border-radius: 15px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; background: var(--tile);
+    color: var(--accent); font-size: 26px; font-weight: 600; box-shadow: var(--tile-shadow); }
+  .tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .tile.has-icon, .tile.has-fav { background: #fff; color: transparent; }
+  .tile img.fav { inset: auto; left: 14px; top: 14px; width: 32px; height: 32px; object-fit: contain; }
+  .label { font-size: 12px; line-height: 1.25; max-width: 84px; text-align: center; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+  .card { display: flex; align-items: center; gap: 14px; background: var(--card); border-radius: 14px;
+    padding: 16px 18px; font-size: 13px; line-height: 1.45; color: var(--label);
+    box-shadow: var(--card-shadow); backdrop-filter: blur(18px); }
+  .card svg { flex: none; }
+  .card b { color: var(--text); }
+  .empty { color: var(--muted); font-size: 13px; margin-left: 4px; }
+  .card.recap { display: block; margin-top: 10px; padding-top: 14px; }
+  .recap-title { color: var(--muted); font-size: 12.5px; margin-bottom: 8px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .stat b { display: block; font-size: 24px; font-weight: 600; color: var(--accent); letter-spacing: -0.3px; }
+  .stat span { color: var(--muted); font-size: 12.5px; }
+  /* weather */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 22px 28px; flex-wrap: wrap; }
+  .hello { flex: 1 1 300px; min-width: 0; }
+  .wx { position: relative; flex: 0 0 auto; width: 268px; box-sizing: border-box; background: var(--card);
+    border-radius: 18px; padding: 12px 16px 12px; box-shadow: var(--card-shadow); backdrop-filter: blur(18px);
+    color: var(--label); font-size: 12.5px; line-height: 1.35; }
+  .wx-runes { font-size: 11px; letter-spacing: .4em; margin: 0 0 2px 2px; }
+  .wx-hide { position: absolute; top: 9px; right: 9px; width: 22px; height: 22px; border-radius: 11px;
+    display: flex; align-items: center; justify-content: center; color: var(--muted); opacity: 0;
+    transition: opacity .15s ease, background-color .15s ease; }
+  .wx:hover .wx-hide, .wx-hide:focus-visible { opacity: 1; }
+  .wx-hide:hover { background: var(--hover); color: var(--text); }
+  .wx-top { display: flex; align-items: center; gap: 10px; }
+  .wx-icon { flex: none; overflow: visible; }
+  .wx-top > .wx-icon { margin: -6px -2px -6px -6px; }
+  .wx-now { flex: 1; min-width: 0; }
+  .wx-temp { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif; font-weight: 300;
+    font-size: 36px; line-height: 1; letter-spacing: -1px; color: var(--text); }
+  .wx-cond { font-size: 13px; color: var(--text); margin-top: 3px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  .wx-sub { color: var(--muted); margin-top: 2px; }
+  .wx-hl { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+  .wx-meta { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-top: 10px;
+    color: var(--muted); }
+  .wx-city, .wx-link { color: var(--muted); text-decoration: none; border-radius: 6px; }
+  .wx-city:hover, .wx-link:hover { color: var(--accent); }
+  .wx-link { color: var(--accent); font-weight: 600; }
+  .wx-link.quiet { color: var(--muted); font-weight: 400; }
+  .wx-days { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid rgba(127, 127, 127, .16); }
+  .wx-day { display: flex; flex-direction: column; align-items: center; gap: 3px; color: var(--muted);
+    font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .wx-day b { color: var(--text); font-weight: 600; }
+  .wx-day i { font-style: normal; }
+  .wx-icon .rays { animation: wx-spin 60s linear infinite; }
+  .wx-icon .drift { animation: wx-drift 7s ease-in-out infinite alternate; }
+  .wx-icon .drift.slow { animation-duration: 11s; animation-direction: alternate-reverse; }
+  .wx-icon .drop { animation: wx-fall 1.15s linear infinite; }
+  .wx-icon .flake { animation: wx-snow 3s linear infinite; }
+  .wx-icon .hailstone { animation: wx-fall 0.8s linear infinite; }
+  .wx-icon .d1 { animation-delay: -.4s; } .wx-icon .d2 { animation-delay: -.8s; }
+  .wx-icon .flake.d1 { animation-delay: -1s; } .wx-icon .flake.d2 { animation-delay: -2s; }
+  .wx-icon .bolt { animation: wx-flash 4.5s ease-in-out infinite; }
+  .wx-icon .twinkle { animation: wx-twinkle 3.4s ease-in-out infinite alternate; transform-box: fill-box;
+    transform-origin: center; }
+  .wx-icon .late { animation-delay: -1.7s; }
+  .wx-icon .mist { animation: wx-mist 6s ease-in-out infinite alternate; }
+  .wx-icon.still * { animation: none !important; }
+  @keyframes wx-spin { to { transform: rotate(360deg); } }
+  @keyframes wx-drift { from { transform: translateX(-1.6px); } to { transform: translateX(1.6px); } }
+  @keyframes wx-fall { 0% { transform: translateY(-4px); opacity: 0; } 25% { opacity: 1; }
+                       100% { transform: translateY(9px); opacity: 0; } }
+  @keyframes wx-snow { 0% { transform: translate(0, -4px); opacity: 0; } 25% { opacity: 1; }
+                       100% { transform: translate(2.5px, 10px); opacity: 0; } }
+  @keyframes wx-flash { 0%, 84%, 100% { opacity: .95; } 86% { opacity: .15; } 88% { opacity: 1; } 90% { opacity: .3; } }
+  @keyframes wx-twinkle { from { opacity: .35; transform: scale(.8); } to { opacity: 1; transform: scale(1.1); } }
+  @keyframes wx-mist { from { transform: translateX(-3px); } to { transform: translateX(3px); } }
+  @media (prefers-reduced-motion: reduce) { .wx-icon * { animation: none !important; } }
+  @media (max-width: 640px) { .wx { width: 100%; } }
+</style></head>
+<body><div class="aurora"></div><div class="sky"><div class="sway far"><div class="curtain far"></div></div>
+<div class="sway"><div class="curtain near"></div></div></div>$ridge
+<main><header><div class="hello"><div class="runes" title="$runes_title">$runes</div>
+<h1 title="$greeting_title">$greeting</h1><div class="date" title="$day_meaning">$date</div></div>$weather</header>
+$sections</main></body></html>
+""")
+
+# A faint fjord/mountain silhouette along the bottom of the Start Page.
+RIDGE_SVG = (
+    '<svg class="ridge" viewBox="0 0 1440 260" preserveAspectRatio="none" aria-hidden="true">'
+    '<path style="fill: var(--ridge-b)" d="M0 260V170L80 150L150 165L240 112L300 138L380 96L450 128L520 104'
+    'L600 140L680 90L740 118L830 70L900 112L980 96L1060 132L1140 88L1210 120L1290 100L1370 136L1440 118V260Z"/>'
+    '<path style="fill: var(--ridge-a)" d="M0 260V200L100 186L190 204L270 168L350 190L430 160L520 192L610 172'
+    'L700 198L790 158L870 186L960 170L1050 196L1130 166L1220 190L1310 176L1440 194V260Z"/></svg>')
+
+# A round Viking shield: rim, boss and planks.
+SHIELD_SVG = ('<svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true">'
+              '<circle cx="12" cy="12" r="9.6" fill="none" stroke="{c}" stroke-width="1.7"/>'
+              '<path d="M12 2.6v6.8M12 14.6v6.8M2.6 12h6.8M14.6 12h6.8" stroke="{c}" stroke-width="1.1" opacity=".55"/>'
+              '<circle cx="12" cy="12" r="2.8" fill="{c}"/></svg>')
+
+# The Private Browsing mask (same shape as the address-field glyph).
+MASK_SVG = ('<svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="{c}" '
+            'stroke-width="1.7" stroke-linejoin="round" d="M3.2 9.6 C3.2 7.6 6.6 6.6 12 6.6 C17.4 6.6 20.8 7.6 '
+            '20.8 9.6 C20.8 13.6 18.9 16.6 16 16.6 C14 16.6 13.2 14.3 12 14.3 C10.8 14.3 10 16.6 8 16.6 C5.1 16.6 '
+            '3.2 13.6 3.2 9.6 Z"/><circle cx="8.1" cy="11" r="1.5" fill="{c}"/><circle cx="15.9" cy="11" r="1.5" '
+            'fill="{c}"/></svg>')
+
+# Greetings by time of day: the Start Page says the English one; the Old Norse is written
+# in runes above it and shown when you hover.
+# (from hour, Old Norse, its literal meaning, what an English speaker would say)
+NORSE_GREETINGS = ((5, "Góðan morgin", "Good morning", "Good morning"),
+                   (12, "Góðan dag", "Good day", "Good afternoon"),
+                   (18, "Gott kveld", "Good evening", "Good evening"),
+                   (23, "Góða nótt", "Good night", "Good night"))
+# Weekdays (Monday first, like time.tm_wday): English name, Old Norse name, and who it
+# honours. The date line shows plain English; the Old Norse lives in its hover tooltip.
+NORSE_DAYS = (("Monday", "Mánadagr", "the Moon's day"), ("Tuesday", "Týsdagr", "Týr's day"),
+              ("Wednesday", "Óðinsdagr", "Odin's day"), ("Thursday", "Þórsdagr", "Thor's day"),
+              ("Friday", "Frjádagr", "Frigg's day"), ("Saturday", "Laugardagr", "the washing day"),
+              ("Sunday", "Sunnudagr", "the Sun's day"))
+MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August",
+          "September", "October", "November", "December")
+# Latin -> Elder Futhark, close enough for decoration; '᛫' separates words.
+RUNE_MAP = {"a": "ᚨ", "á": "ᚨ", "b": "ᛒ", "c": "ᚲ", "d": "ᛞ", "ð": "ᚦ", "e": "ᛖ", "é": "ᛖ", "f": "ᚠ",
+            "g": "ᚷ", "h": "ᚺ", "i": "ᛁ", "í": "ᛁ", "j": "ᛃ", "k": "ᚲ", "l": "ᛚ", "m": "ᛗ", "n": "ᚾ",
+            "o": "ᛟ", "ó": "ᛟ", "ǫ": "ᛟ", "ø": "ᛟ", "p": "ᛈ", "q": "ᚲ", "r": "ᚱ", "s": "ᛊ", "t": "ᛏ",
+            "þ": "ᚦ", "u": "ᚢ", "ú": "ᚢ", "v": "ᚹ", "w": "ᚹ", "x": "ᚲᛊ", "y": "ᛃ", "ý": "ᛃ", "z": "ᛉ",
+            "æ": "ᚨᛖ", " ": "᛫"}
+
+
+def to_runes(text: str) -> str:
+    return "".join(RUNE_MAP.get(ch, ch) for ch in text.lower())
+
+
+def norse_greeting(hour: int) -> tuple[str, str, str]:
+    """(Old Norse, its meaning, the English greeting) for this hour."""
+    found = NORSE_GREETINGS[-1][1:]                        # night until 05:00
+    for start, *words in NORSE_GREETINGS:
+        if hour >= start:
+            found = tuple(words)
+    return found
+
+
+def _tile_html(url: str, title: str, favicons: FaviconCache | None) -> str:
+    """Tile priority: the site's touch icon if fetched, else its saved favicon on white,
+    else a letter tile in the realm's accent colour. All images come from safariqt:, so
+    the Start Page never loads remote content."""
+    q = QUrl(url)
+    host = bare_host(q)
+    title = (title or host or url).strip()
+    classes, imgs = "tile", ""
+    safe_host = html.escape(host, quote=True)
+    if favicons is not None and favicons.has(host, "touch"):
+        classes += " has-icon"
+        imgs = f'<img src="{START_SCHEME}:touch/{safe_host}" alt="">'
+    elif favicons is not None and favicons.has(host):
+        classes += " has-fav"
+        imgs = f'<img class="fav" src="{START_SCHEME}:icon/{safe_host}" alt="">'
+    return (f'<a class="fav" href="{html.escape(url, quote=True)}" title="{html.escape(url, quote=True)}">'
+            f'<span class="{classes}">{html.escape(title[:1].upper() or "?")}{imgs}</span>'
+            f'<span class="label">{html.escape(title)}</span></a>')
+
+
+def start_page_tiles(store: BrowserStore) -> tuple[list[dict], list[dict]]:
+    """(favorites, frequently visited) shown on the Start Page (favorites not in a folder)."""
+    favorites = [b for b in store.bookmarks if not b.get("folder")][:24]
+    favorite_hosts = {bare_host(QUrl(b["url"])) for b in favorites}
+    return favorites, store.frequently_visited(8, favorite_hosts)
+
+
+def render_start_page(theme: dict, store: BrowserStore, tracking_prevention: bool,
+                      favicons: FaviconCache | None = None, private: bool = False, norse: bool = False,
+                      recap: bool = False, weather: dict | None = None, ripple: bool = False) -> str:
+    """norse: greet in Old Norse (English on hover) instead of English (Old Norse on hover)."""
+    sections = []
+    favorites, frequent = start_page_tiles(store)
+    if private:                          # and no Frequently Visited: it would show your history
+        frequent = []
+        mask = MASK_SVG.replace("{c}", theme["accent"])
+        sections.append(
+            f'<section><div class="card">{mask}<div><b>Private Browsing is on.</b> Pages you visit in this '
+            f'window won\'t appear in your history, and their cookies and website data are erased '
+            f'when you close it. Trackers are still blocked.</div></div></section>')
+    if favorites:
+        tiles = "".join(_tile_html(b["url"], b.get("title", ""), favicons) for b in favorites)
+        sections.append(f'<section><h2>Favorites</h2><div class="grid">{tiles}</div></section>')
+    else:
+        sections.append('<section><h2>Favorites</h2><p class="empty">Bookmark pages with Ctrl+D '
+                        'and they will appear here.</p></section>')
+
+    if frequent:
+        tiles = "".join(_tile_html(s["url"], s["title"], favicons) for s in frequent)
+        sections.append(f'<section><h2>Frequently Visited</h2><div class="grid">{tiles}</div></section>')
+
+    report = store.tracker_report()
+    if not tracking_prevention:
+        text = ("Cross-site tracking prevention is turned off. You can turn it on from the page menu "
+                "at the left of the address field.")
+    elif report["trackers"] == 0:
+        text = f"{BROWSER_NAME} hasn't encountered any trackers in the last seven days."
+    else:
+        n = report["trackers"]
+        text = (f"In the last seven days, {BROWSER_NAME} has prevented <b>{n}</b> "
+                f"tracker{'s' if n != 1 else ''} from profiling you.")
+        if report["top"]:
+            tracker, sites = report["top"]
+            text += (f" The most contacted tracker was <b>{html.escape(tracker)}</b>, "
+                     f"seen on {sites} website{'s' if sites != 1 else ''}.")
+    shield = SHIELD_SVG.replace("{c}", theme["accent"])
+    recap_html = ""
+    if recap:
+        week = store.week_stats()
+        saved_s = week["banners"] * 4 + (week["ads"] + week["trackers"]) * 0.05
+        saved = f"{int(saved_s // 60)} min" if saved_s >= 60 else f"{int(saved_s)} s"
+        cells = [(f"{week['pages']:,}", "pages visited"), (f"{week['ads']:,}", "ads blocked"),
+                 (f"{week['banners']:,}", "cookie pop-ups refused"), (f"~{saved}", "of your time saved")]
+        recap_html = ('<div class="card recap"><div class="recap-title">What the ravens saw this week</div><div class="stats">'
+                      + "".join(f'<div class="stat"><b>{v}</b><span>{k}</span></div>' for v, k in cells) + "</div></div>")
+    sections.append(f'<section><h2>Privacy Report</h2><div class="card">{shield}<div>{text}</div></div>{recap_html}</section>')
+
+    now = time.localtime()
+    greeting, meaning, english = norse_greeting(now.tm_hour)
+    english_day, norse_day, honours = NORSE_DAYS[now.tm_wday]
+    date = f"{english_day}, {MONTHS[now.tm_mon - 1]} {now.tm_mday}"          # e.g. "Sunday, November 8"
+    day_meaning = f"In Old Norse: {norse_day}, {honours}"
+    page = start_page_colours(theme)
+    return START_PAGE_TEMPLATE.substitute(
+        scheme="dark" if theme["dark"] else "light", bg=page["bg"], bg_top=page["bg_top"], text=theme["text"],
+        muted=theme["text_secondary"], label=theme["start_label"], card=theme["start_card"],
+        hover=theme["start_hover"], accent=theme["accent"], tile=theme["tile_bg"],
+        tile_shadow=theme["tile_shadow"], card_shadow=theme["start_card_shadow"],
+        sky_display="block" if ripple else "none",
+        curtain_a=aurora_curtains(theme)[0] if ripple else "none", curtain_b=aurora_curtains(theme)[1] if ripple else "none",
+        curtain_opacity=theme["curtain_opacity"], curtain_blend="screen" if theme["dark"] else "normal",
+        glow_a=theme["glow_a"], glow_b=theme["glow_b"], glow_opacity=theme["glow_opacity"],
+        ridge_a=page["ridge_a"], ridge_b=page["ridge_b"], ridge=RIDGE_SVG,
+        runes=html.escape(to_runes(greeting)), greeting=html.escape(greeting if norse else english),
+        runes_title=html.escape(f"“{greeting}” - Old Norse for “{meaning}”, in runes"),
+        greeting_title=html.escape(f"In English: {english}" if norse else f"In Old Norse: {greeting}"),
+        date=html.escape(date), day_meaning=html.escape(day_meaning),
+        weather="" if private and not (weather or {}).get("forecast") else render_weather(weather, theme, norse),
+        sections="".join(sections))
+
+
+# --------------------------------------------------------------------------------------
+# Welcome tour (first run, and page menu > More Tools > Welcome Tour): a few slides in the
+# Start Page's style that show what makes Huginn different and let you choose the theme,
+# light/dark, window buttons and Start Page extras, with each choice applied as you make it.
+# Its links (safariqt:welcome-set / welcome-do) only work from the welcome page itself.
+# --------------------------------------------------------------------------------------
+WELCOME_URL = f"{START_SCHEME}:welcome"
+WELCOME_LINKS = ("welcome-set", "welcome-do")
+
+_WX = 'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
+WELCOME_ICONS = {
+    "shield": f'<svg viewBox="0 0 24 24" {_WX}><path d="M12 3.2 L19 6 V11.6 C19 15.9 16 19.2 12 20.8 C8 19.2 5 15.9 5 11.6 V6 Z"/>'
+              '<path d="M9 12 L11.2 14.2 L15.2 9.8"/></svg>',
+    "ads": f'<svg viewBox="0 0 24 24" {_WX}><rect x="3.5" y="5.5" width="17" height="13" rx="3"/>'
+           '<path d="M8 14.5 L9.6 9.5 L11.2 14.5 M8.5 13 H10.7 M13.2 9.5 V14.5 H14.4 A2.5 2.5 0 0 0 14.4 9.5 Z"/>'
+           '<path d="M4.5 19.5 L19.5 4.5"/></svg>',
+    "cookie": f'<svg viewBox="0 0 24 24" {_WX}><path d="M19.6 12.4 A7.8 7.8 0 1 1 11.6 4.4 A2.6 2.6 0 0 0 15 7.6 A2.6 2.6 0 0 0 19.6 12.4 Z"/>'
+              '<circle cx="9" cy="10" r=".9"/><circle cx="13.5" cy="14.5" r=".9"/><circle cx="9.5" cy="15" r=".9"/></svg>',
+    "finger": f'<svg viewBox="0 0 24 24" {_WX}><path d="M7.5 18.5 C6.5 16.8 6 14.8 6 12.6 A6 6 0 0 1 18 12.6 C18 14 17.8 15.4 17.4 16.6"/>'
+              '<path d="M9.4 20 C8.7 18 8.5 16 8.5 12.8 A3.5 3.5 0 0 1 15.5 12.8 C15.5 15.6 15 17.8 14.2 19.8"/>'
+              '<path d="M12 12.8 C12 15.5 11.7 17.7 11.2 20.4"/><path d="M8.3 6.2 A8.5 8.5 0 0 1 15.7 6.2"/></svg>',
+    "flame": f'<svg viewBox="0 0 24 24" {_WX}><path d="M12 20.5 C8.6 20.5 6.4 18.2 6.4 15.2 C6.4 11.4 10 9.4 10.4 4.5 '
+             'C13.6 6.6 15 9.4 14.6 12 C15.8 11.4 16.6 10.4 16.9 9.2 C17.6 10.6 17.6 12.6 17.6 15.2 C17.6 18.2 15.4 20.5 12 20.5 Z"/></svg>',
+    "memory": f'<svg viewBox="0 0 24 24" {_WX}><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15 L20 20"/>'
+              '<path d="M8 9 H13 M8 12 H11.5"/></svg>',
+    "valhalla": f'<svg viewBox="0 0 24 24" {_WX}><path d="M4 10 L12 4.5 L20 10"/><path d="M6 10 V19 M18 10 V19 M10 19 V13.5 H14 V19 M4 19.5 H20"/></svg>',
+    "listen": f'<svg viewBox="0 0 24 24" {_WX}><path d="M4.6 10.4 V13.6 M8.3 7.4 V16.6 M12 4.6 V19.4 M15.7 8.2 V15.8 M19.4 10.6 V13.4"/></svg>',
+    "command": f'<svg viewBox="0 0 24 24" {_WX}><path d="M9 9 V6.8 A2.3 2.3 0 1 0 6.8 9 H17.2 A2.3 2.3 0 1 0 15 6.8 V17.2 '
+               'A2.3 2.3 0 1 0 17.2 15 H6.8 A2.3 2.3 0 1 0 9 17.2 V9"/></svg>',
+    "import": f'<svg viewBox="0 0 24 24" {_WX}><path d="M12 4 V14.5 M8 10.5 L12 14.5 L16 10.5"/><path d="M5 15.5 V18.5 A1.5 1.5 0 0 0 6.5 20 H17.5 A1.5 1.5 0 0 0 19 18.5 V15.5"/></svg>',
+    "weather": f'<svg viewBox="0 0 24 24" {_WX}><circle cx="9" cy="9" r="3.1"/><path d="M9 3.4 V4.5 M3.4 9 H4.5 M5 5 L5.8 5.8 M13 5 L12.2 5.8"/>'
+               '<path d="M8.2 19.4 H17 A3.4 3.4 0 0 0 17 12.6 A4.8 4.8 0 0 0 8.6 13.8 A2.8 2.8 0 0 0 8.2 19.4 Z"/></svg>',
+    "default": f'<svg viewBox="0 0 24 24" {_WX}><circle cx="12" cy="12" r="8"/><path d="M12 8 V12 L14.8 13.6"/></svg>',
+    "grade": f'<svg viewBox="0 0 24 24" {_WX}><rect x="4" y="4" width="16" height="16" rx="5"/><path d="M9 15.5 L12 8.5 L15 15.5 M10.2 13 H13.8"/></svg>',
+}
+
+
+def welcome_vars(theme: dict) -> dict:
+    """The welcome page's colours, as CSS variables (so a theme change can be applied live)."""
+    page = start_page_colours(theme)
+    curtain_a, curtain_b = aurora_curtains(theme)
+    return {"--bg": page["bg"], "--bg-top": page["bg_top"], "--text": theme["text"],
+            "--muted": theme["text_secondary"], "--card": theme["start_card"],
+            "--card-shadow": theme["start_card_shadow"], "--accent": theme["accent"],
+            "--accent-text": theme["accent_text"], "--glow-a": theme["glow_a"], "--glow-b": theme["glow_b"],
+            "--glow-opacity": theme["glow_opacity"], "--hover": theme["start_hover"],
+            "--line": "rgba(255,255,255,.12)" if theme["dark"] else "rgba(20,40,60,.14)",
+            "--curtain-a": curtain_a, "--curtain-b": curtain_b, "--curtain-opacity": theme["curtain_opacity"],
+            "--curtain-blend": "screen" if theme["dark"] else "normal", "--scheme": "dark" if theme["dark"] else "light"}
+
+
+WELCOME_PAGE = Template("""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="$scheme">
+<title>Welcome to Huginn</title>
+<style>
+  :root { $vars }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; color: var(--text);
+    background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 60%);
+    font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; }
+  .aurora { position: fixed; left: -15%; right: -15%; top: -40vh; height: 95vh; pointer-events: none;
+    background: radial-gradient(42% 52% at 28% 58%, var(--glow-a), transparent 70%),
+                radial-gradient(38% 48% at 70% 48%, var(--glow-b), transparent 72%);
+    opacity: var(--glow-opacity); filter: blur(48px); animation: drift 34s ease-in-out infinite alternate; }
+  @keyframes drift { from { transform: translate3d(-4%, 0, 0); } to { transform: translate3d(4%, 3vh, 0) scale(1.08); } }
+  .sky { display: none; position: fixed; left: 0; right: 0; top: 0; height: 50vh; pointer-events: none; overflow: hidden;
+    opacity: var(--curtain-opacity); mix-blend-mode: var(--curtain-blend);
+    -webkit-mask-image: radial-gradient(95% 130% at 44% 0%, #000 52%, rgba(0,0,0,.6) 74%, transparent 100%); }
+  body.ripple .sky { display: block; }
+  .curtain { position: absolute; left: 0; top: 0; width: 200%; height: 100%; background-repeat: repeat-x;
+    background-size: 50% 100%; will-change: transform; animation: ripple 320s linear infinite; }
+  .curtain.near { background-image: var(--curtain-a); }
+  .curtain.far { background-image: var(--curtain-b); top: -9%; opacity: .7; animation-duration: 480s;
+    animation-direction: reverse; }
+  @keyframes ripple { to { transform: translate3d(-50%, 0, 0); } }
+  @media (prefers-reduced-motion: reduce) { .aurora, .curtain { animation: none; } .slide { transition: none !important; } }
+  .skip { position: fixed; top: 18px; right: 22px; z-index: 3; background: none; border: 0; color: var(--muted);
+    font-size: 13px; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+  .skip:hover { background: var(--hover); color: var(--text); }
+  .stage { position: fixed; inset: 0 0 96px; }
+  .slide { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 40px 32px 0; text-align: center; opacity: 0; transform: translateX(40px); pointer-events: none;
+    transition: opacity .5s ease, transform .6s cubic-bezier(.2, .8, .2, 1); }
+  .slide.on { opacity: 1; transform: none; pointer-events: auto; }
+  .slide.past { transform: translateX(-40px); }
+  .runes { font-family: "Segoe UI Historic", "Noto Sans Runic", serif; letter-spacing: .45em; color: var(--accent);
+    opacity: .85; font-size: 14px; }
+  h1 { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; font-weight: 300; font-size: 46px;
+    letter-spacing: -.8px; margin: 6px 0 8px; }
+  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; font-weight: 600; font-size: 30px;
+    letter-spacing: -.4px; margin: 0 0 6px; }
+  .lead { color: var(--muted); font-size: 15.5px; max-width: 520px; line-height: 1.5; margin: 0 0 28px; }
+  .logo { width: 108px; height: 108px; border-radius: 26px; margin-bottom: 18px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.28); animation: float 6s ease-in-out infinite alternate; }
+  @keyframes float { to { transform: translateY(-6px); } }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 300px)); gap: 12px; text-align: left; }
+  .grid.three { grid-template-columns: repeat(3, minmax(0, 220px)); }
+  .card { background: var(--card); border-radius: 16px; padding: 16px 16px 15px; box-shadow: var(--card-shadow);
+    backdrop-filter: blur(18px); }
+  .card b { display: block; font-size: 14.5px; margin: 10px 0 4px; }
+  .card span { color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .card kbd, .tips kbd { font: 600 11.5px "Segoe UI", sans-serif; padding: 2px 6px; border-radius: 6px;
+    background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
+  .ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .ico svg { width: 20px; height: 20px; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 18px; }
+  .note.building { color: var(--accent); }
+  .note[hidden] { display: none; }
+  .group { margin: 0 0 20px; }
+  .label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+    margin: 0 0 10px; }
+  .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .pick { background: var(--card); border: 0; border-radius: 14px; padding: 10px 14px; cursor: pointer;
+    box-shadow: var(--card-shadow); display: flex; flex-direction: column; align-items: center; gap: 8px;
+    transition: transform .15s ease, box-shadow .15s ease; min-width: 96px; }
+  .pick:hover { transform: translateY(-1px); }
+  .pick.sel { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); }
+  .pick small { font-size: 12.5px; }
+  .swatch { width: 44px; height: 44px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
+  .swatch.auto { background: linear-gradient(135deg, #FFE3A6 0%, #F6B26B 44%, #34408A 56%, #111733 100%); }
+  .mode { width: 72px; height: 44px; border-radius: 9px; box-shadow: inset 0 0 0 1px var(--line); position: relative;
+    overflow: hidden; }
+  .mode.light { background: linear-gradient(180deg, #E9EEF3 0 26%, #FFFFFF 26%); }
+  .mode.dark { background: linear-gradient(180deg, #1C2026 0 26%, #121519 26%); }
+  .mode.system { background: linear-gradient(90deg, #FFFFFF 50%, #121519 50%); }
+  .bar { width: 150px; height: 30px; border-radius: 9px; background: var(--hover); box-shadow: inset 0 0 0 1px var(--line);
+    display: flex; align-items: center; gap: 6px; padding: 0 8px; }
+  .bar .field { flex: 1; height: 12px; border-radius: 6px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .wg { width: 9px; height: 9px; color: var(--text); opacity: .75; }
+  .switch { display: inline-flex; align-items: center; gap: 12px; background: var(--card); border: 0; border-radius: 14px;
+    padding: 12px 14px; box-shadow: var(--card-shadow); cursor: pointer; min-width: 250px; justify-content: space-between; }
+  .switch .knob { width: 36px; height: 21px; border-radius: 11px; background: rgba(127,127,127,.35); position: relative;
+    transition: background .2s ease; flex: none; }
+  .switch .knob::after { content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .2s ease; }
+  .switch.on .knob { background: var(--accent); }
+  .switch.on .knob::after { transform: translateX(15px); }
+  .switch span { text-align: left; } .switch small { display: block; color: var(--muted); font-size: 12px; }
+  .act { display: flex; gap: 14px; align-items: center; text-align: left; background: var(--card); border: 0; width: 100%;
+    border-radius: 16px; padding: 14px 16px; box-shadow: var(--card-shadow); cursor: pointer; transition: transform .15s ease; }
+  .act:hover { transform: translateY(-1px); }
+  .act b { display: block; font-size: 14.5px; } .act span { color: var(--muted); font-size: 13px; }
+  .act .done { margin-left: auto; color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .acts { display: grid; gap: 10px; width: min(460px, 100%); }
+  .tips { display: grid; gap: 10px; color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+  .tips b { color: var(--text); font-weight: 600; }
+  .primary { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 12px; padding: 11px 26px;
+    font-size: 15px; font-weight: 600; cursor: pointer; box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .primary:hover { filter: brightness(1.06); }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; height: 96px; display: flex; align-items: center;
+    justify-content: center; gap: 22px; }
+  .nav { background: var(--card); border: 0; border-radius: 11px; padding: 9px 18px; cursor: pointer; font-size: 14px;
+    box-shadow: var(--card-shadow); min-width: 92px; }
+  .nav.next { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .nav[hidden] { visibility: hidden; display: inline-block; }
+  .dots { display: flex; gap: 7px; }
+  .dots i { width: 7px; height: 7px; border-radius: 4px; background: var(--muted); opacity: .35; transition: all .3s ease; }
+  .dots i.on { width: 22px; background: var(--accent); opacity: 1; }
+  @media (max-width: 760px) { .grid, .grid.three { grid-template-columns: minmax(0, 1fr); } h1 { font-size: 36px; } }
+  @media (max-height: 700px) { .lead { margin-bottom: 16px; } .group { margin-bottom: 12px; } .logo { width: 84px; height: 84px; } }
+</style></head>
+<body class="$body_class">
+<div class="aurora"></div><div class="sky"><div class="curtain far"></div><div class="curtain near"></div></div>
+<button class="skip" onclick="hw.go('finish')">Skip tour</button>
+<div class="stage">
+<section class="slide on">
+  <img class="logo" src="safariqt:logo" alt="">
+  <div class="runes" title="Huginn, in runes">$runes</div>
+  <h1>Welcome to Huginn</h1>
+  <p class="lead">A quiet, private browser, named for Odin's raven of thought. It flies the web for you
+  and keeps what it sees to itself. Here's a quick look around.</p>
+  <button class="primary" onclick="hw.next()">Begin</button>
+</section>
+<section class="slide">
+  <h2>Private, without trying</h2>
+  <p class="lead">Huginn protects you on every site from the moment it opens. Nothing to set up.</p>
+  <div class="grid">
+    <div class="card"><div class="ico">$i_shield</div><b>Trackers stopped</b><span>Cross-site trackers are blocked before they load.</span></div>
+    <div class="card"><div class="ico">$i_ads</div><b>Ads blocked</b><span>YouTube's too. Allow them per site from the page menu.</span></div>
+    <div class="card"><div class="ico">$i_cookie</div><b>Cookie pop-ups refused</b><span>Huginn says no for you, and the banner goes away.</span></div>
+    <div class="card"><div class="ico">$i_finger</div><b>Fingerprinting blocked</b><span>Sites can't recognise your PC by its quirks.</span></div>
+  </div>
+  <p class="note">Every site gets a privacy grade from A to F (top of the page menu) · <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> opens a burner tab that forgets everything when it closes.</p>
+</section>
+<section class="slide">
+  <h2>The ravens remember</h2>
+  <p class="lead">Huginn is thought; Muninn is memory. Between them, nothing you've read is lost.</p>
+  <div class="grid">
+    <div class="card"><div class="ico">$i_memory</div><b>Muninn</b><span>Find a page by what it said. Type a few words you remember into the address bar.</span></div>
+    <div class="card"><div class="ico">$i_valhalla</div><b>Valhalla</b><span>Every tab you closed this week, by day. Page menu › More Tools.</span></div>
+    <div class="card"><div class="ico">$i_listen</div><b>Reader &amp; Listen</b><span>Articles without the clutter (<kbd>F9</kbd>), or read aloud to you.</span></div>
+    <div class="card"><div class="ico">$i_command</div><b>Command bar</b><span><kbd>Ctrl</kbd>+<kbd>K</kbd> opens, finds and switches anything.</span></div>
+  </div>
+  <p class="note">All of it stays on this PC. Nothing is sent anywhere.</p>
+</section>
+<section class="slide">
+  <h2>Make it yours</h2>
+  <p class="lead">Pick a realm, or Auto to follow the day, and a look. Changes apply as you choose, and you can change them any time in Settings.</p>
+  <div class="group"><div class="label">Theme</div><div class="row" id="realms">$realm_picks</div></div>
+  <div class="group"><div class="label">Appearance</div><div class="row" id="modes">
+    <button class="pick" data-k="appearance" data-v="light"><span class="mode light"></span><small>Light</small></button>
+    <button class="pick" data-k="appearance" data-v="dark"><span class="mode dark"></span><small>Dark</small></button>
+    <button class="pick" data-k="appearance" data-v="system"><span class="mode system"></span><small>Match Windows</small></button>
+  </div></div>
+  <div class="group"><div class="label">Window buttons</div><div class="row" id="buttons">
+    <button class="pick" data-k="buttons" data-v="mac"><span class="bar"><i class="dot" style="background:#FF5F57"></i><i class="dot" style="background:#FEBC2E"></i><i class="dot" style="background:#28C840"></i><span class="field"></span></span><small>Left · Mac style</small></button>
+    <button class="pick" data-k="buttons" data-v="windows"><span class="bar"><span class="field"></span>
+      <svg class="wg" viewBox="0 0 10 10"><path d="M1 5.5 H9" stroke="currentColor" stroke-width="1.2"/></svg>
+      <svg class="wg" viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+      <svg class="wg" viewBox="0 0 10 10"><path d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5" stroke="currentColor" stroke-width="1.2"/></svg>
+    </span><small>Right · Windows style</small></button>
+  </div></div>
+</section>
+<section class="slide">
+  <h2>Your Start Page</h2>
+  <p class="lead">The page every new tab opens on. A few touches, all optional.</p>
+  <div class="acts" style="width:min(520px,100%)">
+    <button class="switch" data-t="ripple"><span>Rippling Aurora<small>Curtains of light drifting slowly across the top</small></span><i class="knob"></i></button>
+    <button class="switch" data-t="norse"><span>Greet in Old Norse<small>Góðan dag instead of Good afternoon</small></span><i class="knob"></i></button>
+    <button class="act" onclick="hw.go('weather')"><span class="ico">$i_weather</span><span><b>Weather</b><span>Add your city for a forecast beside the greeting</span></span><span class="done" id="city"></span></button>
+  </div>
+</section>
+<section class="slide">
+  <h2>Bring your things</h2>
+  <p class="lead">Moving from another browser? Bring it along in a click.</p>
+  <div class="acts">
+    <button class="act" onclick="hw.go('import')"><span class="ico">$i_import</span><span><b>Import from another browser</b><span>Bookmarks and history from Chrome, Edge, Firefox and more</span></span><span class="done" id="imported"></span></button>
+    <button class="act" onclick="hw.go('default')"><span class="ico">$i_default</span><span><b>Make Huginn your default browser</b><span>Links from other apps open here</span></span><span class="done" id="isdefault"></span></button>
+  </div>
+</section>
+<section class="slide">
+  <div class="runes">ᚺᚢᚷᛁᚾᚾ</div>
+  <h1>You're ready</h1>
+  <div class="tips">
+    <div><b>Ctrl+K</b> · find or do anything</div>
+    <div><b>The page menu</b> (left of the address bar) · this site's privacy, zoom, reader and settings</div>
+    <div><b>Ctrl+Alt+N</b> · a burner tab that leaves no trace</div>
+  </div>
+  <button class="primary" onclick="hw.go('finish')">Start browsing</button>
+  <p class="note building" id="building">Huginn is building H.264 video support in the background ·
+    progress in Privacy &amp; Security › Video</p>
+  <p class="note">See this again any time: page menu › More Tools › Welcome Tour.</p>
+</section>
+</div>
+<footer><button class="nav back" onclick="hw.back()" hidden>Back</button><div class="dots" id="dots"></div>
+<button class="nav next" onclick="hw.next()">Next</button></footer>
+<script>
+var hw = (function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide')), at = 0, state = $state;
+  var dots = document.getElementById('dots');
+  slides.forEach(function () { dots.appendChild(document.createElement('i')); });
+  function show(n) {
+    at = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach(function (s, i) { s.classList.toggle('on', i === at); s.classList.toggle('past', i < at); });
+    Array.prototype.forEach.call(dots.children, function (d, i) { d.classList.toggle('on', i === at); });
+    document.querySelector('.nav.back').hidden = at === 0;
+    var next = document.querySelector('.nav.next');
+    next.hidden = at === 0 || at === slides.length - 1;
+  }
+  function link(kind, query) { location.href = 'safariqt:' + kind + '?' + query; }
+  function set(k, v) { state[k] = v; paint(); link('welcome-set', encodeURIComponent(k) + '=' + encodeURIComponent(v)); }
+  function paint() {
+    Array.prototype.forEach.call(document.querySelectorAll('.pick'), function (b) {
+      var on = String(state[b.dataset.k]) === b.dataset.v;
+      if (b.dataset.k === 'realm' && state.living) on = false;      // Auto is the theme then
+      b.classList.toggle('sel', on);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.switch'), function (b) {
+      b.classList.toggle('on', !!state[b.dataset.t]);
+    });
+    document.body.classList.toggle('ripple', !!state.ripple);
+    document.getElementById('city').textContent = state.city ? state.city + ' ✓' : '';
+    document.getElementById('imported').textContent = state.imported ? 'Done ✓' : '';
+    document.getElementById('isdefault').textContent = state.isdefault ? 'Done ✓' : '';
+    document.getElementById('building').hidden = !state.building;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.pick'), function (b) {
+    b.addEventListener('click', function () {
+      if (b.dataset.k === 'realm') state.living = 0;               // a realm of its own: no day/night
+      set(b.dataset.k, b.dataset.v);
+    });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.switch'), function (b) {
+    b.addEventListener('click', function () { set(b.dataset.t, state[b.dataset.t] ? 0 : 1); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') show(at + 1);
+    if (e.key === 'ArrowLeft') show(at - 1);
+    if (e.key === 'Escape') link('welcome-do', 'do=finish');
+  });
+  show(0); paint();
+  return {
+    next: function () { show(at + 1); }, back: function () { show(at - 1); },
+    go: function (what) { link('welcome-do', 'do=' + encodeURIComponent(what)); },
+    sync: function (data) {
+      var root = document.documentElement;
+      Object.keys(data.vars || {}).forEach(function (k) { root.style.setProperty(k, data.vars[k]); });
+      if (data.vars && data.vars['--scheme']) document.querySelector('meta[name=color-scheme]').content = data.vars['--scheme'];
+      if (data.state) { state = data.state; paint(); }
+    },
+    at: function () { return at; }, state: function () { return state; }
+  };
+})();
+</script></body></html>""")
+
+
+def render_welcome_page(theme: dict, state: dict) -> str:
+    picks = []
+    for key, spec in REALMS.items():
+        a, b = spec["glow"]
+        picks.append(f'<button class="pick" data-k="realm" data-v="{key}"><span class="swatch" '
+                     f'style="background: linear-gradient(135deg, {a}, {b})"></span>'
+                     f'<small>{html.escape(spec["label"])}</small></button>')
+    picks.append('<button class="pick" data-k="living" data-v="1" title="Follows the time of day: warm at dawn '
+                 'and dusk, deep blue at night"><span class="swatch auto"></span><small>Auto</small></button>')
+    variables = " ".join(f"{k}: {v};" for k, v in welcome_vars(theme).items() if k != "--scheme")
+    icons = {f"i_{k}": v for k, v in WELCOME_ICONS.items()}
+    return WELCOME_PAGE.substitute(scheme="dark" if theme["dark"] else "light", vars=variables,
+                                   runes=html.escape(to_runes("Huginn")), realm_picks="".join(picks),
+                                   body_class="ripple" if state.get("ripple") else "",
+                                   state=json.dumps(state).replace("</", "<\\/"), **icons)
+
+
+class StartPageSchemeHandler(QWebEngineUrlSchemeHandler):
+    """Serves safariqt:start (generated per request, so it reflects theme, bookmarks and the
+    privacy report) and the tile images safariqt:icon/<host> and safariqt:touch/<host>."""
+
+    def __init__(self, store: BrowserStore, favicons: FaviconCache,
+                 fetcher: TouchIconFetcher | None = None, parent: QObject | None = None,
+                 private: bool = False) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.favicons = favicons
+        self.fetcher = fetcher
+        self.private = private
+        self.theme = LIGHT_THEME
+        self.tracking_prevention = True
+        self.norse = False                         # Greet in Old Norse (page menu > Settings)
+        self.recap = True                          # the week's numbers under the Privacy Report
+        self.ripple = False                        # Rippling Aurora (page menu > Settings > Start Page)
+        self.weather: dict | None = None           # WeatherService.snapshot(), set by the window
+        self.welcome_state = None                  # () -> the welcome tour's choices (set by the window)
+        self._logo: bytes | None = None
+
+    def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
+        try:
+            self._serve(job)
+        except Exception:                          # never leave a tab waiting forever
+            job.fail(QWebEngineUrlRequestJob.Error.RequestFailed)
+
+    def _serve(self, job: QWebEngineUrlRequestJob) -> None:
+        path = job.requestUrl().path()
+        data = None
+        if path == "start":
+            data = render_start_page(self.theme, self.store, self.tracking_prevention, self.favicons,
+                                     self.private, self.norse, self.recap, self.weather, self.ripple).encode("utf-8")
+            mime = b"text/html"
+            if self.fetcher is not None:              # fetch missing touch icons for next time
+                favorites, frequent = start_page_tiles(self.store)
+                for tile in favorites + frequent:
+                    self.fetcher.ensure(QUrl(tile["url"]))
+        elif path == "focus":
+            query = QUrlQuery(job.requestUrl())
+            try:
+                until = float(query.queryItemValue("until"))
+            except ValueError:
+                until = time.time()
+            allow = QUrl(f"{START_SCHEME}:focus-allow")
+            allow_query = QUrlQuery()
+            allow_query.addQueryItem("url", query.queryItemValue("url", QUrl.ComponentFormattingOption.FullyDecoded))
+            allow.setQuery(allow_query)
+            data = render_focus_page(self.theme, query.queryItemValue("site"), until,
+                                     allow.toString(QUrl.ComponentFormattingOption.FullyEncoded)).encode("utf-8")
+            mime = b"text/html"
+        elif path == "welcome":
+            state = self.welcome_state() if self.welcome_state is not None else {}
+            data, mime = render_welcome_page(self.theme, state).encode("utf-8"), b"text/html"
+        elif path == "logo":
+            if self._logo is None:
+                buffer = QBuffer()
+                buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+                make_app_icon().pixmap(256, 256).save(buffer, "PNG")
+                self._logo = bytes(buffer.data())
+            data, mime = self._logo, b"image/png"
+        elif path.startswith("icon/"):
+            data, mime = self.favicons.read(path[5:]), b"image/png"
+        elif path.startswith("touch/"):
+            data, mime = self.favicons.read(path[6:], "touch"), b"image/png"
+        if data is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        buffer = QBuffer(job)                      # parented to the job -> freed with it
+        buffer.setData(QByteArray(data))
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        job.reply(QByteArray(mime), buffer)
+
+
+# Brings an open Start Page up to date with freshly rendered HTML without reloading it:
+# only the parts that changed are swapped (a tile that got its icon, a new favorite), so
+# the aurora keeps drifting and nothing else on the page redraws.
+START_PAGE_SWAP_JS = r"""(function (html) {
+  var doc = new DOMParser().parseFromString(html, 'text/html');
+  var fresh = doc.querySelector('main'), old = document.querySelector('main');
+  if (!fresh || !old) return false;
+  var newStyle = doc.head.querySelector('style'), oldStyle = document.head.querySelector('style');
+  if (newStyle && oldStyle && newStyle.textContent !== oldStyle.textContent) oldStyle.textContent = newStyle.textContent;
+  var newScheme = doc.querySelector('meta[name=color-scheme]'), oldScheme = document.querySelector('meta[name=color-scheme]');
+  if (newScheme && oldScheme) oldScheme.content = newScheme.content;
+  function sameShell(a, b) {
+    if (a.nodeType !== 1 || b.nodeType !== 1 || a.tagName !== b.tagName) return false;
+    if (a.attributes.length !== b.attributes.length) return false;
+    for (var i = 0; i < a.attributes.length; i++)
+      if (b.getAttribute(a.attributes[i].name) !== a.attributes[i].value) return false;
+    return true;
+  }
+  function morph(a, b, depth) {
+    if (a.isEqualNode(b)) return;
+    if (depth > 0 && sameShell(a, b)) {
+      var ak = Array.prototype.slice.call(a.childNodes), bk = Array.prototype.slice.call(b.childNodes);
+      for (var i = 0; i < bk.length; i++) {
+        if (i < ak.length) morph(ak[i], bk[i], depth - 1);
+        else a.appendChild(document.importNode(bk[i], true));
+      }
+      for (var j = bk.length; j < ak.length; j++) ak[j].remove();
+      return;
+    }
+    a.replaceWith(document.importNode(b, true));
+  }
+  morph(old, fresh, 4);
+  return true;
+})(%s)"""
+
+
+def register_start_scheme() -> None:
+    """Must run before QApplication is created."""
+    scheme = QWebEngineUrlScheme(START_SCHEME.encode())
+    scheme.setSyntax(QWebEngineUrlScheme.Syntax.Path)
+    scheme.setFlags(QWebEngineUrlScheme.Flag.SecureScheme | QWebEngineUrlScheme.Flag.LocalScheme)
+    QWebEngineUrlScheme.registerScheme(scheme)
+
+
+# --------------------------------------------------------------------------------------
+# Traffic-light window controls
+# --------------------------------------------------------------------------------------
+class TrafficLights(QWidget):
+    """Red / yellow / green controls. Glyphs appear while hovering, grey when inactive."""
+
+    closeClicked = Signal()
+    minimizeClicked = Signal()
+    zoomClicked = Signal()
+
+    DIAMETER = 12
+    GAP = 8
+    COLORS = (("#FF5F57", "#E0443E", "#4D0000"),      # fill, rim, glyph
+              ("#FEBC2E", "#DEA123", "#995700"),
+              ("#28C840", "#1AAB29", "#006500"))
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(3 * self.DIAMETER + 2 * self.GAP + 2, self.DIAMETER + 8)
+        self.setMouseTracking(True)
+        self._hovered = False
+        self._pressed = -1
+        self._active = True
+        self._dark = False
+        self._maximized = False
+
+    def set_window_active(self, active: bool) -> None:
+        self._active = active
+        self.update()
+
+    def set_dark(self, dark: bool) -> None:
+        self._dark = dark
+        self.update()
+
+    def set_maximized(self, maximized: bool) -> None:
+        self._maximized = maximized
+        self.update()
+
+    def _circle(self, i: int) -> QRectF:
+        x = 1 + i * (self.DIAMETER + self.GAP)
+        return QRectF(x, (self.height() - self.DIAMETER) / 2, self.DIAMETER, self.DIAMETER)
+
+    def index_at(self, pos: QPointF) -> int:
+        for i in range(3):
+            c = self._circle(i).center()
+            if (pos.x() - c.x()) ** 2 + (pos.y() - c.y()) ** 2 <= (self.DIAMETER / 2 + 1.5) ** 2:
+                return i
+        return -1
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hovered, self._pressed = False, -1
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        idx = self.index_at(event.position())
+        if event.button() != Qt.MouseButton.LeftButton or idx < 0:
+            event.ignore()                         # gaps fall through to the toolbar -> drag
+            return
+        self._pressed = idx
+        self.update()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self.index_at(event.position()) < 0:
+            event.ignore()                         # lets the toolbar toggle maximize
+        else:
+            self.mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        idx = self.index_at(event.position())
+        pressed, self._pressed = self._pressed, -1
+        self.update()
+        if idx >= 0 and idx == pressed:
+            (self.closeClicked, self.minimizeClicked, self.zoomClicked)[idx].emit()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        colored = self._active or self._hovered
+        for i, (fill, rim, glyph) in enumerate(self.COLORS):
+            rect = self._circle(i)
+            if colored:
+                f, b = QColor(fill), QColor(rim)
+            else:
+                f = QColor("#4B4B4E" if self._dark else "#D5D5D8")
+                b = QColor("#404043" if self._dark else "#C2C2C6")
+            if self._pressed == i:
+                f = f.darker(125)
+            p.setPen(QPen(b, 0.8))
+            p.setBrush(f)
+            p.drawEllipse(rect.adjusted(0.4, 0.4, -0.4, -0.4))
+            if self._hovered:
+                self._draw_glyph(p, i, rect, QColor(glyph))
+        p.end()
+
+    def _draw_glyph(self, p: QPainter, index: int, rect: QRectF, color: QColor) -> None:
+        cx, cy = rect.center().x(), rect.center().y()
+        if index < 2:
+            pen = QPen(color, 1.2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            if index == 0:                                     # close: ×
+                d = 2.6
+                p.drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d))
+                p.drawLine(QPointF(cx - d, cy + d), QPointF(cx + d, cy - d))
+            else:                                              # minimize: −
+                p.drawLine(QPointF(cx - 3.2, cy), QPointF(cx + 3.2, cy))
+            return
+        p.setPen(Qt.PenStyle.NoPen)                            # zoom: two triangles
+        p.setBrush(color)
+        if self._maximized:                                    # pointing inward = restore
+            a, b = 0.6, 4.0
+            tris = (((-a, -a), (-a, -b), (-b, -a)), ((a, a), (a, b), (b, a)))
+        else:                                                  # pointing outward = maximize
+            a, b = 3.3, 1.3
+            tris = (((-a, -a), (b, -a), (-a, b)), ((a, a), (-b, a), (a, -b)))
+        for tri in tris:
+            p.drawPolygon(QPolygonF([QPointF(cx + x, cy + y) for x, y in tri]))
+
+
+class WindowButtons(QWidget):
+    """Windows-style minimize / maximize / close, at the right end of the toolbar (page menu >
+    Settings > Window Buttons). Same signals as TrafficLights; drawn in Huginn's style: thin
+    glyphs, a soft rounded highlight on hover, and red for close."""
+
+    closeClicked = Signal()
+    minimizeClicked = Signal()
+    zoomClicked = Signal()
+
+    BUTTON = QSize(40, 30)
+    GAP = 2
+    CLOSE_RED = "#C42B1C"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(3 * self.BUTTON.width() + 2 * self.GAP, self.BUTTON.height())
+        self.setMouseTracking(True)
+        self._hover = -1
+        self._pressed = -1
+        self._active = True
+        self._maximized = False
+        self.theme = LIGHT_THEME
+        self.setToolTip("")
+
+    def set_window_active(self, active: bool) -> None:
+        self._active = active
+        self.update()
+
+    def set_theme(self, theme: dict) -> None:
+        self.theme = theme
+        self.update()
+
+    def set_dark(self, dark: bool) -> None:               # TrafficLights' API; colours come from the theme
+        self.update()
+
+    def set_maximized(self, maximized: bool) -> None:
+        self._maximized = maximized
+        self.update()
+
+    def _rect(self, i: int) -> QRectF:
+        return QRectF(i * (self.BUTTON.width() + self.GAP), 0, self.BUTTON.width(), self.BUTTON.height())
+
+    def index_at(self, pos: QPointF) -> int:
+        for i in range(3):
+            if self._rect(i).contains(pos):
+                return i
+        return -1
+
+    def mouseMoveEvent(self, event) -> None:
+        idx = self.index_at(event.position())
+        if idx != self._hover:
+            self._hover = idx
+            self.setToolTip(("Minimize", "Restore Down" if self._maximized else "Maximize", "Close")[idx]
+                            if idx >= 0 else "")
+            self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hover, self._pressed = -1, -1
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        idx = self.index_at(event.position())
+        if event.button() != Qt.MouseButton.LeftButton or idx < 0:
+            event.ignore()
+            return
+        self._pressed = idx
+        self.update()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self.mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        idx = self.index_at(event.position())
+        pressed, self._pressed = self._pressed, -1
+        self.update()
+        if idx >= 0 and idx == pressed:
+            (self.minimizeClicked, self.zoomClicked, self.closeClicked)[idx].emit()
+
+    def paintEvent(self, event) -> None:
+        t = self.theme
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for i in range(3):
+            rect = self._rect(i)
+            lit = self._hover == i or self._pressed == i
+            glyph = qc(t["icon"] if self._active else t["text_tertiary"])
+            if lit:
+                p.setPen(Qt.PenStyle.NoPen)
+                if i == 2:
+                    red = QColor(self.CLOSE_RED)
+                    p.setBrush(red.darker(115) if self._pressed == i else red)
+                    glyph = QColor("#FFFFFF")
+                else:
+                    p.setBrush(qc(t["pressed"] if self._pressed == i else t["hover"]))
+                p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 8, 8)
+            self._glyph(p, i, rect.center(), glyph)
+        p.end()
+
+    def _glyph(self, p: QPainter, index: int, c: QPointF, colour: QColor) -> None:
+        pen = QPen(colour, 1.1)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        x, y = c.x(), c.y()
+        if index == 0:                                         # minimize: —
+            p.drawLine(QPointF(x - 5, y + 0.5), QPointF(x + 5, y + 0.5))
+        elif index == 1 and not self._maximized:               # maximize: □
+            p.drawRoundedRect(QRectF(x - 4.5, y - 4.5, 9, 9), 1.6, 1.6)
+        elif index == 1:                                       # restore: two overlapping squares
+            p.drawRoundedRect(QRectF(x - 4.5, y - 2.5, 7, 7), 1.4, 1.4)
+            path = QPainterPath(QPointF(x - 2.5, y - 2.5))
+            path.lineTo(x - 2.5, y - 3.6)
+            path.quadTo(x - 2.5, y - 4.5, x - 1.6, y - 4.5)
+            path.lineTo(x + 3.6, y - 4.5)
+            path.quadTo(x + 4.5, y - 4.5, x + 4.5, y - 3.6)
+            path.lineTo(x + 4.5, y + 1.6)
+            path.quadTo(x + 4.5, y + 2.5, x + 3.6, y + 2.5)
+            path.lineTo(x + 2.5, y + 2.5)
+            p.drawPath(path)
+        else:                                                  # close: ×
+            d = 4.6
+            p.drawLine(QPointF(x - d, y - d), QPointF(x + d, y + d))
+            p.drawLine(QPointF(x - d, y + d), QPointF(x + d, y - d))
+
+
+WINDOW_BUTTON_STYLES = {"mac": "Left — Mac Style", "windows": "Right — Windows Style"}
+
+
+# --------------------------------------------------------------------------------------
+# Toolbar capsules
+# --------------------------------------------------------------------------------------
+def capsule_button(icon_name: str, tooltip: str, width: int = 34, icon_size: int = 17) -> QToolButton:
+    button = QToolButton()
+    button.setObjectName("CapsuleButton")
+    button.setProperty("iconName", icon_name)
+    button.setFixedSize(width, CAPSULE_HEIGHT - 4)
+    button.setIconSize(QSize(icon_size, icon_size))
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    button.setToolTip(tooltip)
+    return button
+
+
+class Capsule(QWidget):
+    """A white pill holding a group of toolbar buttons, as in Safari 26."""
+
+    def __init__(self, buttons: list[QToolButton], dividers: tuple[int, ...] = ()) -> None:
+        super().__init__()
+        self.buttons = buttons
+        self.dividers = dividers                      # draw a hairline after these buttons
+        self.theme = LIGHT_THEME
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+        for button in buttons:
+            layout.addWidget(button)
+        self.setFixedHeight(CAPSULE_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_theme(self, theme: dict) -> None:
+        self.theme = theme
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        body = paint_capsule(p, QRectF(self.rect()), self.theme)
+        p.setPen(QPen(qc(self.theme["divider"]), 1))
+        for i in self.dividers:
+            x = self.buttons[i].geometry().right() + 0.5
+            p.drawLine(QPointF(x, body.center().y() - 8), QPointF(x, body.center().y() + 8))
+        p.end()
+
+
+# --------------------------------------------------------------------------------------
+# Smart address field
+# --------------------------------------------------------------------------------------
+class AddressEdit(QLineEdit):
+    """Shows the centred site name when idle and the full, selected URL while editing."""
+
+    escapePressed = Signal()
+    focusChanged = Signal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("AddressEdit")
+        self.setFrame(False)
+        self.setPlaceholderText("Search or enter website name")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._url = QUrl()
+        self._not_secure = False
+
+    def set_url(self, url: QUrl, not_secure: bool = False) -> None:
+        self._url = QUrl(url)
+        self._not_secure = not_secure
+        if not self.hasFocus():
+            self._show_display_text()
+
+    def _show_display_text(self) -> None:
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setText(display_text_for(self._url, self._not_secure))
+        self.setCursorPosition(0)
+
+    def _show_edit_text(self) -> None:
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.setText(edit_text_for(self._url))
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        # Popups and window switches (Alt+Tab) must not reset what the user is typing.
+        if event.reason() not in (Qt.FocusReason.PopupFocusReason, Qt.FocusReason.ActiveWindowFocusReason):
+            self._show_edit_text()
+            QTimer.singleShot(0, self.selectAll)   # after the click, so it selects everything
+        self.focusChanged.emit(True)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        if event.reason() not in (Qt.FocusReason.PopupFocusReason, Qt.FocusReason.ActiveWindowFocusReason):
+            self._show_display_text()
+        self.focusChanged.emit(False)
+
+    key_hook = None                                   # the window's suggestion keys (set by the window)
+
+    def keyPressEvent(self, event) -> None:
+        if self.key_hook is not None and self.key_hook(event):
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            original = edit_text_for(self._url)
+            if self.text() != original:              # first Esc: revert the edit
+                self.setText(original)
+                self.selectAll()
+            else:                                    # second Esc: back to the page
+                self.escapePressed.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class AddressField(QWidget):
+    """Pill-shaped field: page-menu button, the editor, and reload/stop. Paints its own
+    body, focus ring and a progress line along the bottom edge while a page loads."""
+
+    submitted = Signal(str)
+    reloadRequested = Signal()
+    stopRequested = Signal()
+    pageMenuRequested = Signal()
+    readerRequested = Signal()
+    audioRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(CAPSULE_HEIGHT)
+        self.setMinimumWidth(220)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self._icons: IconFactory | None = None
+        self._theme = LIGHT_THEME
+        self._loading = False
+        self._progress = 0.0
+        self._opacity = 0.0
+        self.page_glyph = "page"                  # "private" in Private Browsing windows
+        self.reader_state = None                  # None: no article here; False: available; True: on
+        self.audio_state = None                   # None, "playing" or "muted"
+
+        self.page_button = self._field_button("Page menu: privacy, zoom and settings")
+        self.edit = AddressEdit()
+        self.audio_button = self._field_button("Mute this tab")
+        self.reader_button = self._field_button("Show Reader (F9)")
+        self.action_button = self._field_button("Reload this page (Ctrl+R)")
+        self.audio_button.hide()
+        self.reader_button.hide()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 0, 6, 1)
+        layout.setSpacing(4)
+        layout.addWidget(self.page_button)
+        layout.addWidget(self.edit, 1)
+        layout.addWidget(self.audio_button)
+        layout.addWidget(self.reader_button)
+        layout.addWidget(self.action_button)
+        self.audio_button.clicked.connect(lambda *_: self.audioRequested.emit())
+        self.reader_button.clicked.connect(lambda *_: self.readerRequested.emit())
+
+        self.page_button.clicked.connect(lambda *_: self.pageMenuRequested.emit())
+        self.action_button.clicked.connect(
+            lambda *_: self.stopRequested.emit() if self._loading else self.reloadRequested.emit())
+        self.edit.returnPressed.connect(self._on_return)
+        self.edit.focusChanged.connect(self._on_focus_changed)
+
+        self._progress_anim = QVariantAnimation(self)
+        self._progress_anim.setDuration(250)
+        self._progress_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._progress_anim.valueChanged.connect(self._on_progress_value)
+        self._progress_anim.finished.connect(self._on_progress_finished)
+        self._fade_anim = QVariantAnimation(self)
+        self._fade_anim.setDuration(400)
+        self._fade_anim.valueChanged.connect(self._on_fade_value)
+
+    @staticmethod
+    def _field_button(tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("FieldButton")
+        button.setCursor(Qt.CursorShape.ArrowCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setFixedSize(24, 24)
+        button.setIconSize(QSize(15, 15))
+        button.setToolTip(tooltip)
+        return button
+
+    def mousePressEvent(self, event) -> None:            # clicks on the padding focus the editor
+        self.edit.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    # -- appearance -------------------------------------------------------------------------
+    def set_style(self, icons: IconFactory, theme: dict) -> None:
+        self._icons, self._theme = icons, theme
+        self._update_buttons()
+        self.update()
+
+    def _update_buttons(self) -> None:
+        if self._icons is None:
+            return
+        secondary = self._theme["text_secondary"]
+        editing = self.edit.hasFocus()
+        self.page_button.setIcon(self._icons.icon("search" if editing else self.page_glyph, secondary))
+        self.page_button.setEnabled(not editing)
+        self.action_button.setIcon(self._icons.icon("stop" if self._loading else "reload", secondary))
+        self.action_button.setToolTip("Stop loading" if self._loading else "Reload this page (Ctrl+R)")
+        self.reader_button.setVisible(self.reader_state is not None and not editing)
+        self.reader_button.setIcon(self._icons.icon("reader", self._theme["accent"] if self.reader_state else secondary))
+        self.reader_button.setToolTip("Hide Reader (F9)" if self.reader_state else "Show Reader (F9)")
+        self.audio_button.setVisible(self.audio_state is not None and not editing)
+        muted = self.audio_state == "muted"
+        self.audio_button.setIcon(self._icons.icon("speaker_muted" if muted else "speaker",
+                                                   secondary if muted else self._theme["accent"]))
+        self.audio_button.setToolTip("Unmute this tab" if muted else "Mute this tab")
+
+    def set_reader(self, state) -> None:
+        if state != self.reader_state:
+            self.reader_state = state
+            self._update_buttons()
+
+    def set_audio(self, state) -> None:
+        if state != self.audio_state:
+            self.audio_state = state
+            self._update_buttons()
+
+    def _on_focus_changed(self, _focused: bool) -> None:
+        self._update_buttons()
+        self.update()
+
+    def set_url(self, url: QUrl, not_secure: bool = False) -> None:
+        self.edit.set_url(url, not_secure)
+
+    def _on_return(self) -> None:
+        text = self.edit.text().strip()
+        if text:
+            self.submitted.emit(text)
+
+    # -- progress line ------------------------------------------------------------------------
+    def start_progress(self) -> None:
+        self._loading = True
+        self._update_buttons()
+        self._fade_anim.stop()
+        self._opacity, self._progress = 1.0, 0.0
+        self._animate_progress(0.12)
+
+    def update_progress(self, value: int) -> None:
+        if self._loading:
+            target = max(0.12, value / 100.0)
+            if target > self._progress:
+                self._animate_progress(target)
+
+    def finish_progress(self) -> None:
+        self._loading = False
+        self._update_buttons()
+        if self._opacity > 0:
+            self._animate_progress(1.0)
+
+    def reset_progress(self, loading: bool, value: int) -> None:
+        """Jump straight to a tab's state when switching tabs."""
+        self._progress_anim.stop()
+        self._fade_anim.stop()
+        self._loading = loading
+        self._update_buttons()
+        self._progress = max(0.12, value / 100.0) if loading else 0.0
+        self._opacity = 1.0 if loading else 0.0
+        self.update()
+
+    def _animate_progress(self, target: float) -> None:
+        self._progress_anim.stop()
+        self._progress_anim.setStartValue(float(self._progress))
+        self._progress_anim.setEndValue(float(target))
+        self._progress_anim.start()
+
+    def _on_progress_value(self, value) -> None:
+        self._progress = float(value)
+        self.update()
+
+    def _on_progress_finished(self) -> None:
+        if not self._loading and self._progress >= 0.999:
+            self._fade_anim.stop()
+            self._fade_anim.setStartValue(float(self._opacity))
+            self._fade_anim.setEndValue(0.0)
+            self._fade_anim.start()
+
+    def _on_fade_value(self, value) -> None:
+        self._opacity = float(value)
+        self.update()
+
+    # -- painting -----------------------------------------------------------------------------
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        body = paint_capsule(p, QRectF(self.rect()), self._theme)
+        radius = body.height() / 2
+        if self.edit.hasFocus():
+            ring = body.adjusted(1.2, 1.2, -1.2, -1.2)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(qc(self._theme["focus_ring"]), 2.4))
+            p.drawRoundedRect(ring, ring.height() / 2, ring.height() / 2)
+        if self._opacity > 0.01 and self._progress > 0:
+            clip = QPainterPath()
+            clip.addRoundedRect(body, radius, radius)
+            p.setClipPath(clip)
+            p.setOpacity(self._opacity)
+            bar_h = 2.5
+            gradient = QLinearGradient(body.left(), 0, body.right(), 0)      # accent -> aurora
+            gradient.setColorAt(0, qc(self._theme["accent"]))
+            gradient.setColorAt(1, qc(self._theme.get("glow_b", self._theme["accent"])))
+            p.fillRect(QRectF(body.left(), body.bottom() - bar_h, body.width() * min(1.0, self._progress), bar_h),
+                       QBrush(gradient))
+        p.end()
+
+
+# --------------------------------------------------------------------------------------
+# Tabs
+# --------------------------------------------------------------------------------------
+class SafariTabStyle(QProxyStyle):
+    """Paints the Safari tab strip and positions QTabWidget's parts. Painting tabs in the
+    style (not in paintEvent) means the tab picked up while dragging looks the same too."""
+
+    def __init__(self) -> None:
+        # On top of HuginnStyle, not plain Fusion: everything inside the tab widget - the
+        # pages and their right-click menus - inherits this style, and their menus should
+        # look like every other menu.
+        super().__init__(HuginnStyle())
+        self.theme = LIGHT_THEME
+        self.inset = True              # page as an inset rounded card; off for page fullscreen
+
+    # -- geometry ---------------------------------------------------------------------------
+    def subElementRect(self, element, option, widget=None) -> QRect:
+        SE = QStyle.SubElement
+        if element == SE.SE_TabBarTabLeftButton:
+            r = option.rect
+            return QRect(r.left() + 6, r.top() + (r.height() - 18) // 2, 18, 18)
+        if element == SE.SE_TabBarTabRightButton:
+            r = option.rect
+            return QRect(r.right() - 6 - 18, r.top() + (r.height() - 18) // 2, 18, 18)
+        if element in (SE.SE_TabWidgetTabBar, SE.SE_TabWidgetTabPane, SE.SE_TabWidgetTabContents):
+            r = option.rect
+            bar_size = getattr(option, "tabBarSize", QSize())
+            has_bar = bar_size.isValid() and bar_size.height() > 0
+            if element == SE.SE_TabWidgetTabBar:
+                if not has_bar:
+                    return QRect()
+                return QRect(r.left() + TAB_SIDE_INSET, r.top(), r.width() - 2 * TAB_SIDE_INSET, TAB_TRACK_HEIGHT)
+            top = TAB_ROW_HEIGHT if has_bar else 0
+            pane = QRect(r.left(), r.top() + top, r.width(), r.height() - top)
+            if element == SE.SE_TabWidgetTabPane or not self.inset:
+                return pane
+            return pane.adjusted(CARD_MARGIN, 0, -CARD_MARGIN, -CARD_MARGIN)   # the page card
+        return super().subElementRect(element, option, widget)
+
+    # -- painting ---------------------------------------------------------------------------
+    def drawPrimitive(self, element, option, painter, widget=None) -> None:
+        PE = QStyle.PrimitiveElement
+        if element == PE.PE_FrameTabWidget:         # shadow, body and hairline of the page card
+            if self.inset:
+                card = QRectF(option.rect.adjusted(CARD_MARGIN, 0, -CARD_MARGIN, -CARD_MARGIN))
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                paint_card(painter, card, self.theme)
+                painter.restore()
+            return
+        if element == PE.PE_FrameTabBarBase:
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+    def drawControl(self, element, option, painter, widget=None) -> None:
+        CE = QStyle.ControlElement
+        if element == CE.CE_TabBarTab:
+            self._draw_tab(option, painter, widget)
+            return
+        if element in (CE.CE_TabBarTabShape, CE.CE_TabBarTabLabel):
+            return
+        super().drawControl(element, option, painter, widget)
+
+    def _draw_tab(self, opt, p: QPainter, bar) -> None:
+        t = self.theme
+        r = QRectF(opt.rect)
+        # The tab being dragged is painted into a pixmap for its floating copy.
+        moving_position = getattr(QStyleOptionTab.TabPosition, "Moving", None)    # Qt 6.6+
+        if moving_position is not None:
+            moving = opt.position == moving_position
+        else:
+            moving = bar is not None and p.device() is not bar
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        index = getattr(opt, "tabIndex", -1)
+        if (index is None or index < 0) and bar is not None and not moving:
+            index = bar.tabAt(opt.rect.center())
+        hover_index = getattr(bar, "hover_index", -1)
+        hovered = not moving and index >= 0 and index == hover_index
+
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pill = r.adjusted(2, 2, -2, -2)
+        radius = pill.height() / 2
+        if selected or moving:                                  # raised white pill
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qc(t["tab_shadow"]))
+            p.drawRoundedRect(pill.translated(0, 1.0), radius, radius)
+            p.setBrush(qc(t["tab_active"]))
+            p.setPen(QPen(qc(t["tab_border"]), 1))
+            p.drawRoundedRect(pill.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        elif hovered:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qc(t["tab_hover"]))
+            p.drawRoundedRect(pill, radius, radius)
+
+        # Hairline divider after this tab unless it touches the selected/hovered pill.
+        if bar is not None and not (moving or selected or hovered):
+            nxt = index + 1
+            if 0 <= index and nxt < bar.count() and nxt != bar.currentIndex() and nxt != hover_index:
+                x = r.right() + 0.5
+                p.setPen(QPen(qc(t["tab_divider"]), 1))
+                p.drawLine(QPointF(x, r.center().y() - 7), QPointF(x, r.center().y() + 7))
+
+        pinned = bar is not None and 0 <= index < bar.count() and bar.is_pinned(index)
+        if pinned:
+            asleep = bar.tabData(index) == "asleep"
+            if asleep and not selected:
+                p.setOpacity(0.45)
+            if not opt.icon.isNull():
+                opt.icon.paint(p, QRect(int(r.center().x() - 8), int(r.center().y() - 8), 16, 16))
+            p.restore()
+            return
+        # Favicon + title: centred when they fit, else left-aligned and elided (as Safari does).
+        fm = QFontMetricsF(p.font())
+        icon_size, gap, side = 16.0, 6.0, 28.0
+        has_icon = not opt.icon.isNull()
+        lead = (icon_size + gap) if has_icon else 0.0
+        available = max(10.0, r.width() - 2 * side)
+        text_width = fm.horizontalAdvance(opt.text)
+        if lead + text_width <= available:
+            x = r.center().x() - (lead + text_width) / 2
+            title = opt.text
+        else:
+            x = r.left() + side
+            title = fm.elidedText(opt.text, Qt.TextElideMode.ElideRight, available - lead)
+        asleep = bar is not None and 0 <= index < bar.count() and bar.tabData(index) == "asleep"
+        if asleep and not selected:
+            p.setOpacity(0.45)                                  # a sleeping tab looks faded
+        if has_icon:
+            icon_rect = QRect(int(round(x)), int(round(r.center().y() - icon_size / 2)), int(icon_size), int(icon_size))
+            opt.icon.paint(p, icon_rect)
+        p.setPen(qc(t["text"] if (selected or moving) else t["tab_text"]))
+        p.drawText(QRectF(x + lead, r.top(), available, r.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, title)
+        p.restore()
+
+
+class SafariTabBar(QTabBar):
+    """Tab strip whose tabs share the width equally. Close buttons sit on the left and show
+    on the hovered tab; a speaker on the right of a tab playing sound mutes it; the strip
+    itself is a rounded 'track' behind the tabs."""
+
+    muteToggled = Signal(int)
+    menuRequested = Signal(int, QPoint)
+    PINNED_WIDTH = 44
+
+    def is_pinned(self, index: int) -> bool:
+        tabs = self.parentWidget()
+        view = tabs.widget(index) if isinstance(tabs, QTabWidget) and 0 <= index < self.count() else None
+        return bool(getattr(view, "pinned", False))
+
+    def refresh_layout(self) -> None:
+        """Pinned state changed: re-measure the tabs."""
+        self.setIconSize(self.iconSize())                # makes QTabBar recompute tab sizes
+        self._refresh_close_buttons()
+
+    def contextMenuEvent(self, event) -> None:
+        index = self.tabAt(event.pos())
+        if index >= 0:
+            self.menuRequested.emit(index, event.globalPos())
+
+    def __init__(self, style: SafariTabStyle, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("TabBar")
+        self.setStyle(style)
+        self.tab_style = style
+        self.setElideMode(Qt.TextElideMode.ElideNone)  # the style elides
+        self.setExpanding(True)
+        self.setDrawBase(False)
+        self.setMovable(True)
+        self.setUsesScrollButtons(True)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setIconSize(QSize(16, 16))
+        self.hover_index = -1
+        self._close_icon = QIcon()
+
+    def tabSizeHint(self, index: int) -> QSize:
+        if self.is_pinned(index):
+            return QSize(self.PINNED_WIDTH, TAB_TRACK_HEIGHT)
+        width = self.width() if self.width() > 0 else 800   # re-asked on every resize
+        pinned = sum(1 for i in range(self.count()) if self.is_pinned(i))
+        rest = max(1, self.count() - pinned)
+        return QSize(max(TAB_MIN_WIDTH, (width - pinned * self.PINNED_WIDTH) // rest), TAB_TRACK_HEIGHT)
+
+    def minimumTabSizeHint(self, index: int) -> QSize:
+        return QSize(self.PINNED_WIDTH if self.is_pinned(index) else TAB_MIN_WIDTH, TAB_TRACK_HEIGHT)
+
+    def tabInserted(self, index: int) -> None:
+        super().tabInserted(index)
+        close = QToolButton(self)
+        close.setObjectName("TabClose")
+        close.setIcon(self._close_icon)
+        close.setIconSize(QSize(11, 11))
+        close.setFixedSize(18, 18)
+        close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        close.setToolTip("Close Tab (Ctrl+W)")
+        close.clicked.connect(lambda _checked=False, b=close: self._close_button_clicked(b))
+        self.setTabButton(index, QTabBar.ButtonPosition.LeftSide, close)
+        speaker = QToolButton(self)
+        speaker.setObjectName("TabClose")
+        speaker.setIconSize(QSize(13, 13))
+        speaker.setFixedSize(18, 18)
+        speaker.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        speaker.setCursor(Qt.CursorShape.PointingHandCursor)
+        speaker.clicked.connect(lambda _checked=False, b=speaker: self._speaker_clicked(b))
+        speaker.hide()
+        self.setTabButton(index, QTabBar.ButtonPosition.RightSide, speaker)
+        self._refresh_close_buttons()
+
+    def _speaker_clicked(self, button: QToolButton) -> None:
+        for i in range(self.count()):
+            if self.tabButton(i, QTabBar.ButtonPosition.RightSide) is button:
+                self.muteToggled.emit(i)
+                return
+
+    def set_audio(self, index: int, icon: QIcon | None, tooltip: str = "") -> None:
+        """Shows the speaker on a tab playing sound (or muted); icon None hides it."""
+        button = self.tabButton(index, QTabBar.ButtonPosition.RightSide) if 0 <= index < self.count() else None
+        if button is None:
+            return
+        if icon is None or self.is_pinned(index):
+            button.hide()
+            return
+        button.setIcon(icon)
+        button.setToolTip(tooltip)
+        button.show()
+
+    def tabRemoved(self, index: int) -> None:
+        super().tabRemoved(index)
+        self.hover_index = -1
+        self._refresh_close_buttons()
+
+    def set_close_icon(self, icon: QIcon) -> None:
+        self._close_icon = icon
+        for i in range(self.count()):
+            button = self.tabButton(i, QTabBar.ButtonPosition.LeftSide)
+            if button is not None:
+                button.setIcon(icon)
+
+    def _close_button_clicked(self, button: QToolButton) -> None:
+        for i in range(self.count()):
+            if self.tabButton(i, QTabBar.ButtonPosition.LeftSide) is button:
+                self.tabCloseRequested.emit(i)
+                return
+
+    def _refresh_close_buttons(self) -> None:
+        for i in range(self.count()):
+            button = self.tabButton(i, QTabBar.ButtonPosition.LeftSide)
+            if button is not None:
+                button.setVisible(i == self.hover_index and not self.is_pinned(i))
+            if self.is_pinned(i):
+                speaker = self.tabButton(i, QTabBar.ButtonPosition.RightSide)
+                if speaker is not None:
+                    speaker.hide()
+        self.update()
+
+    def _set_hover(self, index: int) -> None:
+        if index != self.hover_index:
+            self.hover_index = index
+            self._refresh_close_buttons()
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        self._set_hover(self.tabAt(event.position().toPoint()))
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._set_hover(-1)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:      # middle-click closes
+            index = self.tabAt(event.position().toPoint())
+            if index >= 0:
+                self.tabCloseRequested.emit(index)
+                return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = QRectF(self.rect())
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(qc(self.tab_style.theme["track"]))
+        p.drawRoundedRect(track, track.height() / 2, track.height() / 2)
+        p.end()
+        super().paintEvent(event)                           # tabs via SafariTabStyle
+
+
+class BrowserTabWidget(QTabWidget):
+    def __init__(self, style: SafariTabStyle, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        styled(self, "Tabs")
+        self.setStyle(style)                       # positions the strip and the page card
+        self.tab_style = style
+        self.bar = SafariTabBar(style, self)
+        self.setTabBar(self.bar)
+        self.setDocumentMode(False)
+        self.setMovable(True)
+        self.setTabsClosable(False)                # we install our own left-side buttons
+        self.setTabBarAutoHide(True)               # Safari hides the strip for a single tab
+        self.chrome: ChromeFrame | None = None
+        # Web pages render square; four small caps on top round the card's corners off.
+        self.stack = self.findChild(QStackedWidget)
+        self.caps = [CornerCap(self) for _ in range(4)]
+        if self.stack is not None:
+            self.stack.installEventFilter(self)
+
+    def card_rect(self) -> QRect:
+        return self.stack.geometry() if self.stack is not None else self.rect()
+
+    def update_caps(self) -> None:
+        visible = self.tab_style.inset and self.chrome is not None and self.count() > 0
+        r, s = self.card_rect(), CornerCap.SIZE
+        spots = ((r.left() - 1, r.top() - 1), (r.right() - s + 2, r.top() - 1),
+                 (r.left() - 1, r.bottom() - s + 2), (r.right() - s + 2, r.bottom() - s + 2))
+        for cap, (x, y) in zip(self.caps, spots):
+            cap.setGeometry(x, y, s, s)
+            cap.setVisible(visible)
+            cap.raise_()
+            cap.update()
+
+    def relayout(self) -> None:
+        QApplication.sendEvent(self, QEvent(QEvent.Type.StyleChange))   # re-runs setUpLayout()
+        self.update_caps()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.stack and event.type() in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show):
+            self.update_caps()
+        return super().eventFilter(obj, event)
+
+
+class ChromeFrame(QWidget):
+    """Paints the window's realm gradient (Arc-style). Widgets that must match it exactly
+    (card corners, tab overview) ask for the same brush mapped into their coordinates."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("Chrome")
+        self.theme = LIGHT_THEME
+        self.dependents: list[QWidget] = []
+        self.tint: QColor | None = None           # the page's colour (None: the realm gradient)
+        self._shown: QColor | None = None         # what's painted right now (mid-fade too)
+        self._fade = (QColor(), QColor())
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.valueChanged.connect(self._fade_step)
+        self._anim.finished.connect(self._fade_done)
+
+    def set_theme(self, theme: dict) -> None:
+        self.theme = theme
+        self._repaint()
+
+    def _plain(self) -> QColor:
+        a, b = qc(self.theme["tint_a"]), qc(self.theme["tint_b"])
+        return QColor((a.red() + b.red()) // 2, (a.green() + b.green()) // 2, (a.blue() + b.blue()) // 2)
+
+    def set_tint(self, colour: QColor | None, animate: bool = True) -> None:
+        if (colour is None and self.tint is None) or (colour is not None and self.tint is not None
+                                                      and colour.rgb() == self.tint.rgb()):
+            return
+        start = QColor(self._shown) if self._shown is not None else self._plain()
+        self.tint = QColor(colour) if colour is not None else None
+        self._anim.stop()
+        if not animate or not self.isVisible():
+            self._shown = self.tint
+            self._repaint()
+            return
+        self._fade = (start, QColor(self.tint) if self.tint is not None else self._plain())
+        self._anim.start()
+
+    def _fade_step(self, value) -> None:
+        t = float(value)
+        a, b = self._fade
+        self._shown = QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * t, a.greenF() + (b.greenF() - a.greenF()) * t,
+                                      a.blueF() + (b.blueF() - a.blueF()) * t)
+        self._repaint()
+
+    def _fade_done(self) -> None:
+        self._shown = self.tint                   # back to the gradient when the tint went away
+        self._repaint()
+
+    def _repaint(self) -> None:
+        self.update()
+        for widget in self.dependents:
+            widget.update()
+
+    def brush_for(self, widget: QWidget) -> QBrush:
+        if self._shown is not None:
+            return QBrush(self._shown)
+        offset = QPoint(0, 0)
+        if widget is not self:
+            try:
+                offset = widget.mapTo(self, QPoint(0, 0))
+            except RuntimeError:
+                pass
+        gradient = QLinearGradient(QPointF(-offset.x(), -offset.y()),
+                                   QPointF(self.width() - offset.x(), self.height() - offset.y()))
+        gradient.setColorAt(0.0, qc(self.theme["tint_a"]))
+        gradient.setColorAt(1.0, qc(self.theme["tint_b"]))
+        return QBrush(gradient)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.brush_for(self))
+        p.end()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        for widget in self.dependents:
+            widget.update()
+
+
+class CornerCap(QWidget):
+    """Covers one corner of the page with the frame gradient (plus the card's shadow and
+    hairline), turning the square web view into a rounded card. Clicks pass through."""
+
+    SIZE = CARD_RADIUS + 2
+
+    def __init__(self, tabs: "BrowserTabWidget") -> None:
+        super().__init__(tabs)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def paintEvent(self, event) -> None:
+        tabs = self.parentWidget()
+        if tabs.chrome is None:
+            return
+        theme = tabs.tab_style.theme
+        card = QRectF(tabs.card_rect()).translated(-self.x(), -self.y())
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        outside = QPainterPath()
+        outside.addRect(QRectF(self.rect()))
+        inside = QPainterPath()
+        inside.addRoundedRect(card, CARD_RADIUS, CARD_RADIUS)
+        p.setClipPath(outside.subtracted(inside))
+        p.fillRect(self.rect(), tabs.chrome.brush_for(self))
+        p.setClipping(False)
+        paint_card(p, card, theme, body=False)    # shadow and hairline (the page itself is inside)
+        p.end()
+
+
+class WebPage(QWebEnginePage):
+    """JavaScript alert/confirm/prompt go through the browser's own sheet, which names the
+    site that is asking and, from the second dialog on, offers to block further ones
+    (stops 'your computer is infected' dialog loops)."""
+
+    def __init__(self, profile: QWebEngineProfile, view: "WebView") -> None:
+        super().__init__(profile, view)
+        self._view = view
+        self.dialog_count = 0
+        self.dialogs_blocked = False
+
+    def javaScriptConsoleMessage(self, level, message, line, source) -> None:
+        # Page console noise stays out of stdout; only the YouTube defence's reports count.
+        if message.startswith(YOUTUBE_EVENT):
+            self._view.browser.on_youtube_event(self._view, message[len(YOUTUBE_EVENT):])
+        elif message.startswith(PERF_EVENT):
+            write_perf_probe(self, message[len(PERF_EVENT):])
+        elif message.startswith(CODEC_EVENT):
+            self._view.browser.on_codec_event(self._view, message[len(CODEC_EVENT):])
+        elif message.startswith("huginn-consent:") and hasattr(self._view.browser, "on_consent_event"):
+            self._view.browser.on_consent_event(self._view, message[15:])
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame) -> bool:
+        browser = self._view.browser
+        if is_main_frame and url.scheme() in ("http", "https") and hasattr(browser, "apply_autoplay"):
+            browser.apply_autoplay(self, url)              # before the page exists, so it applies to it
+        if (is_main_frame and url.scheme() == START_SCHEME and url.path() in WELCOME_LINKS
+                and self.url().scheme() == START_SCHEME and self.url().path() == "welcome"
+                and hasattr(browser, "welcome_link")):
+            QTimer.singleShot(0, browser, partial(browser.welcome_link, QUrl(url)))     # only from the tour
+            return False
+        if (is_main_frame and url.scheme() == START_SCHEME and url.path() in WEATHER_LINKS
+                and is_start_page(self.url()) and hasattr(browser, "weather_link")):
+            QTimer.singleShot(0, browser, partial(browser.weather_link, url.path()))   # only from the Start Page
+            return False
+        if is_main_frame and hasattr(browser, "focus_block"):
+            if url.scheme() == START_SCHEME and url.path() == "focus-allow":
+                target = browser.focus_allow(url)
+                if target is not None:
+                    QTimer.singleShot(0, self, lambda: self.setUrl(target))
+                return False
+            blocked = browser.focus_block(url)
+            if blocked is not None:
+                QTimer.singleShot(0, self, lambda: self.setUrl(blocked))
+                return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+    def javaScriptAlert(self, origin, message) -> None:
+        self._view.browser.page_dialog(self._view, "alert", origin, message)
+
+    def javaScriptConfirm(self, origin, message) -> bool:
+        return self._view.browser.page_dialog(self._view, "confirm", origin, message)[0]
+
+    def javaScriptPrompt(self, origin, message, default):
+        return self._view.browser.page_dialog(self._view, "prompt", origin, message, default)
+
+
+class WebView(QWebEngineView):
+    def __init__(self, browser: "BrowserWindow", profile: QWebEngineProfile) -> None:
+        super().__init__()
+        self.browser = browser
+        self.setPage(WebPage(profile, self))
+        self.loading = False
+        self.progress = 0
+        self.thumbnail: QPixmap | None = None
+        self.warning: dict | None = None          # interstitial shown over this tab, if any
+        self.permission_queue: list = []          # QWebEnginePermission requests awaiting an answer
+        self.youtube_events: Counter[str] = Counter()   # YouTube ads removed / skipped in this tab
+        self.codec_site = ""                      # site whose video needed H.264 (empty: none)
+        self.pending_login: dict | None = None    # a login to offer to save ('Save password?')
+        self.icloud_filled: str | None = None     # hash of the password just filled from iCloud
+        self.last_password_field: dict | None = None
+        self.generated_login: dict | None = None  # the strong password suggested on this page
+        # The password script talks to the browser over a channel only its own hidden
+        # JavaScript world can reach - pages can't see or call it.
+        self.password_bridge = PasswordBridge(self)
+        self.tint_bridge = TintBridge(self)
+        self.page_colours: dict | None = None     # what the tint script last reported
+        self.colours_reported = False
+        self.hidden_since: float | None = None      # when it stopped being the shown tab (tab sleeping)
+        self.has_edits = False                    # typed-in form text: never unloaded while asleep
+        self.pending: dict | None = None          # a restored tab not loaded yet: {"url", "title"}
+        self.pinned = False
+        self.burner = False                       # a burner tab: own throwaway profile, nothing kept
+        self.is_panel = False
+        self.zoom_host: str | None = None          # the site whose remembered zoom is applied
+        self.video_speed = 1.0
+        self.readerable = False                   # the page looks like an article
+        self.reader_on = False
+        self.reader_bridge = ReaderBridge(self)
+        self.channel = QWebChannel(self.page())
+        self.channel.registerObject("safariqtPasswords", self.password_bridge)
+        self.channel.registerObject("safariqtTint", self.tint_bridge)
+        self.channel.registerObject("safariqtReader", self.reader_bridge)
+        self.page().setWebChannel(self.channel, APPLICATION_WORLD)
+
+    def tab_url(self) -> QUrl:
+        """The tab's address, also for a restored tab that hasn't loaded yet."""
+        if self.pending is not None:
+            return QUrl(self.pending["url"])
+        return focus_target(self.url()) or self.url()
+
+    def tab_title(self) -> str:
+        return self.pending["title"] if self.pending is not None else self.title()
+
+    def load_pending(self) -> bool:
+        if self.pending is None:
+            return False
+        url, self.pending = QUrl(self.pending["url"]), None
+        self.setUrl(url)
+        return True
+
+    def createWindow(self, window_type) -> QWebEngineView:
+        # target=_blank, window.open() and "Open link in new tab" all become tabs.
+        background = window_type == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
+        return self.browser.add_tab(None, background=background, after_current=True, profile=self.page().profile())
+
+    def contextMenuEvent(self, event) -> None:
+        menu = prepare_menu(self.createStandardContextMenu())
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.setProperty("huginnOwnIcons", True)          # Huginn's glyphs, not the web engine's
+        request = self.lastContextMenuRequest()
+        link = request.linkUrl() if request is not None else QUrl()
+        if link.isValid() and link.scheme() in ("http", "https") and hasattr(self.browser, "open_split_view"):
+            actions = menu.actions()
+            split = QAction("Open Link in Split View", menu)
+            split.triggered.connect(lambda: self.browser.open_split_view(QUrl(link)))
+            reading = QAction("Add Link to Reading List", menu)
+            reading.triggered.connect(lambda: self.browser.store.add_reading(link.toString(), link.toString())
+                                      and self.browser.status_bubble.show_message("Added to Reading List"))
+            menu.insertActions(actions[1] if len(actions) > 1 else None, [split, reading])
+        menu.popup(event.globalPos())
+
+
+# --------------------------------------------------------------------------------------
+# Sidebar
+# --------------------------------------------------------------------------------------
+class Sidebar(QWidget):
+    """Bookmarks / History panel that slides in from the left."""
+
+    openRequested = Signal(QUrl, bool)         # url, open in new tab
+    addBookmarkRequested = Signal()
+    clearHistoryRequested = Signal()
+    addReadingRequested = Signal()
+    readingOpenRequested = Signal(str, bool, bool)   # url, the saved copy, in a new tab
+    splitRequested = Signal(QUrl)
+    moveToFolderRequested = Signal(str)
+    folderRenameRequested = Signal(str)
+    folderDeleteRequested = Signal(str)
+    panelAddRequested = Signal()
+    panelRemoveRequested = Signal(int)
+    PANEL_WIDTH = 380
+
+    def __init__(self, store: BrowserStore, icons: IconFactory, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.store, self.icons, self.theme = store, icons, LIGHT_THEME
+        self.icon_for = None                         # url -> favicon (set by the window)
+        self.memory_search = None                    # text -> pages whose words match (Muninn)
+        self.panel_factory = None                    # url -> a page for a web panel (set by the window)
+        self.panels_enabled = False
+        self.panels: list[dict] = []
+        self.panel_views: dict[str, QWidget] = {}
+        self.current_panel = -1
+        self.target_width = SIDEBAR_WIDTH
+        self._open = False
+        self.setFixedWidth(0)
+        self.hide()
+
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(lambda v: self.setFixedWidth(int(v)))
+        self._anim.finished.connect(lambda: None if self._open else self.hide())
+
+        # The panel keeps a fixed width and is pinned to the right edge, so it slides in
+        # rather than reflowing while the sidebar animates its width.
+        self.panel = styled(QWidget(self), "SidebarPanel")
+        layout = QVBoxLayout(self.panel)
+        layout.setContentsMargins(10, 6, 8, 6)
+        layout.setSpacing(8)
+
+        segmented = styled(QWidget(), "Segmented")
+        seg_layout = QHBoxLayout(segmented)
+        seg_layout.setContentsMargins(2, 2, 2, 2)
+        seg_layout.setSpacing(2)
+        self.stack = QStackedWidget()
+        self._group = QButtonGroup(self)
+        for i, label in enumerate(("Bookmarks", "History", "Reading")):
+            button = QPushButton(label)
+            button.setObjectName("Segment")
+            button.setCheckable(True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            seg_layout.addWidget(button)
+            self._group.addButton(button, i)
+        self._group.button(0).setChecked(True)
+        self._group.idClicked.connect(self.show_page)
+        layout.addWidget(segmented)
+        self.search = QLineEdit()
+        self.search.setObjectName("SidebarSearch")
+        self.search.setPlaceholderText("Search")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda *_: self._reload_visible())
+        layout.addWidget(self.search)
+
+        self.bookmark_list = self._make_tree()
+        self.history_list = self._make_list(is_bookmarks=False)
+        self.reading_list = self._make_list(is_bookmarks=False, reading=True)
+        self.bookmark_empty = self._empty_label("No bookmarks yet.")
+        self.history_empty = self._empty_label("Pages you visit will appear here.")
+        self.reading_empty = self._empty_label("Save pages to read later - even offline - with "
+                                               "Add to Reading List (Ctrl+Shift+D).")
+        self.stack.addWidget(self._make_page(self.bookmark_list, self.bookmark_empty, "Add Current Page",
+                                             lambda: self.addBookmarkRequested.emit()))
+        self.stack.addWidget(self._make_page(self.history_list, self.history_empty, "Clear History",
+                                             lambda: self.clearHistoryRequested.emit()))
+        self.stack.addWidget(self._make_page(self.reading_list, self.reading_empty, "Add Current Page",
+                                             lambda: self.addReadingRequested.emit()))
+        layout.addWidget(self.stack, 1)
+        self._collapsed: set[str] = set()
+        # Web panels (Settings > Web Panels; off by default): a row of small site buttons.
+        self.panel_strip = QWidget()
+        self.panel_strip.setObjectName("PanelStrip")
+        self.strip_layout = QHBoxLayout(self.panel_strip)
+        self.strip_layout.setContentsMargins(0, 6, 0, 0)
+        self.strip_layout.setSpacing(2)
+        self.panel_strip.hide()
+        layout.addWidget(self.panel_strip)
+
+        store.bookmarksChanged.connect(self.reload_bookmarks)
+        store.readingChanged.connect(self.reload_reading)
+        # History changes on every page load: rebuild the list at most every 300 ms, and
+        # only while the sidebar is open (opening it refreshes a stale list).
+        self._history_dirty = True
+        self._history_timer = QTimer(self)
+        self._history_timer.setSingleShot(True)
+        self._history_timer.setInterval(300)
+        self._history_timer.timeout.connect(self.reload_history)
+        store.historyChanged.connect(self._history_changed)
+
+    def show_page(self, index: int) -> None:
+        self._group.button(index).setChecked(True)
+        self.stack.setCurrentIndex(index)
+        self.search.show()
+        self.current_panel = -1
+        self._sync_strip()
+        self._set_width(SIDEBAR_WIDTH)
+        self._reload_visible()
+
+    # -- web panels -----------------------------------------------------------------------------
+    def set_panels_enabled(self, on: bool) -> None:
+        self.panels_enabled = on
+        self.panel_strip.setVisible(on)
+        if not on and self.current_panel >= 0:
+            self.show_page(0)
+        self._sync_strip()
+
+    def set_panels(self, panels: list[dict]) -> None:
+        self.panels = panels
+        urls = {p["url"] for p in panels}
+        for url in list(self.panel_views):
+            if url not in urls:
+                view = self.panel_views.pop(url)
+                self.stack.removeWidget(view)
+                view.deleteLater()
+        if self.current_panel >= len(panels):
+            self.show_page(0)
+        self._sync_strip()
+
+    def _sync_strip(self) -> None:
+        while self.strip_layout.count():
+            item = self.strip_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+                item.widget().deleteLater()
+        for i, panel in enumerate(self.panels):
+            b = QToolButton()
+            b.setObjectName("PanelButton")
+            b.setCheckable(True)
+            b.setChecked(i == self.current_panel)
+            b.setIcon(self.favicon(panel["url"], "globe"))
+            b.setIconSize(QSize(18, 18))
+            b.setToolTip(panel.get("title") or panel["url"])
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(partial(self._panel_clicked, i))
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            b.customContextMenuRequested.connect(partial(self._panel_menu, i, b))
+            self.strip_layout.addWidget(b)
+        add = QToolButton()
+        add.setObjectName("PanelButton")
+        add.setIcon(self.icons.icon("plus", self.theme["text_secondary"]))
+        add.setIconSize(QSize(16, 16))
+        add.setToolTip("Add the current site as a web panel")
+        add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        add.clicked.connect(lambda *_: self.panelAddRequested.emit())
+        self.strip_layout.addWidget(add)
+        self.strip_layout.addStretch(1)
+
+    def _panel_clicked(self, index: int, *_) -> None:
+        if index == self.current_panel:
+            self.show_page(0)
+        else:
+            self.show_panel(index)
+
+    def _panel_menu(self, index: int, button: QToolButton, pos: QPoint) -> None:
+        menu = prepare_menu(QMenu(self))
+        url = self.panels[index]["url"]
+        menu.addAction("Reload").triggered.connect(lambda: self.panel_views.get(url) and self.panel_views[url].reload())
+        menu.addAction("Remove Panel").triggered.connect(lambda: self.panelRemoveRequested.emit(index))
+        menu.exec(button.mapToGlobal(pos))
+        menu.deleteLater()
+
+    def show_panel(self, index: int) -> None:
+        if not (0 <= index < len(self.panels)) or self.panel_factory is None:
+            return
+        url = self.panels[index]["url"]
+        view = self.panel_views.get(url)
+        if view is None:                             # made once, then kept (Discord stays signed in and running)
+            view = self.panel_views[url] = self.panel_factory(url)
+            self.stack.addWidget(view)
+        self._group.setExclusive(False)
+        for button in self._group.buttons():
+            button.setChecked(False)
+        self._group.setExclusive(True)
+        self.search.hide()
+        self.stack.setCurrentWidget(view)
+        self.current_panel = index
+        self._sync_strip()
+        self._set_width(self.PANEL_WIDTH)
+
+    def _set_width(self, width: int) -> None:
+        if width == self.target_width:
+            return
+        self.target_width = width
+        if self._open:
+            self._anim.stop()
+            self._anim.setStartValue(self.width())
+            self._anim.setEndValue(width)
+            self._anim.start()
+
+    def _reload_visible(self) -> None:
+        index = self.stack.currentIndex()
+        (self.reload_bookmarks, self.reload_history, self.reload_reading)[index]()
+
+    # -- construction helpers ---------------------------------------------------------------
+    def _make_list(self, is_bookmarks: bool, reading: bool = False) -> QListWidget:
+        lst = QListWidget()
+        lst.setObjectName("SidebarList")
+        lst.setFrameShape(QFrame.Shape.NoFrame)
+        lst.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        lst.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lst.setIconSize(QSize(16, 16))
+        lst.setTextElideMode(Qt.TextElideMode.ElideRight)
+        lst.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        if reading:
+            lst.itemClicked.connect(lambda item: self.readingOpenRequested.emit(
+                item.data(Qt.ItemDataRole.UserRole), False, False))
+            lst.customContextMenuRequested.connect(partial(self._reading_menu, lst))
+        else:
+            lst.itemClicked.connect(
+                lambda item: self.openRequested.emit(QUrl(item.data(Qt.ItemDataRole.UserRole)), False))
+            lst.customContextMenuRequested.connect(partial(self._show_context_menu, lst, is_bookmarks))
+        return lst
+
+    def _make_tree(self) -> QTreeWidget:
+        tree = QTreeWidget()
+        tree.setObjectName("SidebarList")
+        tree.setHeaderHidden(True)
+        tree.setFrameShape(QFrame.Shape.NoFrame)
+        tree.setRootIsDecorated(False)
+        tree.setIndentation(16)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tree.setIconSize(QSize(16, 16))
+        tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        tree.setExpandsOnDoubleClick(False)
+        tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tree.itemClicked.connect(self._tree_clicked)
+        tree.customContextMenuRequested.connect(self._tree_menu)
+        return tree
+
+    def _tree_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        folder = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if folder:
+            item.setExpanded(not item.isExpanded())
+            (self._collapsed.discard if item.isExpanded() else self._collapsed.add)(folder)
+            item.setIcon(0, self.icons.icon("folder", self.theme["accent" if item.isExpanded() else "text_secondary"]))
+            return
+        url = item.data(0, Qt.ItemDataRole.UserRole)
+        if url:
+            self.openRequested.emit(QUrl(url), False)
+
+    def _tree_menu(self, pos: QPoint) -> None:
+        tree = self.bookmark_list
+        item = tree.itemAt(pos)
+        if item is None:
+            return
+        menu = prepare_menu(QMenu(self))
+        folder = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if folder:
+            urls = [item.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(item.childCount())]
+            menu.addAction("Open All in New Tabs").triggered.connect(
+                lambda: [self.openRequested.emit(QUrl(u), True) for u in urls])
+            menu.addSeparator()
+            menu.addAction("Rename Folder…").triggered.connect(lambda: self.folderRenameRequested.emit(folder))
+            menu.addAction("Delete Folder…").triggered.connect(lambda: self.folderDeleteRequested.emit(folder))
+        else:
+            raw_url = item.data(0, Qt.ItemDataRole.UserRole)
+            url = QUrl(raw_url)
+            menu.addAction("Open").triggered.connect(lambda: self.openRequested.emit(url, False))
+            menu.addAction("Open in New Tab").triggered.connect(lambda: self.openRequested.emit(url, True))
+            menu.addAction("Open in Split View").triggered.connect(lambda: self.splitRequested.emit(url))
+            menu.addAction("Copy Link").triggered.connect(lambda: QGuiApplication.clipboard().setText(url.toString()))
+            menu.addSeparator()
+            menu.addAction("Move to Folder…").triggered.connect(lambda: self.moveToFolderRequested.emit(raw_url))
+            menu.addAction("Remove Bookmark").triggered.connect(lambda: self.store.remove_bookmark(raw_url))
+        menu.exec(tree.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _reading_menu(self, lst: QListWidget, pos: QPoint) -> None:
+        item = lst.itemAt(pos)
+        if item is None:
+            return
+        url = item.data(Qt.ItemDataRole.UserRole)
+        entry = next((e for e in self.store.reading_list if e["url"] == url), None)
+        if entry is None:
+            return
+        menu = prepare_menu(QMenu(self))
+        menu.addAction("Open").triggered.connect(lambda: self.readingOpenRequested.emit(url, False, False))
+        menu.addAction("Open in New Tab").triggered.connect(lambda: self.readingOpenRequested.emit(url, False, True))
+        saved = menu.addAction("Open Saved Copy (offline)")
+        saved.setEnabled(bool(entry.get("saved")) and os.path.exists(entry.get("saved", "")))
+        saved.triggered.connect(lambda: self.readingOpenRequested.emit(url, True, False))
+        menu.addSeparator()
+        read = entry.get("read")
+        menu.addAction("Mark as Unread" if read else "Mark as Read").triggered.connect(
+            lambda: self.store.mark_read(url, not read))
+        menu.addAction("Remove").triggered.connect(lambda: self.store.remove_reading(url))
+        menu.exec(lst.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    @staticmethod
+    def _empty_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("EmptyLabel")
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        return label
+
+    @staticmethod
+    def _make_page(lst: QWidget, empty: QLabel, action_text: str, callback) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(empty)
+        layout.addWidget(lst, 1)
+        button = QPushButton(action_text)
+        button.setObjectName("SidebarAction")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(lambda *_: callback())
+        layout.addWidget(button)
+        return page
+
+    def _show_context_menu(self, lst: QListWidget, is_bookmarks: bool, pos: QPoint) -> None:
+        item = lst.itemAt(pos)
+        if item is None:
+            return
+        raw_url = item.data(Qt.ItemDataRole.UserRole)
+        url = QUrl(raw_url)
+        menu = prepare_menu(QMenu(self))
+        menu.addAction("Open").triggered.connect(lambda: self.openRequested.emit(url, False))
+        menu.addAction("Open in New Tab").triggered.connect(lambda: self.openRequested.emit(url, True))
+        menu.addAction("Open in Split View").triggered.connect(lambda: self.splitRequested.emit(url))
+        menu.addAction("Copy Link").triggered.connect(
+            lambda: QGuiApplication.clipboard().setText(url.toString()))
+        menu.exec(lst.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    # -- content --------------------------------------------------------------------------
+    def refresh(self, theme: dict) -> None:
+        self.theme = theme
+        self.reload_bookmarks()
+        self.reload_history()
+        self.reload_reading()
+
+    def favicon(self, url: str, glyph: str) -> QIcon:
+        icon = self.icon_for(url) if self.icon_for is not None else QIcon()
+        return icon if not icon.isNull() else self.icons.icon(glyph, self.theme["text_secondary"])
+
+    def reload_bookmarks(self) -> None:
+        tree = self.bookmark_list
+        tree.clear()
+        query = self.search.text().strip()
+        folders: dict[str, QTreeWidgetItem] = {}
+        shown = 0
+        for bm in self.store.bookmarks:
+            if query and not match_score(query, bm.get("title", ""), bm["url"], bm.get("folder", "")):
+                continue
+            item = QTreeWidgetItem([bm.get("title") or bm["url"]])
+            item.setIcon(0, self.favicon(bm["url"], "globe"))
+            item.setToolTip(0, bm["url"])
+            item.setData(0, Qt.ItemDataRole.UserRole, bm["url"])
+            folder = bm.get("folder")
+            if folder:
+                parent = folders.get(folder)
+                if parent is None:
+                    parent = folders[folder] = QTreeWidgetItem([folder])
+                    parent.setData(0, Qt.ItemDataRole.UserRole + 1, folder)
+                    bold = QFont(tree.font())
+                    bold.setWeight(QFont.Weight.DemiBold)
+                    parent.setFont(0, bold)
+                    tree.addTopLevelItem(parent)
+                parent.addChild(item)
+            else:
+                tree.addTopLevelItem(item)
+            shown += 1
+        for name, parent in folders.items():
+            open_ = bool(query) or name not in self._collapsed
+            parent.setExpanded(open_)
+            parent.setIcon(0, self.icons.icon("folder", self.theme["accent" if open_ else "text_secondary"]))
+        self.bookmark_empty.setText("No matches." if query else "No bookmarks yet.")
+        self.bookmark_empty.setVisible(not shown)
+
+    def _history_changed(self) -> None:
+        self._history_dirty = True
+        if self._open:
+            self._history_timer.start()
+
+    def reload_history(self) -> None:
+        self._history_dirty = False
+        self.history_list.clear()
+        query = self.search.text().strip()
+        icon = self.icons.icon("clock", self.theme["text_secondary"])
+        shown = 0
+        for entry in self.store.history:
+            if query and not match_score(query, entry.get("title", ""), entry["url"]):
+                continue
+            item = QListWidgetItem(icon, entry.get("title") or entry["url"])
+            stamp = time.strftime("%b %d, %H:%M", time.localtime(entry.get("time", 0)))
+            item.setToolTip(f"{entry['url']}\n{stamp}")
+            item.setData(Qt.ItemDataRole.UserRole, entry["url"])
+            self.history_list.addItem(item)
+            shown += 1
+            if shown >= 300:
+                break
+        if query and self.memory_search is not None:
+            listed = {self.history_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.history_list.count())}
+            for hit in self.memory_search(query, 20):
+                if hit["url"] in listed:
+                    continue
+                item = QListWidgetItem(self.icons.icon("reading", self.theme["accent"]), hit["title"])
+                item.setToolTip(f"{hit['url']}\nFrom what the page said: {hit['snippet']}")
+                item.setData(Qt.ItemDataRole.UserRole, hit["url"])
+                self.history_list.addItem(item)
+                shown += 1
+        self.history_empty.setText("No matches." if query else "Pages you visit will appear here.")
+        self.history_empty.setVisible(not shown)
+
+    def reload_reading(self) -> None:
+        lst = self.reading_list
+        lst.clear()
+        query = self.search.text().strip()
+        bold = QFont(lst.font())
+        bold.setWeight(QFont.Weight.DemiBold)
+        shown = 0
+        for entry in self.store.reading_list:
+            if query and not match_score(query, entry.get("title", ""), entry["url"]):
+                continue
+            item = QListWidgetItem(self.favicon(entry["url"], "reading"), entry.get("title") or entry["url"])
+            item.setToolTip(entry["url"] + ("\nSaved for offline reading" if entry.get("saved") else ""))
+            item.setData(Qt.ItemDataRole.UserRole, entry["url"])
+            if not entry.get("read"):
+                item.setFont(bold)
+            lst.addItem(item)
+            shown += 1
+        self.reading_empty.setText("No matches." if query else "Save pages to read later - even offline - with "
+                                   "Add to Reading List (Ctrl+Shift+D).")
+        self.reading_empty.setVisible(not shown)
+
+    # -- slide animation ----------------------------------------------------------------------
+    def is_open(self) -> bool:
+        return self._open
+
+    def set_open(self, open_: bool, animate: bool = True) -> None:
+        self._open = open_
+        if open_ and self._history_dirty:
+            self.reload_history()
+        self._anim.stop()
+        target = self.target_width if open_ else 0
+        if not animate:
+            self.setFixedWidth(target)
+            self.setVisible(open_)
+            return
+        self.show()
+        self._anim.setStartValue(self.width())
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.panel.setGeometry(self.width() - self.target_width, 0, self.target_width, self.height())
+
+
+# --------------------------------------------------------------------------------------
+# Tab overview (Safari's "Show All Tabs" grid)
+# --------------------------------------------------------------------------------------
+class TabCard(QWidget):
+    activated = Signal(object)                 # the tab's WebView (not its index, which can go stale)
+    closeRequested = Signal(object)
+
+    W, H = 236, 184
+    TITLE_H = 30
+
+    def __init__(self, view: QWidget, title: str, icon: QIcon, thumbnail: QPixmap | None,
+                 selected: bool, theme: dict, icons: IconFactory) -> None:
+        super().__init__()
+        self.view, self.title, self.icon, self.thumbnail = view, title, icon, thumbnail
+        self.selected, self.theme, self.icons = selected, theme, icons
+        self._hovered = False
+        self.setFixedSize(self.W, self.H)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(plain_tooltip(title))
+
+    def _thumb_rect(self) -> QRectF:
+        return QRectF(4, 4, self.W - 8, self.H - 8 - self.TITLE_H)
+
+    def _close_rect(self) -> QRectF:
+        t = self._thumb_rect()
+        return QRectF(t.left() + 7, t.top() + 7, 20, 20)
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._close_rect().contains(event.position()):
+            self.closeRequested.emit(self.view)
+        elif self.rect().contains(event.position().toPoint()):
+            self.activated.emit(self.view)
+
+    def paintEvent(self, event) -> None:
+        t = self.theme
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        thumb = self._thumb_rect()
+        if self.selected:
+            p.setPen(QPen(qc(t["accent"]), 3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(thumb.adjusted(-2, -2, 2, 2), 12, 12)
+        path = QPainterPath()
+        path.addRoundedRect(thumb, 10, 10)
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(thumb, qc(t["card_bg"]))
+        if self.thumbnail is not None and not self.thumbnail.isNull():
+            dpr = self.devicePixelRatioF()
+            target = QSize(int(thumb.width() * dpr), int(thumb.height() * dpr))
+            scaled = self.thumbnail.scaled(target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                           Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            x = thumb.left() + (thumb.width() - scaled.width() / dpr) / 2   # centre, crop the bottom
+            p.drawPixmap(QPointF(x, thumb.top()), scaled)
+        else:
+            size = 40
+            self.icon.paint(p, QRect(int(thumb.center().x() - size / 2), int(thumb.center().y() - size / 2),
+                                     size, size))
+        p.restore()
+        p.setPen(QPen(qc(t["capsule_border"]), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(thumb, 10, 10)
+
+        if self._hovered:                                   # close button
+            c = self._close_rect()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 150))
+            p.drawEllipse(c)
+            pen = QPen(QColor("#FFFFFF"), 1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            d = 4.0
+            p.drawLine(QPointF(c.center().x() - d, c.center().y() - d), QPointF(c.center().x() + d, c.center().y() + d))
+            p.drawLine(QPointF(c.center().x() - d, c.center().y() + d), QPointF(c.center().x() + d, c.center().y() - d))
+
+        row = QRectF(4, self.H - self.TITLE_H, self.W - 8, self.TITLE_H)
+        fm = QFontMetricsF(self.font())
+        lead = 22.0
+        title = fm.elidedText(self.title, Qt.TextElideMode.ElideRight, row.width() - lead - 8)
+        total = lead + fm.horizontalAdvance(title)
+        x = row.center().x() - total / 2
+        self.icon.paint(p, QRect(int(x), int(row.center().y() - 8), 16, 16))
+        p.setPen(qc(t["text"]))
+        p.drawText(QRectF(x + lead, row.top(), row.width(), row.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, title)
+        p.end()
+
+
+class OverviewCanvas(QWidget):
+    """Background of the tab overview: the same realm gradient as the window frame."""
+
+    chrome: "ChromeFrame | None" = None
+
+    def paintEvent(self, event) -> None:
+        if self.chrome is not None:
+            p = QPainter(self)
+            p.fillRect(self.rect(), self.chrome.brush_for(self))
+            p.end()
+
+
+class TabOverview(QScrollArea):
+    activated = Signal(object)
+    closeRequested = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("OverviewScroll")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.viewport().setAutoFillBackground(False)
+        self.canvas = OverviewCanvas()
+        self.canvas.setObjectName("OverviewCanvas")
+        self.grid = QGridLayout(self.canvas)
+        self.grid.setContentsMargins(28, 26, 28, 26)
+        self.grid.setHorizontalSpacing(22)
+        self.grid.setVerticalSpacing(18)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.setWidget(self.canvas)
+        self.cards: list[TabCard] = []
+        self.hide()
+
+    def populate(self, entries: list[tuple], theme: dict, icons: IconFactory) -> None:
+        for card in self.cards:
+            self.grid.removeWidget(card)
+            card.deleteLater()
+        self.cards = []
+        for view, title, icon, thumb, selected in entries:
+            card = TabCard(view, title, icon, thumb, selected, theme, icons)
+            card.activated.connect(self.activated)
+            card.closeRequested.connect(self.closeRequested)
+            self.cards.append(card)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        for card in self.cards:
+            self.grid.removeWidget(card)
+        usable = max(TabCard.W, self.viewport().width() - 56)
+        columns = max(1, (usable + 22) // (TabCard.W + 22))
+        for i, card in enumerate(self.cards):
+            self.grid.addWidget(card, i // columns, i % columns)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.cards:
+            self._relayout()
+
+
+# --------------------------------------------------------------------------------------
+# Unified title bar + toolbar
+# --------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# Address-bar and command-bar matching, search suggestions, process statistics
+# --------------------------------------------------------------------------------------
+# Search-engine suggestions (Privacy & Security; off by default: what you type is sent to
+# the engine as you type). Each returns OpenSearch JSON: [query, [suggestions, ...]].
+SUGGEST_URLS = {
+    "google": "https://suggestqueries.google.com/complete/search?client=firefox&q={}",
+    "duckduckgo": "https://duckduckgo.com/ac/?type=list&q={}",
+    "bing": "https://api.bing.com/osjson.aspx?query={}",
+    "brave": "https://search.brave.com/api/suggest?q={}",
+    "ecosia": "https://ac.ecosia.org/autocomplete?type=list&q={}",
+    "qwant": "https://api.qwant.com/v3/suggest?q={}&client=opensearch",
+    "startpage": "https://www.startpage.com/osuggestions?q={}",
+}
+
+
+def match_score(query: str, *texts: str) -> float:
+    """How well `query` matches (0: not at all). Every word must appear; a word starting
+    a text or a word in it scores higher than one found mid-word."""
+    words = [w for w in query.lower().split() if w]
+    if not words:
+        return 0.0
+    hay = " ".join(t.lower() for t in texts if t)
+    score = 0.0
+    for word in words:
+        at = hay.find(word)
+        if at < 0:
+            return 0.0
+        score += 3.0 if at == 0 else (2.0 if not hay[at - 1].isalnum() else 1.0)
+    return score
+
+
+def strip_scheme(url: str) -> str:
+    text = re.sub(r"^https?://(www\.)?", "", url)
+    return text[:-1] if text.endswith("/") and text.count("/") == 1 else text
+
+
+def history_ranked(history: list[dict]) -> list[dict]:
+    """One entry per address, ranked by how often and how recently it was visited."""
+    now = time.time()
+    seen: dict[str, dict] = {}
+    for entry in history:
+        url = entry["url"]
+        item = seen.get(url)
+        age_days = max(0.0, (now - entry.get("time", 0)) / 86400)
+        weight = 1.0 / (1.0 + age_days / 3.0)
+        if item is None:
+            seen[url] = {"url": url, "title": entry.get("title") or url, "score": weight, "visits": 1}
+        else:
+            item["score"] += weight
+            item["visits"] += 1
+    return sorted(seen.values(), key=lambda i: i["score"], reverse=True)
+
+
+def process_stats(pid: int) -> tuple[int, float] | None:
+    """(memory in bytes, CPU seconds used) of a process, without extra libraries."""
+    if not pid or pid <= 0:
+        return None
+    if IS_WINDOWS:
+        try:
+            class PMC(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                            ("PrivateUsage", ctypes.c_size_t)]
+            kernel32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
+            kernel32.OpenProcess.restype = ctypes.c_void_p             # a HANDLE, not an int
+            raw = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)    # QUERY_LIMITED_INFORMATION | VM_READ
+            if not raw:
+                return None
+            handle = ctypes.c_void_p(raw)
+            try:
+                counters = PMC()
+                counters.cb = ctypes.sizeof(PMC)
+                if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                    return None
+                times = [wintypes.FILETIME() for _ in range(4)]
+                kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times))
+                cpu = sum(((t.dwHighDateTime << 32) | t.dwLowDateTime) for t in times[2:]) / 1e7
+                return int(counters.PrivateUsage or counters.WorkingSetSize), cpu
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="ignore") as f:
+            rss = next((int(line.split()[1]) * 1024 for line in f if line.startswith("VmRSS:")), 0)
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="ignore") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        ticks = os.sysconf("SC_CLK_TCK") or 100
+        return rss, (int(fields[11]) + int(fields[12])) / ticks
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def child_processes(parent: int) -> list[int]:
+    """Processes started by `parent` (WebEngine's GPU and helper processes)."""
+    found: list[int] = []
+    if IS_WINDOWS:
+        try:
+            class PE(ctypes.Structure):
+                _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                            ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+                            ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                            ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                            ("szExeFile", ctypes.c_wchar * 260)]
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+            raw = kernel32.CreateToolhelp32Snapshot(0x2, 0)
+            if not raw or raw == ctypes.c_void_p(-1).value:
+                return found
+            snap = ctypes.c_void_p(raw)
+            entry = PE()
+            entry.dwSize = ctypes.sizeof(PE)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                if entry.th32ParentProcessID == parent:
+                    found.append(int(entry.th32ProcessID))
+                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+            kernel32.CloseHandle(snap)
+        except Exception:
+            pass
+        return found
+    try:
+        for name in os.listdir("/proc"):
+            if name.isdigit():
+                try:
+                    with open(f"/proc/{name}/stat", encoding="ascii", errors="ignore") as f:
+                        if int(f.read().rsplit(")", 1)[1].split()[1]) == parent:
+                            found.append(int(name))
+                except (OSError, ValueError, IndexError):
+                    continue
+    except OSError:
+        pass
+    return found
+
+
+# --------------------------------------------------------------------------------------
+# Video: playback speed and Pop Out (a small always-on-top player window)
+# --------------------------------------------------------------------------------------
+VIDEO_SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0)
+VIDEO_RATE_JS = r"""(function (rate) {
+  window.__huginnRate = rate;
+  function apply(v) { try { v.playbackRate = rate; v.defaultPlaybackRate = rate; } catch (e) {} }
+  document.querySelectorAll('video, audio').forEach(apply);
+  if (!window.__huginnRateHook) {
+    window.__huginnRateHook = true;
+    document.addEventListener('play', function (e) {
+      if (window.__huginnRate && e.target && e.target.playbackRate !== window.__huginnRate) apply(e.target);
+    }, true);
+    document.addEventListener('ratechange', function (e) {
+      var v = e.target;
+      if (window.__huginnRate && v && v.playbackRate !== window.__huginnRate && !v.__huginnFixing) {
+        v.__huginnFixing = true; setTimeout(function () { apply(v); v.__huginnFixing = false; }, 0);
+      }
+    }, true);
+  }
+  return document.querySelectorAll('video, audio').length;
+})(%RATE%)"""
+# The main video of the page: the one playing, else the biggest one on screen.
+VIDEO_FIND_JS = r"""(function () {
+  var best = null, area = 0;
+  document.querySelectorAll('video').forEach(function (v) {
+    var r = v.getBoundingClientRect(), a = r.width * r.height;
+    if (!v.paused && !v.ended && v.readyState > 1) a += 1e9;
+    if (a > area && r.width > 40) { area = a; best = v; }
+  });
+  if (!best) return '';
+  var t = isFinite(best.duration) ? best.currentTime : -1;
+  var playing = !best.paused;
+  best.pause();
+  return JSON.stringify({ time: t, playing: playing });
+})()"""
+# In the pop-out player: wait for the page's video, fill the window with it, seek, play.
+VIDEO_FILL_JS = r"""(function (start, playing) {
+  var tries = 0;
+  function style() {
+    if (document.getElementById('__huginn_pop')) return;
+    var s = document.createElement('style');
+    s.id = '__huginn_pop';
+    s.textContent = 'html, body { overflow: hidden !important; background: #000 !important; }' +
+      'video.__huginn_pop { position: fixed !important; inset: 0 !important; width: 100vw !important; ' +
+      'height: 100vh !important; max-width: none !important; max-height: none !important; ' +
+      'z-index: 2147483647 !important; background: #000 !important; object-fit: contain !important; ' +
+      'transform: none !important; margin: 0 !important; }';
+    (document.head || document.documentElement).appendChild(s);
+  }
+  function go() {
+    var best = null, area = 0;
+    document.querySelectorAll('video').forEach(function (v) {
+      var r = v.getBoundingClientRect(), a = Math.max(1, r.width * r.height) + (v.readyState > 1 ? 1e6 : 0);
+      if (a > area) { area = a; best = v; }
+    });
+    if (!best || (best.readyState < 1 && tries < 12)) { if (++tries < 60) setTimeout(go, 250); return; }
+    best.classList.add('__huginn_pop');
+    var r = best.getBoundingClientRect();
+    if (r.width < innerWidth - 2 || r.height < innerHeight - 2) document.body.appendChild(best);   // escape a transformed box
+    if (start > 0 && isFinite(best.duration) && start < best.duration) best.currentTime = start;
+    if (playing) { var p = best.play(); if (p && p.catch) p.catch(function () { best.muted = true; best.play(); }); }
+    window.__huginnPopVideo = best;
+  }
+  style();
+  go();
+  return true;
+})(%START%, %PLAYING%)"""
+VIDEO_TIME_JS = r"""(function () { var v = window.__huginnPopVideo; return v && isFinite(v.duration) ? v.currentTime : -1; })()"""
+VIDEO_RESUME_JS = r"""(function (t) {
+  var best = null, area = 0;
+  document.querySelectorAll('video').forEach(function (v) {
+    var r = v.getBoundingClientRect(), a = r.width * r.height;
+    if (a > area) { area = a; best = v; }
+  });
+  if (!best) return false;
+  if (t >= 0 && isFinite(best.duration) && t < best.duration) best.currentTime = t;
+  var p = best.play(); if (p && p.catch) p.catch(function () {});
+  return true;
+})(%TIME%)"""
+
+
+# --------------------------------------------------------------------------------------
+# Muninn: the words of the pages you read, kept on this PC so you can find a page again by
+# what was on it. Never from private windows or burner tabs, never pages with a password
+# or card field; Clear History clears it too. (Privacy & Security > Remember Page Text.)
+# --------------------------------------------------------------------------------------
+MUNINN_FILE = "muninn.db"
+MUNINN_DELAY_MS = 2500                    # after a page loads (lets single-page apps settle)
+MUNINN_JS = r"""(function () {
+  try {
+    if (document.querySelector('input[type=password], input[autocomplete^="cc-"], input[name*="card" i][inputmode=numeric]'))
+      return JSON.stringify({ skip: true });
+    var text = (document.body && document.body.innerText) || '';
+    return JSON.stringify({ skip: false, text: text.replace(/\s+/g, ' ').slice(0, 60000) });
+  } catch (e) { return JSON.stringify({ skip: true }); }
+})()"""
+
+
+class Muninn:
+    KEEP_DAYS = 90
+    MAX_PAGES = 20000
+
+    def __init__(self, path: str | None) -> None:
+        self.con = sqlite3.connect(path or ":memory:", timeout=2, check_same_thread=False)
+        try:
+            self.con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS pages USING fts5("
+                             "url UNINDEXED, title, body, time UNINDEXED, tokenize='porter unicode61')")
+            self.fts = True
+        except sqlite3.Error:                                   # an SQLite without full-text search
+            self.con.execute("CREATE TABLE IF NOT EXISTS pages (url TEXT, title TEXT, body TEXT, time REAL)")
+            self.fts = False
+        self.con.commit()
+        self._writes = 0
+
+    def remember(self, url: str, title: str, text: str) -> None:
+        if not text.strip():
+            return
+        with self.con:
+            self.con.execute("DELETE FROM pages WHERE url = ?", (url,))
+            self.con.execute("INSERT INTO pages (url, title, body, time) VALUES (?, ?, ?, ?)",
+                             (url, title[:300], text[:60000], time.time()))
+        self._writes += 1
+        if self._writes % 200 == 1:
+            self.prune()
+
+    def prune(self) -> None:
+        with self.con:
+            self.con.execute("DELETE FROM pages WHERE time < ?", (time.time() - self.KEEP_DAYS * 86400,))
+            extra = self.count() - self.MAX_PAGES
+            if extra > 0:
+                self.con.execute("DELETE FROM pages WHERE rowid IN (SELECT rowid FROM pages ORDER BY time LIMIT ?)", (extra,))
+
+    def count(self) -> int:
+        return int(self.con.execute("SELECT count(*) FROM pages").fetchone()[0])
+
+    def search(self, query: str, limit: int = 8) -> list[dict]:
+        words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 1][:8]
+        if not words:
+            return []
+        try:
+            if self.fts:
+                match = " ".join(f'"{w}"*' for w in words)
+                rows = self.con.execute(
+                    "SELECT url, title, snippet(pages, 2, '', '', '…', 14), time FROM pages WHERE pages MATCH ? "
+                    "ORDER BY rank LIMIT ?", (match, limit)).fetchall()
+            else:
+                where = " AND ".join("(lower(body) LIKE ? OR lower(title) LIKE ?)" for _ in words)
+                args = [a for w in words for a in (f"%{w}%", f"%{w}%")]
+                rows = [(u, t, (b or "")[:160] + ("…" if len(b or "") > 160 else ""), tm) for u, t, b, tm in self.con.execute(
+                    f"SELECT url, title, body, time FROM pages WHERE {where} ORDER BY time DESC LIMIT ?",
+                    (*args, limit)).fetchall()]
+        except sqlite3.Error:
+            return []
+        return [{"url": u, "title": t or u, "snippet": (s or "").strip(), "time": tm} for u, t, s, tm in rows]
+
+    @staticmethod
+    def quote(snippet: str, length: int) -> str:
+        """A snippet cut to `length` characters, with one ellipsis where text was left out."""
+        text = snippet.strip()
+        if len(text) > length:
+            text = text[:length].rstrip(" …") + "…"
+        return text
+
+    def forget_since(self, since: float | None) -> None:
+        with self.con:
+            if since is None:
+                self.con.execute("DELETE FROM pages")
+            else:
+                self.con.execute("DELETE FROM pages WHERE time >= ?", (since,))
+
+    def close(self) -> None:
+        try:
+            self.con.close()
+        except sqlite3.Error:
+            pass
+
+
+# --------------------------------------------------------------------------------------
+# Living theme (Settings > Theme > Change With Time of Day; off by default): the frame
+# takes a faint dawn, dusk or night cast and the Start Page aurora follows the hour and
+# the season.
+# --------------------------------------------------------------------------------------
+DAY_PHASES = (  # from hour: name, frame tint (light, dark), aurora colours
+    (5, "dawn", ("#FCE3D8", "#2E1E1C"), ("#FF9E7A", "#FFD27A")),
+    (9, "day", None, None),
+    (17, "dusk", ("#F7DCCF", "#2B1A28"), ("#FF7A59", "#9B6BFF")),
+    (20, "night", ("#DCE0F2", "#0E1430"), ("#4C6FFF", "#3DD6B5")),
+)
+SEASON_GLOW = {12: "#BFE6FF", 1: "#CFEAFF", 10: "#FFA24C", 3: "#8EE59B", 4: "#8EE59B", 5: "#B6F28E"}
+
+
+def day_phase(hour: int) -> tuple:
+    phase = DAY_PHASES[-1]                                   # night until 05:00
+    for entry in DAY_PHASES:
+        if hour >= entry[0]:
+            phase = entry
+    return phase
+
+
+def _mix(a: str, b: str, t: float) -> str:
+    ca, cb = QColor(a), QColor(b)
+    return QColor(round(ca.red() + (cb.red() - ca.red()) * t), round(ca.green() + (cb.green() - ca.green()) * t),
+                  round(ca.blue() + (cb.blue() - ca.blue()) * t)).name()
+
+
+def living_theme(theme: dict, when: time.struct_time) -> dict:
+    """The theme with the time of day and the season worked in, gently."""
+    theme = dict(theme)
+    _start, name, tints, glow = day_phase(when.tm_hour)
+    theme["phase"] = name
+    if tints is not None:
+        tint = tints[1 if theme["dark"] else 0]
+        for key in ("tint_a", "tint_b"):
+            theme[key] = _mix(theme[key], tint, 0.35)
+        theme["chrome"], theme["frame"] = theme["tint_b"], theme["tint_a"]
+        theme["glow_a"], theme["glow_b"] = glow
+    season = SEASON_GLOW.get(when.tm_mon)
+    if season:
+        theme["glow_b"] = _mix(theme["glow_b"], season, 0.6)
+    return theme
+
+
+# --------------------------------------------------------------------------------------
+# Game Mode (Settings; on by default): while a game runs full screen, background tabs
+# sleep, Huginn runs at lower priority and keeps quiet; all back to normal afterwards.
+# --------------------------------------------------------------------------------------
+def fullscreen_game_running() -> bool:
+    """A full-screen game or app in front - and not Huginn itself (a video full screen)."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        state = ctypes.c_int(0)
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+            return False
+        if state.value not in (2, 3):              # QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN
+            return False
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        hwnd = user32.GetForegroundWindow()
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+        return pid.value not in (os.getpid(), 0) and pid.value not in child_processes(os.getpid())
+    except Exception:
+        return False
+
+
+def set_process_priority(low: bool) -> None:
+    """Lower (or restore) the priority of Huginn and its page processes."""
+    pids = [os.getpid()] + child_processes(os.getpid())
+    if IS_WINDOWS:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        for pid in pids:
+            raw = kernel32.OpenProcess(0x0200, False, pid)          # PROCESS_SET_INFORMATION
+            if raw:
+                handle = ctypes.c_void_p(raw)
+                kernel32.SetPriorityClass(handle, 0x4000 if low else 0x0020)   # BELOW_NORMAL / NORMAL
+                kernel32.CloseHandle(handle)
+        return
+    for pid in pids:
+        try:
+            os.setpriority(os.PRIO_PROCESS, pid, 10 if low else 0)
+        except (OSError, AttributeError):
+            pass
+
+
+class GameMode(QObject):
+    changed = Signal(bool)
+    CHECK_MS = 5000
+
+    def __init__(self, parent: QObject | None = None, detector=None) -> None:
+        super().__init__(parent)
+        self.detector = detector or fullscreen_game_running
+        self.enabled = True
+        self.active = False
+        self.forced = False                         # turned on by hand (command bar)
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.CHECK_MS)
+        self._timer.timeout.connect(self.check)
+        self._timer.start()
+
+    def check(self) -> None:
+        on = self.forced or (self.enabled and bool(self.detector()))
+        if on != self.active:
+            self.active = on
+            self.changed.emit(on)
+
+
+# --------------------------------------------------------------------------------------
+# Site styles (page menu > Site Style...): ready-made tweaks and your own CSS per site.
+# --------------------------------------------------------------------------------------
+SITE_STYLES = {   # id: (site, name, css)
+    "yt-shorts": ("youtube.com", "Hide Shorts",
+                  "ytd-reel-shelf-renderer, ytd-rich-shelf-renderer[is-shorts], ytd-rich-section-renderer:has([is-shorts]),"
+                  " ytd-guide-entry-renderer:has(a[title='Shorts']), ytd-mini-guide-entry-renderer[aria-label='Shorts'],"
+                  " grid-shelf-view-model, ytd-video-renderer:has(a[href^='/shorts/']),"
+                  " ytd-rich-item-renderer:has(a[href^='/shorts/']) { display: none !important; }"),
+    "yt-comments": ("youtube.com", "Hide Comments", "ytd-comments#comments { display: none !important; }"),
+    "yt-related": ("youtube.com", "Hide Recommended Videos Beside the Player",
+                   "ytd-watch-next-secondary-results-renderer, #related { display: none !important; }"),
+    "yt-endcards": ("youtube.com", "Hide End-Screen Cards", ".ytp-ce-element, .ytp-endscreen-content { display: none !important; }"),
+    "x-trends": ("x.com", "Hide Trends and Who to Follow",
+                 "[aria-label='Timeline: Trending now'], [aria-label='Who to follow'],"
+                 " div:has(> [aria-label='Timeline: Trending now']) { display: none !important; }"),
+    "calm": ("*", "Reduce Motion",
+             "*, *::before, *::after { animation-duration: 0.001s !important; animation-iteration-count: 1 !important;"
+             " transition-duration: 0.001s !important; scroll-behavior: auto !important; }"),
+}
+STYLE_SCRIPT_NAME = "huginn-site-styles"
+STYLE_JS = r"""(function (rules) {
+  var host = location.hostname.replace(/^www\./, ''), css = '';
+  Object.keys(rules).forEach(function (site) {
+    if (site === '*' || host === site || host.endsWith('.' + site)) css += rules[site] + '\n';
+  });
+  function put() {
+    var root = document.head || document.documentElement;
+    if (!root) { setTimeout(put, 5); return; }
+    var el = document.getElementById('__huginn_style');
+    if (!css) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement('style'); el.id = '__huginn_style'; }
+    el.textContent = css;
+    if (el.parentNode !== root) root.appendChild(el);
+  }
+  put();
+  return !!css;
+})(%RULES%)"""
+
+
+def style_rules(config: dict) -> dict:
+    """{site: css} from the saved choices {site: {"on": [ids], "css": "..."}}."""
+    rules = {}
+    for site, entry in config.items():
+        if not isinstance(entry, dict):
+            continue
+        parts = [SITE_STYLES[i][2] for i in entry.get("on", []) if i in SITE_STYLES]
+        if isinstance(entry.get("css"), str) and entry["css"].strip():
+            parts.append(entry["css"])
+        if parts:
+            rules[site] = "\n".join(parts)
+    return rules
+
+
+def set_style_script(profile: QWebEngineProfile, rules: dict) -> None:
+    scripts = profile.scripts()
+    for script in scripts.find(STYLE_SCRIPT_NAME):
+        scripts.remove(script)
+    if rules:
+        script = QWebEngineScript()
+        script.setName(STYLE_SCRIPT_NAME)
+        script.setSourceCode(STYLE_JS.replace("%RULES%", json.dumps(rules)))
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+        script.setRunsOnSubFrames(False)
+        scripts.insert(script)
+
+
+# --------------------------------------------------------------------------------------
+# Focus hours (Settings > Focus Hours...): chosen sites rest during chosen hours.
+# --------------------------------------------------------------------------------------
+DEFAULT_FOCUS = {"on": False, "sites": [], "days": [0, 1, 2, 3, 4], "start": "09:00", "end": "17:00"}
+FOCUS_PAUSE_S = 5 * 60
+
+
+def focus_until(config: dict, now: time.struct_time) -> float | None:
+    """When the current focus period ends (a timestamp), or None outside focus hours."""
+    if not config.get("on") or not config.get("sites"):
+        return None
+    try:
+        sh, sm = (int(x) for x in config["start"].split(":"))
+        eh, em = (int(x) for x in config["end"].split(":"))
+    except (ValueError, KeyError):
+        return None
+    minute, start, end = now.tm_hour * 60 + now.tm_min, sh * 60 + sm, eh * 60 + em
+    if start == end:
+        return None
+    overnight = end < start
+    in_window = (start <= minute < end) if not overnight else (minute >= start or minute < end)
+    day = now.tm_wday if not (overnight and minute < end) else (now.tm_wday - 1) % 7
+    if not in_window or day not in config.get("days", []):
+        return None
+    left = (end - minute) % (24 * 60) or 24 * 60
+    return time.mktime(now) - now.tm_sec + left * 60
+
+
+FOCUS_PAGE = Template("""<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="$scheme">
+<title>Not now</title><style>
+  html, body { margin: 0; height: 100%; background: $bg; color: $text;
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; }
+  .aurora { position: fixed; inset: -20%; background: radial-gradient(40% 35% at 30% 30%, $glow_a, transparent 70%),
+    radial-gradient(35% 35% at 70% 40%, $glow_b, transparent 70%); opacity: $glow_opacity; filter: blur(40px); }
+  main { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; text-align: center; padding: 0 24px; }
+  h1 { font-weight: 300; font-size: 54px; margin: 0 0 10px; letter-spacing: -0.5px; }
+  p { color: $muted; font-size: 16px; margin: 0 0 30px; }
+  .row a { display: inline-block; margin: 0 6px; padding: 9px 18px; border-radius: 10px; text-decoration: none;
+    font-size: 14px; color: $text; background: $card; }
+  .row a.main { background: $accent; color: $accent_text; }
+</style></head><body><div class="aurora"></div><main>
+<h1>Not now</h1><p><b>$site</b> is resting until $until · Focus Hours</p>
+<div class="row"><a class="main" href="safariqt:start">Start Page</a><a class="allow" href="$allow">Open for 5 Minutes</a></div>
+</main></body></html>""")
+
+
+def render_focus_page(theme: dict, site: str, until: float, allow: str) -> str:
+    return FOCUS_PAGE.substitute(
+        scheme="dark" if theme["dark"] else "light", bg=start_page_colours(theme)["bg"], text=theme["text"],
+        muted=theme["text_secondary"], card=theme["start_card"], accent=theme["accent"],
+        accent_text=theme["accent_text"], glow_a=theme["glow_a"], glow_b=theme["glow_b"],
+        glow_opacity=theme["glow_opacity"], site=html.escape(site),
+        until=html.escape(time.strftime("%H:%M", time.localtime(until))), allow=html.escape(allow, quote=True))
+
+
+# --------------------------------------------------------------------------------------
+# Privacy grade (top of the page menu): A-F from what Huginn saw this page do.
+# --------------------------------------------------------------------------------------
+GRADE_COLORS = {"A": "#2FB47C", "B": "#7DBB42", "C": "#E0A526", "D": "#E57A2E", "F": "#E5484D"}
+
+
+def privacy_grade(secure: bool, trackers: int, third_parties: int, banner: bool) -> tuple[str, list[str]]:
+    score, why = 100, []
+    if not secure:
+        score -= 30
+        why.append("The connection isn't secure")
+    if trackers:
+        score -= min(40, trackers * 6)
+        why.append(f"Tried to load {trackers} tracker{'s' if trackers != 1 else ''} (blocked)")
+    if third_parties > 5:
+        score -= min(20, (third_parties - 5) * 2)
+    why.append(f"Contacted {third_parties} other compan{'ies' if third_parties != 1 else 'y'}' servers"
+               if third_parties else "Didn't contact other companies' servers")
+    if banner:
+        score -= 8
+        why.append("Asked for cookie consent (refused for you)")
+    if secure:
+        why.insert(0, "Secure connection")
+    letter = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 45 else "F"
+    return letter, why
+
+
+def grade_icon(letter: str, size: int = 18) -> QIcon:
+    dpr = 2.0
+    pm = QPixmap(int(size * dpr), int(size * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(qc(GRADE_COLORS.get(letter, "#888888")))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(QRectF(1, 1, size - 2, size - 2))
+    font = QFont(p.font())
+    font.setPixelSize(int(size * 0.6))
+    font.setWeight(QFont.Weight.Bold)
+    p.setFont(font)
+    p.setPen(QColor("#FFFFFF"))
+    p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, letter)
+    p.end()
+    return QIcon(pm)
+
+
+def grade_badge(letter: str, size: int = 32) -> QIcon:
+    """The page menu's site card badge: the grade on a rounded square of its colour."""
+    dpr = 2.0
+    pm = QPixmap(int(size * dpr), int(size * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    base = qc(GRADE_COLORS.get(letter, "#8A929B"))
+    fill = QLinearGradient(0, 0, 0, size)
+    fill.setColorAt(0, base.lighter(118))
+    fill.setColorAt(1, base.darker(106))
+    p.setBrush(QBrush(fill))
+    p.setPen(QPen(base.darker(115), 0.8))
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), size * 0.3, size * 0.3)
+    font = QFont(p.font())
+    font.setPixelSize(int(size * 0.52))
+    font.setWeight(QFont.Weight.Bold)
+    p.setFont(font)
+    p.setPen(QColor("#FFFFFF"))
+    p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, letter)
+    p.end()
+    return QIcon(pm)
+
+
+# --------------------------------------------------------------------------------------
+# Read aloud (Reader's Listen button, or page menu > Read Aloud): Windows' own voices,
+# offline. The article is read a paragraph at a time.
+# --------------------------------------------------------------------------------------
+READ_TEXT_JS = r"""(function () {
+%SOURCE%
+  try {
+    var a = new Readability(document.cloneNode(true), { charThreshold: 300 }).parse();
+    if (a && a.textContent) return (a.title ? a.title + '.\n\n' : '') + a.textContent;
+  } catch (e) {}
+  return (document.body && document.body.innerText) || '';
+})()"""
+
+
+class ReadAloud(QObject):
+    stateChanged = Signal(bool)                    # reading or not
+
+    def __init__(self, parent: QObject | None = None, engine: str | None = None) -> None:
+        super().__init__(parent)
+        self.engine_name = engine
+        self.speech = None
+        self.reading = False
+        self._queue: list[str] = []
+
+    def available(self) -> bool:
+        return self._speech() is not None
+
+    def _speech(self):
+        if self.speech is None:
+            try:
+                from PySide6.QtTextToSpeech import QTextToSpeech
+                self.speech = QTextToSpeech(self.engine_name, self) if self.engine_name else QTextToSpeech(self)
+                self.speech.stateChanged.connect(self._state)
+            except Exception:
+                self.speech = False
+        return self.speech or None
+
+    def read(self, text: str) -> bool:
+        speech = self._speech()
+        if speech is None:
+            return False
+        self.stop()
+        parts = [p.strip() for p in re.split(r"\n\s*\n|(?<=[.!?])\s{2,}", text) if p.strip()]
+        chunks, current = [], ""
+        for part in parts:                         # a paragraph at a time, not one huge string
+            if len(current) + len(part) > 900 and current:
+                chunks.append(current)
+                current = ""
+            current = (current + "\n" + part).strip()
+        if current:
+            chunks.append(current)
+        self._queue = chunks[1:]
+        if not chunks:
+            return False
+        self.reading = True
+        self.stateChanged.emit(True)
+        speech.say(chunks[0])
+        return True
+
+    def _state(self, state) -> None:
+        from PySide6.QtTextToSpeech import QTextToSpeech
+        if state == QTextToSpeech.State.Ready and self.reading:
+            if self._queue:
+                self.speech.say(self._queue.pop(0))
+            else:
+                self.reading = False
+                self.stateChanged.emit(False)
+
+    def stop(self) -> None:
+        self._queue = []
+        was = self.reading
+        self.reading = False
+        if self.speech:
+            self.speech.stop()
+        if was:
+            self.stateChanged.emit(False)
+
+
+# --------------------------------------------------------------------------------------
+# Downloads list (the arrow button that appears in the toolbar, Ctrl+J)
+# --------------------------------------------------------------------------------------
+MAX_DOWNLOADS = 60
+
+
+def format_size(n: float) -> str:
+    n = float(max(0, n))
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1000 or unit == "GB":
+            return f"{int(n)} bytes" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1000.0
+    return f"{n:.1f} GB"
+
+
+def show_in_folder(path: str) -> None:
+    """Opens the file's folder with the file selected (Windows), else just the folder."""
+    if IS_WINDOWS and os.path.exists(path):
+        try:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return
+        except OSError:
+            pass
+    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+
+
+class DownloadManager(QObject):
+    """The downloads of one window (the main window's are remembered across restarts;
+    a private window's are forgotten with it). Each entry is a dict: name, path, url,
+    size, received, state ('active' | 'done' | 'failed' | 'cancelled'), time."""
+
+    changed = Signal()
+
+    def __init__(self, settings: QSettings | None, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.settings = settings                    # None: not remembered (private)
+        self.entries: list[dict] = []
+        self._requests: dict[int, QWebEngineDownloadRequest] = {}
+        self._speed: dict[int, tuple[float, int, float]] = {}       # id -> (time, bytes, bytes/s)
+        self._next_id = 1
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(1000)
+        self._save_timer.timeout.connect(self.save)
+        if settings is not None:
+            try:
+                saved = json.loads(str(settings.value("downloads", "[]") or "[]"))
+            except ValueError:
+                saved = []
+            for item in saved if isinstance(saved, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("path"), str):
+                    entry = {"name": str(item.get("name") or os.path.basename(item["path"])), "path": item["path"],
+                             "url": str(item.get("url") or ""), "size": int(item.get("size") or 0),
+                             "received": int(item.get("received") or 0), "time": float(item.get("time") or 0),
+                             "state": item.get("state") if item.get("state") in ("done", "failed", "cancelled") else "failed"}
+                    entry["id"] = self._new_id()
+                    self.entries.append(entry)
+
+    def _new_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    def save(self) -> None:
+        if self.settings is None:
+            return
+        keep = [{k: e[k] for k in ("name", "path", "url", "size", "received", "state", "time")}
+                for e in self.entries if e["state"] != "active"][:MAX_DOWNLOADS]
+        self.settings.setValue("downloads", json.dumps(keep))
+
+    def _touch(self) -> None:
+        self._save_timer.start()
+        self.changed.emit()
+
+    # -- adding --------------------------------------------------------------------------------
+    def track(self, request: QWebEngineDownloadRequest, path: str, url: str = "") -> dict:
+        entry = {"id": self._new_id(), "name": os.path.basename(path), "path": path, "url": url,
+                 "size": max(0, int(request.totalBytes())), "received": 0, "state": "active", "time": time.time()}
+        self.entries.insert(0, entry)
+        del self.entries[MAX_DOWNLOADS:]
+        self._requests[entry["id"]] = request
+        self._speed[entry["id"]] = (time.monotonic(), 0, 0.0)
+        request.receivedBytesChanged.connect(partial(self._progress, entry))
+        request.totalBytesChanged.connect(partial(self._progress, entry))
+        request.stateChanged.connect(partial(self._state, entry))
+        self._touch()
+        return entry
+
+    def add_file(self, path: str) -> dict:
+        """A file Huginn saved itself (a screenshot): listed as a finished download."""
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        entry = {"id": self._new_id(), "name": os.path.basename(path), "path": path, "url": "",
+                 "size": size, "received": size, "state": "done", "time": time.time()}
+        self.entries.insert(0, entry)
+        del self.entries[MAX_DOWNLOADS:]
+        self._touch()
+        return entry
+
+    def _progress(self, entry: dict, *_) -> None:
+        request = self._requests.get(entry["id"])
+        if request is None:
+            return
+        entry["received"] = max(0, int(request.receivedBytes()))
+        entry["size"] = max(0, int(request.totalBytes()))
+        then, got, speed = self._speed.get(entry["id"], (time.monotonic(), 0, 0.0))
+        now = time.monotonic()
+        if now - then >= 0.8:
+            current = (entry["received"] - got) / (now - then)
+            self._speed[entry["id"]] = (now, entry["received"], current if not speed else 0.6 * speed + 0.4 * current)
+        self.changed.emit()
+
+    def _state(self, entry: dict, state) -> None:
+        States = QWebEngineDownloadRequest.DownloadState
+        if state == States.DownloadCompleted:
+            entry["state"] = "done"
+            entry["size"] = entry["received"] = max(entry["received"], entry["size"])
+        elif state == States.DownloadCancelled:
+            entry["state"] = "cancelled"
+        elif state == States.DownloadInterrupted:
+            entry["state"] = "failed"
+        else:
+            return
+        self._requests.pop(entry["id"], None)
+        self._speed.pop(entry["id"], None)
+        self._touch()
+
+    # -- actions -------------------------------------------------------------------------------
+    def cancel(self, entry: dict) -> None:
+        request = self._requests.get(entry["id"])
+        if request is not None:
+            request.cancel()
+
+    def remove(self, entry: dict) -> None:
+        if entry["state"] == "active":
+            self.cancel(entry)
+        self.entries = [e for e in self.entries if e["id"] != entry["id"]]
+        self._touch()
+
+    def clear(self) -> None:
+        self.entries = [e for e in self.entries if e["state"] == "active"]
+        self._touch()
+
+    def active(self) -> list[dict]:
+        return [e for e in self.entries if e["state"] == "active"]
+
+    def progress(self) -> float | None:
+        """Overall progress of what's downloading now (0..1), None when nothing is."""
+        active = self.active()
+        if not active:
+            return None
+        total = sum(e["size"] for e in active)
+        if total <= 0:
+            return 0.0
+        return min(1.0, sum(e["received"] for e in active) / total)
+
+    def status_text(self, entry: dict) -> str:
+        state = entry["state"]
+        if state == "active":
+            speed = self._speed.get(entry["id"], (0, 0, 0.0))[2]
+            done = format_size(entry["received"])
+            text = f"{done} of {format_size(entry['size'])}" if entry["size"] else done
+            if speed > 0:
+                text += f" — {format_size(speed)}/s"
+                if entry["size"] > entry["received"]:
+                    left = (entry["size"] - entry["received"]) / speed
+                    text += (f", {int(left) + 1} s left" if left < 60 else f", {int(left // 60) + 1} min left")
+            return text
+        if state == "cancelled":
+            return "Cancelled"
+        if state == "failed":
+            return "Failed"
+        if not os.path.exists(entry["path"]):
+            return "Moved or deleted"
+        return format_size(entry["size"] or os.path.getsize(entry["path"]))
+
+
+SHOT_HIDE_FIXED_JS = r"""
+  window.__huginnShotHidden = [];
+  document.querySelectorAll('body *').forEach(function (el) {
+    var p = getComputedStyle(el).position;
+    if (p === 'fixed' || p === 'sticky') {
+      window.__huginnShotHidden.push([el, el.style.getPropertyValue('visibility'), el.style.getPropertyPriority('visibility')]);
+      el.style.setProperty('visibility', 'hidden', 'important');
+    }
+  });"""
+SHOT_RESTORE_JS = r"""(window.__huginnShotHidden || []).forEach(function (x) { x[0].style.setProperty('visibility', x[1], x[2]); });
+window.__huginnShotHidden = null; document.documentElement.style.scrollBehavior = '';"""
+
+
+def apply_spellcheck(profile: QWebEngineProfile, on: bool) -> None:
+    """Spell-check in text fields (red underlines, suggestions on right-click), with the
+    dictionary that comes with Huginn."""
+    available = os.path.isfile(os.path.join(APP_DIR, DICTIONARIES_DIR, SPELL_LANGUAGES[0] + ".bdic"))
+    try:
+        if available:
+            profile.setSpellCheckLanguages(SPELL_LANGUAGES)
+        profile.setSpellCheckEnabled(bool(on) and available)
+    except Exception:
+        pass
+
+
+class DownloadRow(QWidget):
+    def __init__(self, panel: "DownloadsPanel", entry: dict) -> None:
+        super().__init__()
+        self.panel, self.entry = panel, entry
+        self.setObjectName("DownloadRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 8, 6)
+        layout.setSpacing(10)
+        self.icon = QLabel()
+        self.icon.setFixedSize(32, 32)
+        layout.addWidget(self.icon)
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        self.name = QLabel()
+        self.name.setObjectName("RowTitle")
+        self.status = QLabel()
+        self.status.setObjectName("RowSubtitle")
+        self.bar = QProgressBar()
+        self.bar.setObjectName("EngineProgress")
+        self.bar.setTextVisible(False)
+        self.bar.setRange(0, 1000)
+        self.bar.setFixedHeight(4)
+        column.addWidget(self.name)
+        column.addWidget(self.bar)
+        column.addWidget(self.status)
+        layout.addLayout(column, 1)
+        self.action = QToolButton()
+        self.action.setObjectName("FieldButton")
+        self.action.setFixedSize(26, 26)
+        self.action.setIconSize(QSize(15, 15))
+        self.action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.action.clicked.connect(lambda *_: self.panel.row_action(self.entry))
+        layout.addWidget(self.action)
+        self.refresh()
+
+    def refresh(self) -> None:
+        e, panel = self.entry, self.panel
+        width = 230
+        self.name.setText(QFontMetrics(self.name.font()).elidedText(e["name"], Qt.TextElideMode.ElideMiddle, width))
+        self.name.setToolTip(e["path"])
+        self.status.setText(panel.manager.status_text(e))
+        self.bar.setVisible(e["state"] == "active")
+        if e["state"] == "active":
+            self.bar.setValue(int(1000 * e["received"] / e["size"]) if e["size"] else 0)
+        exists = e["state"] == "done" and os.path.exists(e["path"])
+        icon = QFileIconProvider().icon(QFileInfo(e["path"])) if exists else panel.icons.icon("download", panel.theme["text_secondary"])
+        self.icon.setPixmap(icon.pixmap(QSize(32, 32)))
+        if e["state"] == "active":
+            glyph, tip = "stop", "Cancel"
+        elif exists:
+            glyph, tip = "folder", "Show in Folder"
+        elif e["url"]:
+            glyph, tip = "reload", "Download Again"
+        else:
+            glyph, tip = "close", "Remove from List"
+        self.action.setIcon(panel.icons.icon(glyph, panel.theme["text_secondary"]))
+        self.action.setToolTip(tip)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self.entry["state"] == "done" and os.path.exists(self.entry["path"]):
+            self.panel.open_file(self.entry)
+
+
+class DownloadsPanel(QFrame):
+    """Pops up under the downloads button: the latest downloads, newest first."""
+
+    openRequested = Signal(str)                   # path
+    retryRequested = Signal(str)                  # url
+
+    def __init__(self, manager: DownloadManager, icons: "IconFactory", parent: QWidget) -> None:
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("DownloadsPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.manager, self.icons, self.theme = manager, icons, LIGHT_THEME
+        self.setFixedWidth(360)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(4)
+        head = QHBoxLayout()
+        title = QLabel("Downloads")
+        title.setObjectName("SheetTitle")
+        head.addWidget(title, 1)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.setObjectName("LinkButton")
+        self.clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_button.clicked.connect(lambda *_: self.manager.clear())
+        head.addWidget(self.clear_button)
+        outer.addLayout(head)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list = QWidget()
+        self.list.setObjectName("DownloadList")
+        self.rows_layout = QVBoxLayout(self.list)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(2)
+        self.rows_layout.addStretch(1)
+        self.scroll.setWidget(self.list)
+        outer.addWidget(self.scroll)
+        self.empty = QLabel("No downloads")
+        self.empty.setObjectName("RowSubtitle")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(self.empty)
+        self.rows: dict[int, DownloadRow] = {}
+        manager.changed.connect(self.refresh)
+
+    def set_theme(self, theme: dict) -> None:
+        self.theme = theme
+        hover = theme.get("tab_hover", theme["divider"])
+        self.setStyleSheet(
+            f"#DownloadsPanel {{ background: {theme['content']}; border: 1px solid {theme['divider']}; "
+            f"border-radius: 12px; }} #DownloadList, QScrollArea {{ background: transparent; }} "
+            f"#DownloadRow {{ border-radius: 8px; }} #DownloadRow:hover {{ background: {hover}; }}")
+        for row in self.rows.values():
+            row.refresh()
+
+    def refresh(self) -> None:
+        ids = [e["id"] for e in self.manager.entries]
+        for key in list(self.rows):
+            if key not in ids:
+                self.rows.pop(key).deleteLater()
+        for position, entry in enumerate(self.manager.entries):
+            row = self.rows.get(entry["id"])
+            if row is None:
+                row = self.rows[entry["id"]] = DownloadRow(self, entry)
+            else:
+                row.refresh()
+            self.rows_layout.insertWidget(position, row)
+        self.empty.setVisible(not ids)
+        self.scroll.setVisible(bool(ids))
+        self.clear_button.setEnabled(any(e["state"] != "active" for e in self.manager.entries))
+        rows = min(len(ids), 6)
+        self.scroll.setFixedHeight(max(1, rows) * 58)
+        self.adjustSize()
+
+    def row_action(self, entry: dict) -> None:
+        if entry["state"] == "active":
+            self.manager.cancel(entry)
+        elif entry["state"] == "done" and os.path.exists(entry["path"]):
+            show_in_folder(entry["path"])
+        elif entry["url"]:
+            self.manager.remove(entry)
+            self.retryRequested.emit(entry["url"])
+        else:
+            self.manager.remove(entry)
+
+    def open_file(self, entry: dict) -> None:
+        self.hide()
+        self.openRequested.emit(entry["path"])
+
+    def show_under(self, anchor: QWidget) -> None:
+        self.refresh()
+        below = anchor.mapToGlobal(QPoint(anchor.width(), anchor.height() + 6))
+        screen = (anchor.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+        x = max(screen.left() + 4, min(below.x() - self.width(), screen.right() - self.width() - 4))
+        self.move(x, below.y())
+        self.show()
+        if IS_WIN11:
+            set_dwm_attribute(int(self.winId()), DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+
+
+class DownloadProgressRing(QWidget):
+    """A thin ring around the downloads button while something is downloading."""
+
+    def __init__(self, button: QToolButton) -> None:
+        super().__init__(button)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.value: float | None = None
+        self.color = LIGHT_THEME["accent"]
+        self.track = LIGHT_THEME["divider"]
+        self.setGeometry(button.rect())
+
+    def set_value(self, value: float | None) -> None:
+        self.value = value
+        self.setVisible(value is not None)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self.value is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        side = min(self.width(), self.height()) - 6
+        r = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        p.setPen(QPen(qc(self.track), 2))
+        p.drawEllipse(r)
+        p.setPen(QPen(qc(self.color), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(r, 90 * 16, -int(360 * 16 * max(0.03, self.value)))
+        p.end()
+
+
+class Toolbar(QWidget):
+    """Doubles as the title bar: empty areas drag the window, double-click maximizes."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window)
+        styled(self, "Toolbar")
+        self.setFixedHeight(TOOLBAR_HEIGHT)
+        self.setProperty("dragArea", True)
+        self._window = window
+        self._press_pos: QPoint | None = None
+        self._manual_offset: QPoint | None = None
+
+        self.lights = TrafficLights()
+        self.window_buttons = WindowButtons()
+        self.window_buttons.hide()
+        self.button_style = "mac"
+        self.sidebar_button = capsule_button("sidebar", "Show Sidebar (Ctrl+Shift+L)", 36)
+        self.sidebar_button.setCheckable(True)
+        self.sidebar_menu_button = capsule_button("chevron_down", "Sidebar and tab options", 22, 11)
+        self.back_button = capsule_button("back", "Go back (Alt+Left)")
+        self.forward_button = capsule_button("forward", "Go forward (Alt+Right)")
+        self.address = AddressField()
+        self.share_button = capsule_button("share", "Share")
+        self.new_tab_button = capsule_button("plus", "New Tab (Ctrl+T)")
+        self.overview_button = capsule_button("tabs", "Show All Tabs (Ctrl+Shift+\\)")
+        self.overview_button.setCheckable(True)
+        self.downloads_button = capsule_button("download", "Downloads (Ctrl+J)")
+        self.downloads_ring = DownloadProgressRing(self.downloads_button)
+        self.downloads_ring.set_value(None)
+        self.back_button.setEnabled(False)
+        self.forward_button.setEnabled(False)
+
+        self.capsules = [
+            Capsule([self.sidebar_button, self.sidebar_menu_button]),
+            Capsule([self.back_button, self.forward_button], dividers=(0,)),
+            Capsule([self.share_button, self.new_tab_button, self.overview_button]),
+            Capsule([self.downloads_button]),
+        ]
+        self.downloads_capsule = self.capsules[3]
+
+        left = QWidget()
+        left.setProperty("dragArea", True)
+        ll = QHBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(0)
+        ll.addWidget(self.lights)
+        self._lights_gap = QWidget()
+        self._lights_gap.setFixedWidth(16)
+        self._lights_gap.setProperty("dragArea", True)
+        ll.addWidget(self._lights_gap)
+        ll.addWidget(self.capsules[0])
+        ll.addSpacing(8)
+        ll.addWidget(self.capsules[1])
+        ll.addStretch(1)
+
+        right = QWidget()
+        right.setProperty("dragArea", True)
+        rl = QHBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+        rl.addStretch(1)
+        rl.addWidget(self.downloads_capsule)
+        rl.addSpacing(8)
+        rl.addWidget(self.capsules[2])
+        self._buttons_gap = QWidget()
+        self._buttons_gap.setFixedWidth(12)
+        self._buttons_gap.setProperty("dragArea", True)
+        self._buttons_gap.hide()
+        rl.addWidget(self._buttons_gap)
+        rl.addWidget(self.window_buttons)
+
+        # Equal-width side clusters keep the address field centred in the window.
+        self._left, self._right = left, right
+        self.downloads_capsule.hide()                 # shown once there's something downloaded
+        self._fit_sides()
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 0, 12, 0)
+        layout.setSpacing(0)
+        layout.addWidget(left)
+        layout.addStretch(1)
+        layout.addWidget(self.address)
+        layout.addStretch(1)
+        layout.addWidget(right)
+
+    def _fit_sides(self) -> None:
+        """Both side clusters as wide as the wider one (downloads button included, shown or
+        not), so the address field stays centred in the window."""
+        for side in (self._left, self._right):
+            side.setMinimumWidth(0)
+            side.setMaximumWidth(16777215)
+        right = self._right.sizeHint().width()
+        if self.downloads_capsule.isHidden():
+            right += self.downloads_capsule.sizeHint().width()
+        self._side = max(self._left.sizeHint().width(), right)
+        self._left.setFixedWidth(self._side)
+        self._right.setFixedWidth(self._side)
+
+    def set_button_style(self, style: str) -> None:
+        """"mac": red/yellow/green on the left. "windows": minimize/maximize/close on the right."""
+        self.button_style = "windows" if style == "windows" else "mac"
+        mac = self.button_style == "mac"
+        self.lights.setVisible(mac)
+        self._lights_gap.setVisible(mac)
+        self.window_buttons.setVisible(not mac)
+        self._buttons_gap.setVisible(not mac)
+        self.layout().setContentsMargins(16 if mac else 12, 0, 12 if mac else 6, 0)
+        self._fit_sides()
+        self._fit_address()
+
+    def refresh_style(self, icons: IconFactory, theme: dict) -> None:
+        for button in self.findChildren(QToolButton):
+            name = button.property("iconName")
+            if name:
+                button.setIcon(icons.icon(name))
+        for capsule in self.capsules:
+            capsule.set_theme(theme)
+        self.downloads_ring.color, self.downloads_ring.track = theme["accent"], theme["divider"]
+        self.downloads_ring.update()
+        self.lights.set_dark(theme["dark"])
+        self.window_buttons.set_theme(theme)
+        self.address.set_style(icons, theme)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_address()
+
+    def _fit_address(self) -> None:
+        # Safari's field takes ~40% of the window, centred, shrinking when space runs out.
+        margins = self.layout().contentsMargins()
+        available = self.width() - 2 * self._side - margins.left() - margins.right() - 32
+        target = min(760, max(300, int(self.width() * 0.40)))
+        self.address.setFixedWidth(max(220, min(target, available)))
+
+    # -- window dragging (fallback; on Windows the native frame handles the title bar) -------
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.globalPosition().toPoint()
+            self._manual_offset = None
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press_pos is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        global_pos = event.globalPosition().toPoint()
+        if self._manual_offset is not None:
+            self._window.move(global_pos - self._manual_offset)
+            return
+        if (global_pos - self._press_pos).manhattanLength() < 3:
+            return
+        if self._window.begin_system_move(global_pos):    # OS drag: snapping, smooth moves
+            self._press_pos = None
+        else:
+            self._manual_offset = global_pos - self._window.pos()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._press_pos = None
+        self._manual_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.toggle_maximize()
+
+
+class StatusBubble(QLabel):
+    """Bottom-left overlay showing hovered link targets and short notices."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusBubble")
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+        self._link_text = ""
+        self._message_active = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._expire)
+
+    def show_link(self, text: str) -> None:
+        self._link_text = text
+        if not self._message_active:
+            self._display(text)
+
+    def show_message(self, text: str, ms: int = 2500) -> None:
+        self._message_active = True
+        self._display(text)
+        self._timer.start(ms)
+
+    def _expire(self) -> None:
+        self._message_active = False
+        self._display(self._link_text)
+
+    def _display(self, text: str) -> None:
+        if not text:
+            self.hide()
+            return
+        max_width = max(160, int(self.parentWidget().width() * 0.6))
+        self.setText(self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, max_width - 24))
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+
+    def reposition(self) -> None:
+        parent = self.parentWidget()
+        if hasattr(parent, "card_rect"):                # bottom-left corner of the page card
+            card = parent.card_rect()
+            self.move(card.left() + 8, card.bottom() - self.height() - 7)
+        else:
+            self.move(8, parent.height() - self.height() - 8)
+
+
+# --------------------------------------------------------------------------------------
+# Privacy & Security UI: switch, sheets, permission prompt, warning page, settings
+# --------------------------------------------------------------------------------------
+class Switch(QAbstractButton):
+    """macOS-style toggle switch."""
+
+    def __init__(self, checked: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(38, 22)
+        self.theme = LIGHT_THEME
+        self._pos = 1.0 if checked else 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_anim)
+        self.toggled.connect(self._animate)
+
+    def sizeHint(self) -> QSize:
+        return QSize(38, 22)
+
+    def _on_anim(self, value) -> None:
+        self._pos = float(value)
+        self.update()
+
+    def _animate(self, on: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._pos)
+        self._anim.setEndValue(1.0 if on else 0.0)
+        self._anim.start()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.45)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        radius = r.height() / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(qc(self.theme["switch_off"]))
+        p.drawRoundedRect(r, radius, radius)
+        if self._pos > 0:                                       # accent fades in as it slides
+            p.save()
+            p.setOpacity(p.opacity() * self._pos)
+            p.setBrush(qc(self.theme["accent"]))
+            p.drawRoundedRect(r, radius, radius)
+            p.restore()
+        d = r.height() - 4
+        x = r.left() + 2 + (r.width() - 4 - d) * self._pos
+        p.setBrush(QColor(0, 0, 0, 45))
+        p.drawEllipse(QRectF(x, r.top() + 2.7, d, d))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QRectF(x, r.top() + 2, d, d))
+        p.end()
+
+
+class SheetDialog(QDialog):
+    """A Safari-style sheet: a frameless card that drops down under the toolbar. Used for
+    page dialogs, download warnings and Clear History."""
+
+    def __init__(self, window: QWidget, title: str, message: str = "", *, ok: str = "OK",
+                 cancel: str | None = "Cancel", danger: bool = False, width: int = 440) -> None:
+        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("Sheet")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setFixedWidth(width)
+        self._window = window
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(8)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("SheetTitle")
+        self.title_label.setWordWrap(True)
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.title_label)
+        self.message_label = QLabel(message)
+        self.message_label.setObjectName("SheetBody")
+        self.message_label.setWordWrap(True)
+        self.message_label.setTextFormat(Qt.TextFormat.PlainText)    # page text shows literally
+        self.message_label.setVisible(bool(message))
+        layout.addWidget(self.message_label)
+        self.extras = QVBoxLayout()
+        self.extras.setSpacing(8)
+        layout.addLayout(self.extras)
+        layout.addSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addStretch(1)
+        self.cancel_button: QPushButton | None = None
+        if cancel:
+            self.cancel_button = QPushButton(cancel)
+            self.cancel_button.setObjectName("SecondaryButton")
+            self.cancel_button.clicked.connect(lambda *_: self.reject())
+            row.addWidget(self.cancel_button)
+        self.ok_button = QPushButton(ok)
+        self.ok_button.setObjectName("DangerButton" if danger else "PrimaryButton")
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(lambda *_: self.accept())
+        row.addWidget(self.ok_button)
+        layout.addLayout(row)
+
+    def add_widget(self, widget: QWidget) -> QWidget:
+        self.extras.addWidget(widget)
+        return widget
+
+    def setVisible(self, visible: bool) -> None:
+        if visible and not self.isVisible():
+            place_sheet(self, self._window)       # before it appears, not after
+        super().setVisible(visible)
+
+
+def place_sheet(dialog: QWidget, window: QWidget) -> None:
+    """Puts a sheet under the toolbar, centred, before it is shown (so it never appears
+    somewhere else first). On Windows 11 its native window gets rounded corners and a
+    hairline border before it appears, too."""
+    dialog.adjustSize()
+    anchor = window.mapToGlobal(QPoint(window.width() // 2, TOOLBAR_HEIGHT + 6))
+    dialog.move(anchor.x() - dialog.width() // 2, anchor.y())
+    if IS_WIN11:
+        hwnd = int(dialog.winId())                    # native window, still hidden
+        set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+        set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR,
+                          colorref(getattr(window, "theme", LIGHT_THEME)["menu_border"]))
+
+
+def paint_floating_card(p: QPainter, rect: QRectF, theme: dict, radius: float = 12.0) -> None:
+    """Card with a soft shadow, for overlays that float over the page."""
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    shadow = qc(theme["card_shadow"])
+    for spread, weight in ((6.0, 0.18), (3.5, 0.32), (1.5, 0.6)):
+        color = QColor(shadow)
+        color.setAlphaF(min(1.0, shadow.alphaF() * weight))
+        p.setBrush(color)
+        p.drawRoundedRect(rect.adjusted(-spread, -spread + 2, spread, spread + 2), radius + spread, radius + spread)
+    p.setBrush(qc(theme["menu_bg"]))
+    p.setPen(QPen(qc(theme["menu_border"]), 1))
+    p.drawRoundedRect(rect, radius, radius)
+
+
+# --------------------------------------------------------------------------------------
+# Menus. Every QMenu in Huginn - the page menu, right-click menus, the web page's own menu
+# - is drawn by HuginnStyle: a floating rounded card with a soft shadow, rows with an inset
+# hover pill, quiet shortcuts, a switch for each on/off setting and an accent tick for
+# choices. The page menu adds a site card, a row of quick actions and a zoom stepper.
+# --------------------------------------------------------------------------------------
+MENU_SHADOW = 12          # transparent room around the card for its shadow
+MENU_PAD = 6              # inside the card, around the rows
+MENU_RADIUS = 12.0
+MENU_ROW = 28
+MENU_ICON = 16
+MENU_HEADER_ROW = 54      # the page menu's site card
+HEADER_MARK = "\n"        # an item whose text has two lines is drawn as a card: title over detail
+
+
+def paint_menu_card(p: QPainter, rect: QRectF, theme: dict, radius: float = MENU_RADIUS) -> None:
+    """The menu's card: a soft, layered shadow, then the panel with a hairline border."""
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    shadow = qc(theme["menu_shadow"])
+    steps = 8
+    for i in range(steps, 0, -1):                       # wide and faint ... tight and darker
+        spread = (MENU_SHADOW - 3) * i / steps
+        colour = QColor(shadow)
+        colour.setAlphaF(min(1.0, shadow.alphaF() * 0.34 * (1 - i / (steps + 1))))
+        p.setBrush(colour)
+        p.drawRoundedRect(rect.adjusted(-spread, -spread + 3, spread, spread + 3), radius + spread, radius + spread)
+    p.setBrush(qc(theme["menu_bg"]))
+    p.setPen(QPen(qc(theme["float_border"]), 1))
+    p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+    if theme["dark"]:                                   # a hairline of light along the top, like glass
+        p.setPen(QPen(QColor(255, 255, 255, 16), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rect.adjusted(1.5, 1.5, -1.5, -1.5), radius - 1, radius - 1)
+
+
+def paint_menu_switch(p: QPainter, rect: QRectF, on: bool, enabled: bool, theme: dict) -> None:
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if not enabled:
+        p.setOpacity(0.45)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(qc(theme["accent"]) if on else qc(theme["switch_off"]))
+    p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+    knob = rect.height() - 4
+    x = rect.right() - 2 - knob if on else rect.left() + 2
+    p.setBrush(QColor(0, 0, 0, 40))
+    p.drawEllipse(QRectF(x, rect.top() + 2.6, knob, knob))
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawEllipse(QRectF(x, rect.top() + 2, knob, knob))
+    p.restore()
+
+
+def paint_tick(p: QPainter, x: float, cy: float, colour: QColor, size: float = 10.0) -> None:
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(colour, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath(QPointF(x, cy))
+    path.lineTo(x + size * 0.36, cy + size * 0.36)
+    path.lineTo(x + size, cy - size * 0.42)
+    p.drawPath(path)
+    p.restore()
+
+
+def paint_chevron(p: QPainter, cx: float, cy: float, colour: QColor) -> None:
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(colour, 1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    path = QPainterPath(QPointF(cx - 2, cy - 4))
+    path.lineTo(cx + 2, cy)
+    path.lineTo(cx - 2, cy + 4)
+    p.drawPath(path)
+    p.restore()
+
+
+class HuginnStyle(QProxyStyle):
+    """Huginn's application style: Fusion, with Huginn's own menus."""
+
+    theme = LIGHT_THEME                       # set by BrowserWindow.apply_theme
+    icon_source = None                        # the window's IconFactory, for menu items' icons
+
+    def __init__(self) -> None:
+        super().__init__(QStyleFactory.create("Fusion"))
+
+    # -- a menu is a frameless, see-through window; the card is painted on it ----------------
+    def polish(self, target):
+        if isinstance(target, QMenu):
+            target.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            wanted = Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+            if (target.windowFlags() & wanted) != wanted:
+                target.setWindowFlags(target.windowFlags() | wanted)
+            target.removeEventFilter(_menu_placer())
+            target.installEventFilter(_menu_placer())
+        return super().polish(target)
+
+    def pixelMetric(self, metric, option=None, widget=None) -> int:
+        if isinstance(widget, QMenu):
+            PM = QStyle.PixelMetric
+            if metric == PM.PM_MenuPanelWidth:
+                return 0
+            if metric in (PM.PM_MenuHMargin, PM.PM_MenuVMargin):
+                return MENU_SHADOW + MENU_PAD
+            if metric == PM.PM_SubMenuOverlap:
+                return MENU_PAD + 2 - MENU_SHADOW            # submenu's card just right of this one
+            if metric == PM.PM_SmallIconSize:
+                return MENU_ICON
+            if metric == PM.PM_MenuScrollerHeight:
+                return 16
+        return super().pixelMetric(metric, option, widget)
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None) -> int:
+        SH = QStyle.StyleHint
+        if hint == SH.SH_Menu_SubMenuPopupDelay:
+            return 160
+        if hint == SH.SH_Menu_MouseTracking:
+            return 1
+        return super().styleHint(hint, option, widget, returnData)
+
+    def sizeFromContents(self, ct, opt, size, widget=None) -> QSize:
+        if ct == QStyle.ContentsType.CT_MenuItem and isinstance(opt, QStyleOptionMenuItem):
+            MT = QStyleOptionMenuItem.MenuItemType
+            if opt.menuItemType == MT.Separator:
+                return QSize(size.width(), 28 if opt.text else 9)
+            text = opt.text.split("\t")[0]
+            if HEADER_MARK in text:
+                title, detail = text.split(HEADER_MARK, 1)
+                bold = QFont(opt.font)
+                bold.setWeight(QFont.Weight.DemiBold)
+                small = QFont(opt.font)
+                small.setPointSizeF(opt.font.pointSizeF() * 0.88)
+                width = max(QFontMetrics(bold).horizontalAdvance(title), QFontMetrics(small).horizontalAdvance(detail))
+                return QSize(width + 12 + 32 + 12 + 30, MENU_HEADER_ROW)
+            width = opt.fontMetrics.horizontalAdvance(text.replace("&&", "&"))
+            width += 10 + MENU_ICON + 10 + 28 + 12            # icon column, gap before the shortcut, end
+            if opt.menuItemType == MT.SubMenu:
+                width += 16
+            elif opt.checkType == QStyleOptionMenuItem.CheckType.NonExclusive:
+                width += 40
+            elif opt.checkType == QStyleOptionMenuItem.CheckType.Exclusive:
+                width += 18
+            return QSize(max(width, 190), MENU_ROW)
+        return super().sizeFromContents(ct, opt, size, widget)
+
+    def drawPrimitive(self, element, opt, p, widget=None) -> None:
+        PE = QStyle.PrimitiveElement
+        if isinstance(widget, QMenu):
+            if element == PE.PE_PanelMenu:
+                paint_menu_card(p, QRectF(opt.rect).adjusted(MENU_SHADOW, MENU_SHADOW, -MENU_SHADOW, -MENU_SHADOW),
+                                self.theme)
+                return
+            if element == PE.PE_FrameMenu:
+                return
+        super().drawPrimitive(element, opt, p, widget)
+
+    def drawControl(self, element, opt, p, widget=None) -> None:
+        CE = QStyle.ControlElement
+        if isinstance(widget, QMenu):
+            if element == CE.CE_MenuItem and isinstance(opt, QStyleOptionMenuItem):
+                self._menu_item(opt, p)
+                return
+            if element == CE.CE_MenuEmptyArea:
+                return
+            if element == CE.CE_MenuScroller:
+                r = QRectF(opt.rect)
+                up = not (opt.state & QStyle.StateFlag.State_DownArrow)
+                p.save()
+                p.translate(r.center())
+                p.rotate(-90 if up else 90)
+                paint_chevron(p, 0, 0, qc(self.theme["text_secondary"]))
+                p.restore()
+                return
+        super().drawControl(element, opt, p, widget)
+
+    def _menu_item(self, opt: QStyleOptionMenuItem, p: QPainter) -> None:
+        t = self.theme
+        MT = QStyleOptionMenuItem.MenuItemType
+        CT = QStyleOptionMenuItem.CheckType
+        r = QRectF(opt.rect)
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        if opt.menuItemType == MT.Separator:
+            if opt.text:                                  # a section title, e.g. "WEBSITES"
+                font = QFont(opt.font)
+                font.setPointSizeF(opt.font.pointSizeF() * 0.82)
+                font.setWeight(QFont.Weight.DemiBold)
+                font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
+                p.setFont(font)
+                p.setPen(qc(t["text_tertiary"]))
+                p.drawText(r.adjusted(12, 8, -12, 0), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           opt.text.replace("&", "").upper())
+            else:
+                y = round(r.center().y()) + 0.5
+                p.setPen(QPen(qc(t["menu_separator"]), 1))
+                p.drawLine(QPointF(r.left() + 10, y), QPointF(r.right() - 10, y))
+            p.restore()
+            return
+        enabled = bool(opt.state & QStyle.StateFlag.State_Enabled)
+        selected = enabled and bool(opt.state & QStyle.StateFlag.State_Selected)
+        if selected:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qc(t["menu_hover"]))
+            p.drawRoundedRect(r.adjusted(0, 1, 0, -1), 8, 8)
+        text, _, shortcut = opt.text.partition("\t")
+        text_colour = qc(t["text"] if enabled else t["text_secondary"])
+        mode = QIcon.Mode.Normal if enabled else QIcon.Mode.Disabled
+        cy = r.center().y()
+        right = r.right() - 10
+        if HEADER_MARK in text:                           # the page menu's site card
+            title, detail = text.split(HEADER_MARK, 1)
+            if not opt.icon.isNull():
+                opt.icon.paint(p, QRect(int(r.left() + 10), int(cy - 16), 32, 32), Qt.AlignmentFlag.AlignCenter, mode)
+            x = r.left() + 10 + 32 + 12
+            if opt.menuItemType == MT.SubMenu:
+                paint_chevron(p, right - 3, cy, qc(t["text_secondary"]))
+                right -= 18
+            bold = QFont(opt.font)
+            bold.setWeight(QFont.Weight.DemiBold)
+            small = QFont(opt.font)
+            small.setPointSizeF(opt.font.pointSizeF() * 0.88)
+            p.setFont(bold)
+            p.setPen(qc(t["text"]))
+            fm = QFontMetrics(bold)
+            p.drawText(QRectF(x, cy - fm.height() - 1, right - x, fm.height()),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       fm.elidedText(title, Qt.TextElideMode.ElideRight, int(right - x)))
+            p.setFont(small)
+            p.setPen(qc(t["text_secondary"]))
+            fm = QFontMetrics(small)
+            p.drawText(QRectF(x, cy + 1, right - x, fm.height()), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       fm.elidedText(detail, Qt.TextElideMode.ElideRight, int(right - x)))
+            p.restore()
+            return
+        x = r.left() + 10
+        if not opt.icon.isNull():
+            opt.icon.paint(p, QRect(int(x), int(cy - MENU_ICON / 2), MENU_ICON, MENU_ICON), Qt.AlignmentFlag.AlignCenter, mode)
+        if opt.maxIconWidth > 0 or not opt.icon.isNull():       # icons line the text up; no icons, no gap
+            x += MENU_ICON + 10
+        else:
+            x += 2
+        if opt.menuItemType == MT.SubMenu:
+            paint_chevron(p, right - 3, cy, qc(t["text_secondary"]))
+            right -= 18
+        elif opt.checkType == CT.NonExclusive:
+            paint_menu_switch(p, QRectF(right - 28, cy - 8, 28, 16), opt.checked, enabled, t)
+            right -= 38
+        elif opt.checkType == CT.Exclusive:                 # a choice: the chosen one is ticked, on the right
+            if opt.checked:
+                paint_tick(p, right - 11, cy, qc(t["accent"]) if enabled else text_colour)
+            right -= 18
+        if opt.menuItemType == MT.DefaultItem:
+            font = QFont(opt.font)
+            font.setWeight(QFont.Weight.DemiBold)
+        else:
+            font = QFont(opt.font)
+        flags = int(Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextHideMnemonic)
+        if shortcut:
+            small = QFont(opt.font)
+            small.setPointSizeF(opt.font.pointSizeF() * 0.92)
+            p.setFont(small)
+            p.setPen(qc(t["text_tertiary"] if not selected else t["text_secondary"]))
+            sw = QFontMetrics(small).horizontalAdvance(shortcut)
+            p.drawText(QRectF(right - sw, r.top(), sw + 1, r.height()), flags | int(Qt.AlignmentFlag.AlignRight), shortcut)
+            right -= sw + 18
+        p.setFont(font)
+        p.setPen(text_colour)
+        fm = QFontMetrics(font)
+        shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(max(10, right - x)), Qt.TextFlag.TextHideMnemonic)
+        p.drawText(QRectF(x, r.top(), right - x, r.height()), flags | int(Qt.AlignmentFlag.AlignLeft), shown)
+        p.restore()
+
+
+class MenuTile(QAbstractButton):
+    """A quick action in the page menu: an icon over a short label (Find, Reader, Listen...)."""
+
+    def __init__(self, glyph: QIcon, label: str, slot, active: bool, theme: dict, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.glyph, self.label, self.slot, self.active, self.theme = glyph, label, slot, active, theme
+        self.setFixedSize(62, 58)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setMouseTracking(True)
+        self.clicked.connect(self._run)
+
+    def _run(self) -> None:
+        menu = self.window()
+        if isinstance(menu, QMenu):
+            menu.close()
+        QTimer.singleShot(0, self.slot)
+
+    def enterEvent(self, event) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        t = self.theme
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        enabled = self.isEnabled()
+        if self.active:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qc(t["menu_active"]))
+            p.drawRoundedRect(r, 10, 10)
+        if enabled and (self.underMouse() or self.isDown()):
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qc(t["menu_hover"]) if not self.isDown() else qc(t["pressed"]))
+            p.drawRoundedRect(r, 10, 10)
+        if not enabled:
+            p.setOpacity(0.4)
+        self.glyph.paint(p, QRect(int(r.center().x() - 10), 9, 20, 20), Qt.AlignmentFlag.AlignCenter)
+        font = QFont(self.font())
+        font.setPointSizeF(self.font().pointSizeF() * 0.84)
+        p.setFont(font)
+        p.setPen(qc(t["accent"] if self.active else t["text_secondary"]))
+        p.drawText(QRectF(0, 33, self.width(), 18), int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+                   self.label)
+
+
+class MenuTiles(QWidget):
+    """The page menu's row of quick actions. Each tile's QAction is kept on this widget
+    (QWidget.actions), so the tiles can be found and run like any other menu item."""
+
+    def __init__(self, theme: dict, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.theme = theme
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(4, 4, 4, 4)
+        self.row.setSpacing(2)
+
+    def add(self, glyph: QIcon, label: str, action: QAction, slot, active: bool = False) -> MenuTile:
+        tile = MenuTile(glyph, label, slot, active, self.theme, self)
+        tile.setEnabled(action.isEnabled())
+        tile.setToolTip(action.text().split("\t")[0].replace("&&", "&")
+                        + (f"  ({action.text().split(chr(9))[1]})" if "\t" in action.text() else ""))
+        action.triggered.connect(lambda *_: slot())
+        self.addAction(action)
+        self.row.addWidget(tile)
+        return tile
+
+
+class MenuStepper(QWidget):
+    """A menu row with a value you step without closing the menu: Zoom  [-] 110% [+]."""
+
+    def __init__(self, glyph: QIcon, label: str, theme: dict, value: str, minus, reset, plus,
+                 icons: tuple, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.theme, self.glyph, self.label = theme, glyph, label
+        self.setFixedHeight(MENU_ROW + 4)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10 + MENU_ICON + 10, 0, 8, 0)
+        row.setSpacing(4)
+        text = QLabel(label)
+        text.setObjectName("MenuStepperLabel")
+        row.addWidget(text, 1)
+        self.value = QPushButton(value)
+        self.value.setObjectName("MenuStepperValue")
+        self.value.setToolTip("Actual Size (Ctrl+0)")
+        self.value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for icon, slot, tip in ((icons[0], minus, "Zoom Out (Ctrl+-)"), (None, reset, None), (icons[1], plus, "Zoom In (Ctrl+=)")):
+            if icon is None:
+                self.value.clicked.connect(lambda *_: self._step(reset))
+                row.addWidget(self.value)
+                continue
+            b = QToolButton()
+            b.setObjectName("MenuStepperButton")
+            b.setIcon(icon)
+            b.setIconSize(QSize(14, 14))
+            b.setFixedSize(26, 24)
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setAutoRepeat(True)
+            b.clicked.connect(lambda *_, s=slot: self._step(s))
+            row.addWidget(b)
+
+    def _step(self, slot) -> None:
+        value = slot()
+        if isinstance(value, str):
+            self.value.setText(value)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        self.glyph.paint(p, QRect(10, (self.height() - MENU_ICON) // 2, MENU_ICON, MENU_ICON), Qt.AlignmentFlag.AlignCenter)
+
+
+class PermissionPrompt(QWidget):
+    """Drops down over the top of the page when a site asks for the camera, location...:
+    'Allow “example.com” to use your camera?'   [Don't Allow]  [Allow]"""
+
+    answered = Signal(bool)
+    MARGIN = 8                                    # room for the shadow
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.theme = LIGHT_THEME
+        self.setFixedWidth(470)
+        layout = QHBoxLayout(self)
+        m = self.MARGIN
+        layout.setContentsMargins(m + 14, m + 12, m + 12, m + 12)
+        layout.setSpacing(12)
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(34, 34)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.text_label = QLabel()
+        self.text_label.setObjectName("PromptText")
+        self.text_label.setWordWrap(True)
+        self.text_label.setTextFormat(Qt.TextFormat.RichText)      # host is escaped
+        self.deny_button = QPushButton("Don't Allow")
+        self.deny_button.setObjectName("SecondaryButton")
+        self.allow_button = QPushButton("Allow")
+        self.allow_button.setObjectName("PrimaryButton")
+        for button in (self.deny_button, self.allow_button):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.deny_button.clicked.connect(lambda *_: self.answered.emit(False))
+        self.allow_button.clicked.connect(lambda *_: self.answered.emit(True))
+        layout.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.text_label, 1)
+        layout.addWidget(self.deny_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.allow_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.hide()
+
+    def set_request(self, site: str, action: str, glyph: str, icons: IconFactory, theme: dict) -> None:
+        self.theme = theme
+        badge = QPixmap(68, 68)
+        badge.fill(Qt.GlobalColor.transparent)
+        p = QPainter(badge)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        tint = qc(theme["accent"])
+        tint.setAlpha(38)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(tint)
+        p.drawEllipse(QRectF(0, 0, 68, 68))
+        icons.icon(glyph, theme["accent"]).paint(p, QRect(16, 16, 36, 36))
+        p.end()
+        badge.setDevicePixelRatio(2.0)
+        self.icon_label.setPixmap(badge)
+        self.text_label.setText(f"Allow “<b>{html.escape(site)}</b>” to {html.escape(action)}?")
+        self.fit_height()
+        self.update()
+
+    def fit_height(self) -> None:
+        """Just tall enough for the wrapped text (adjustSize() guesses the wrapping from a
+        narrower label and leaves the card far too tall)."""
+        layout = self.layout()
+        layout.activate()
+        height = (layout.totalHeightForWidth(self.width()) if layout.hasHeightForWidth()
+                  else layout.totalSizeHint().height())
+        self.resize(self.width(), max(height, layout.totalMinimumSize().height()))
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        m = self.MARGIN
+        paint_floating_card(p, QRectF(self.rect()).adjusted(m, m, -m, -m), self.theme)
+        p.end()
+
+
+class NoticeBar(PermissionPrompt):
+    """The same drop-down card, for the browser's own notices: 'This video needs H.264...',
+    'Restart to finish', 'Save password?'. answered(True) is the main button, answered(False)
+    the other; other() is the optional link under the text ('Never for This Website')."""
+
+    other = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        layout = self.layout()
+        index = layout.indexOf(self.text_label)
+        layout.removeWidget(self.text_label)
+        column = QVBoxLayout()
+        column.setSpacing(0)
+        column.addWidget(self.text_label)
+        self.extra_button = QPushButton()
+        self.extra_button.setObjectName("LinkButton")
+        self.extra_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.extra_button.clicked.connect(lambda *_: self.other.emit())
+        self.extra_button.hide()
+        column.addWidget(self.extra_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.insertLayout(index, column, 1)
+
+    def set_notice(self, kind: str, text: str, glyph: str, icons: IconFactory, theme: dict,
+                   accept: str, decline: str | None, extra: str | None = None) -> None:
+        self.setProperty("kind", kind)
+        self.set_request("", "", glyph, icons, theme)            # paints the badge
+        self.text_label.setText(text)
+        self.allow_button.setText(accept)
+        self.deny_button.setText(decline or "")
+        self.deny_button.setVisible(bool(decline))
+        self.extra_button.setText(extra or "")
+        self.extra_button.setVisible(bool(extra))
+        self.setFixedWidth(500 if extra else 470)
+        self.fit_height()
+
+
+class FindBar(QWidget):
+    """Find on Page (Ctrl+F): a small card at the top right of the page with the search
+    field, "3 of 12", previous / next and Done. Chromium highlights every match."""
+
+    searched = Signal(str, bool)                  # text, backwards (empty text: clear)
+    closed = Signal()
+    MARGIN = 8
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.theme = LIGHT_THEME
+        layout = QHBoxLayout(self)
+        m = self.MARGIN
+        layout.setContentsMargins(m + 10, m + 8, m + 10, m + 8)
+        layout.setSpacing(6)
+        self.field = QLineEdit()
+        self.field.setObjectName("SheetInput")
+        self.field.setPlaceholderText("Find on Page")
+        self.field.setClearButtonEnabled(True)
+        self.field.setMinimumWidth(110)
+        self.field.installEventFilter(self)
+        self.count_label = QLabel()
+        self.count_label.setObjectName("FindCount")
+        self.count_label.setMinimumWidth(70)
+        self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.previous_button = QToolButton()
+        self.previous_button.setToolTip("Previous Match (Shift+Enter)")
+        self.next_button = QToolButton()
+        self.next_button.setToolTip("Next Match (Enter)")
+        for button in (self.previous_button, self.next_button):
+            button.setAutoRaise(True)
+            button.setIconSize(QSize(16, 16))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.done_button = QPushButton("Done")
+        self.done_button.setObjectName("SecondaryButton")
+        self.done_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.field, 1)
+        layout.addWidget(self.count_label)
+        layout.addWidget(self.previous_button)
+        layout.addWidget(self.next_button)
+        layout.addWidget(self.done_button)
+        self.field.textChanged.connect(lambda text: self.searched.emit(text, False))
+        self.field.returnPressed.connect(self.find_next)
+        self.previous_button.clicked.connect(lambda *_: self.find_previous())
+        self.next_button.clicked.connect(lambda *_: self.find_next())
+        self.done_button.clicked.connect(lambda *_: self.closed.emit())
+        self.setFixedWidth(470)
+        self.hide()
+
+    def text(self) -> str:
+        return self.field.text()
+
+    def find_next(self) -> None:
+        if self.field.text():
+            self.searched.emit(self.field.text(), False)
+
+    def find_previous(self) -> None:
+        if self.field.text():
+            self.searched.emit(self.field.text(), True)
+
+    def set_theme(self, theme: dict, icons: "IconFactory") -> None:
+        self.theme = theme
+        self.previous_button.setIcon(icons.icon("chevron_up", theme["text"]))
+        self.next_button.setIcon(icons.icon("chevron_down", theme["text"]))
+        self.count_label.setStyleSheet(f"color: {theme['text_secondary']};")
+        self.update()
+
+    def set_result(self, active: int, total: int) -> None:
+        if not self.field.text():
+            self.count_label.setText("")
+        elif total == 0:
+            self.count_label.setText("Not found")
+        else:
+            self.count_label.setText(f"{max(active, 1)} of {total}")
+        self.previous_button.setEnabled(total > 0)
+        self.next_button.setEnabled(total > 0)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.field and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                self.closed.emit()
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.find_previous()
+                return True
+        return super().eventFilter(obj, event)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        m = self.MARGIN
+        paint_floating_card(p, QRectF(self.rect()).adjusted(m, m, -m, -m), self.theme)
+        p.end()
+
+
+class WarningPanel(QWidget):
+    """Native interstitial over the page card (certificate problems, http-only sites), in
+    the spirit of Safari's warning pages. Browser UI, so a page can't fake or hide it."""
+
+    goBack = Signal()
+    proceed = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.theme = LIGHT_THEME
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(40, 30, 40, 30)
+        outer.addStretch(2)
+        self.column = column = QWidget()
+        column.setFixedWidth(520)              # word-wrapped labels need a definite width
+        col = QVBoxLayout(column)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(12)
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(64, 64)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("WarningTitle")
+        self.title_label.setWordWrap(True)
+        self.body_label = QLabel()
+        self.body_label.setObjectName("WarningBody")
+        self.body_label.setWordWrap(True)
+        self.details_label = QLabel()
+        self.details_label.setObjectName("WarningDetails")
+        self.details_label.setWordWrap(True)
+        self.details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        for label in (self.title_label, self.body_label, self.details_label):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+        self.proceed_button = QPushButton()
+        self.proceed_button.setObjectName("LinkButton")
+        self.proceed_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.proceed_button.clicked.connect(lambda *_: self.proceed.emit())
+        self.details_button = QPushButton("Show Details")
+        self.details_button.setObjectName("LinkButton")
+        self.details_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.details_button.clicked.connect(lambda *_: self.set_details_visible(not self.details_label.isVisible()))
+        self.back_button = QPushButton("Go Back")
+        self.back_button.setObjectName("PrimaryButton")
+        self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_button.clicked.connect(lambda *_: self.goBack.emit())
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.details_button)
+        buttons.addWidget(self.proceed_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.back_button)
+        col.addWidget(self.icon_label)
+        col.addSpacing(4)
+        col.addWidget(self.title_label)
+        col.addWidget(self.body_label)
+        col.addWidget(self.details_label)
+        col.addSpacing(8)
+        col.addLayout(buttons)
+        outer.addWidget(column, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(3)
+        self.hide()
+
+    def set_warning(self, warning: dict, icons: IconFactory, theme: dict) -> None:
+        self.theme = theme
+        site = warning["site"]
+        if warning["kind"] == "certificate":
+            color, glyph = theme["danger"], "warning"
+            self.title_label.setText("This Connection Is Not Private")
+            self.body_label.setText(
+                f"This website may be impersonating “{site}” to steal your personal or financial "
+                f"information. You should go back to the previous page.")
+            detail = (f"{BROWSER_NAME} warns you when a website's certificate isn't valid. This may happen if "
+                      f"the website is misconfigured or an attacker has compromised your connection.\n\n"
+                      f"{warning.get('detail', '')}")
+            overridable = bool(warning.get("overridable", True))
+            if not overridable:
+                detail += "\n\nThis website's certificate can't be overridden."
+            self.setProperty("overridable", overridable)
+            self.details_label.setText(detail)
+            self.proceed_button.setText("Visit this website anyway")
+            self.details_button.show()
+            self.set_details_visible(False)
+        else:                                            # "insecure": no https version
+            color, glyph = theme["caution"], "lock_open"
+            self.title_label.setText("This Site Doesn't Support a Secure Connection")
+            self.body_label.setText(
+                f"Information you send or receive on “{site}”, like passwords or messages, could be "
+                f"read or changed by others on your network.")
+            self.details_label.setText("")
+            self.details_label.hide()
+            self.details_button.hide()
+            self.proceed_button.setText("Continue to site (not secure)")
+            self.proceed_button.show()
+        self.icon_label.setPixmap(icons.icon(glyph, color).pixmap(QSize(64, 64)))
+        self._fit_column()
+        self.update()
+
+    def set_details_visible(self, shown: bool) -> None:
+        self.details_label.setVisible(shown)
+        self.details_button.setText("Hide Details" if shown else "Show Details")
+        overridable = self.property("overridable") is not False
+        self.proceed_button.setVisible(shown and overridable)
+        self._fit_column()
+
+    def _fit_column(self) -> None:
+        """Size the text column for its wrapped text (a layout alone guesses too short)."""
+        width = max(260, min(520, self.width() - 80))
+        self.column.setFixedWidth(width)
+        height = self.column.layout().heightForWidth(width)
+        if height > 0:
+            self.column.setFixedHeight(height)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_column()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(qc(self.theme["warning_bg"]))
+        p.drawRoundedRect(QRectF(self.rect()), CARD_RADIUS, CARD_RADIUS)
+        p.end()
+
+
+class PrivacySettingsDialog(QDialog):
+    """Privacy & Security settings (Ctrl+,): tracking, connections, downloads, website
+    permissions and history. Changes apply immediately to every window."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("Sheet")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setFixedWidth(540)
+        self.window_ = window
+        self.switches: dict[str, Switch] = {}
+        self.combos: dict[str, QComboBox] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel("Privacy & Security")
+        title.setObjectName("SheetTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.back_link = QPushButton("‹ Back")
+        self.back_link.setObjectName("LinkButton")
+        self.back_link.clicked.connect(lambda *_: self.show_page(0))
+        self.back_link.hide()
+        header.addWidget(self.back_link)
+        layout.addLayout(header)
+        self.stack = QStackedWidget()
+        # The settings scroll when the window is too short to show them all (small laptop screens).
+        page = self._settings_page()
+        page.setObjectName("SettingsPage")
+        scroll = QScrollArea()
+        scroll.setObjectName("SettingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.viewport().setAutoFillBackground(False)
+        scroll.setWidget(page)
+        width = 540 - 40
+        wanted = max(page.heightForWidth(width) if page.hasHeightForWidth() else 0, page.sizeHint().height())
+        available = max(300, window.height() - TOOLBAR_HEIGHT - 170)      # title, Done and margins
+        scroll.setFixedHeight(min(max(wanted, page.minimumSizeHint().height()), available))
+        self.settings_scroll = scroll
+        self.stack.addWidget(scroll)
+        self.stack.addWidget(self._permissions_page())
+        layout.addWidget(self.stack)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        done = QPushButton("Done")
+        done.setObjectName("PrimaryButton")
+        done.setDefault(True)
+        done.clicked.connect(lambda *_: self.accept())
+        row.addWidget(done)
+        layout.addSpacing(6)
+        layout.addLayout(row)
+
+    # -- construction -----------------------------------------------------------------------
+    def _row(self, group: QVBoxLayout, title: str, subtitle: str, control: QWidget, first: bool = False) -> None:
+        if not first:
+            line = QFrame()
+            line.setObjectName("RowDivider")
+            group.addWidget(line)
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 9, 12, 9)
+        h.setSpacing(14)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        t = QLabel(title)
+        t.setObjectName("RowTitle")
+        text.addWidget(t)
+        if subtitle:
+            s = QLabel(subtitle)
+            s.setObjectName("RowSubtitle")
+            s.setWordWrap(True)
+            text.addWidget(s)
+        h.addLayout(text, 1)
+        h.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+        group.addWidget(row)
+
+    def _group(self, layout: QVBoxLayout, heading: str) -> QVBoxLayout:
+        label = QLabel(heading.upper())
+        label.setObjectName("SectionHeader")
+        layout.addWidget(label)
+        frame = QFrame()
+        frame.setObjectName("SettingsGroup")
+        inner = QVBoxLayout(frame)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(0)
+        layout.addWidget(frame)
+        return inner
+
+    def _switch(self, key: str) -> Switch:
+        switch = Switch(bool(self.window_.prefs[key]))
+        switch.theme = self.window_.theme
+        switch.toggled.connect(partial(self.window_.set_privacy_pref, key))
+        self.switches[key] = switch
+        return switch
+
+    def _combo(self, key: str, choices: dict) -> QComboBox:
+        combo = QComboBox()
+        for value, label in choices.items():
+            combo.addItem(label if isinstance(label, str) else label[0], value)
+        combo.setCurrentIndex(max(0, combo.findData(self.window_.prefs[key])))
+        combo.currentIndexChanged.connect(lambda i, c=combo, k=key: self.window_.set_privacy_pref(k, c.itemData(i)))
+        self.combos[key] = combo
+        return combo
+
+    def _button(self, text: str, slot) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("SecondaryButton")
+        button.clicked.connect(lambda *_: slot())
+        return button
+
+    def _settings_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        report = self.window_.store.tracker_report()
+        card = styled(QWidget(), "ReportCard")
+        h = QHBoxLayout(card)
+        h.setContentsMargins(12, 10, 12, 10)
+        h.setSpacing(12)
+        shield = QLabel()
+        shield.setPixmap(self.window_.icons.icon("shield", self.window_.theme["accent"]).pixmap(QSize(26, 26)))
+        h.addWidget(shield)
+        n = report["trackers"]
+        summary = QLabel(f"{n} tracker{'s' if n != 1 else ''} prevented from profiling you in the last "
+                         f"seven days." if n else "No trackers have contacted you in the last seven days.")
+        summary.setObjectName("RowTitle")
+        summary.setWordWrap(True)
+        h.addWidget(summary, 1)
+        layout.addWidget(card)
+
+        g = self._group(layout, "Search")
+        self.search_combo = QComboBox()
+        for key, (label, _url) in SEARCH_ENGINES.items():
+            self.search_combo.addItem(label, key)
+        self._sync_search_combo()
+        self.search_combo.currentIndexChanged.connect(lambda *_: self._search_chosen())
+        self._row(g, "Search engine", "Used when you type words instead of a website in the address field.",
+                  self.search_combo, first=True)
+        self._row(g, "Search suggestions", "Shows the search engine's suggestions as you type. What you type is "
+                  "sent to it as you type, so this is off unless you turn it on.", self._switch("searchSuggestions"))
+
+        passwords = self.window_.passwords
+        if passwords is not None:
+            g = self._group(layout, "Passwords")
+            if passwords.available():
+                count = "" if passwords.vault.locked() else (
+                    f" {len(passwords.vault.entries)} saved." if passwords.vault.entries else "")
+                text = ("Encrypted with your master password." + count + " Import from another browser or "
+                        "export a backup." if passwords.vault.exists() else
+                        "Save logins encrypted, fill them in with a click and get strong passwords for new accounts.")
+                button = self._button("Open…" if passwords.vault.exists() else "Set Up…", self._open_passwords)
+            else:
+                text = "Run setup.bat in the browser's folder once to turn on the password manager."
+                button = self._button("Open…", self._open_passwords)
+                button.setEnabled(False)
+            self._row(g, "Saved passwords", text, button, first=True)
+
+        adblock = self.window_.guard.adblock
+        if adblock is not None:
+            g = self._group(layout, "Ads")
+            self._row(g, "Block ads", "Hides ads on websites, and removes YouTube's video ads.",
+                      self._switch("blockAds"), first=True)
+            update = self._button("Update Now", lambda: adblock.update(force=True))
+            self._row(g, "Filter lists", adblock.status_text(), update)
+            self.filter_status = g.itemAt(g.count() - 1).widget().findChildren(QLabel)[-1]
+            self.filter_update = update
+            adblock.changed.connect(self._refresh_filter_status)
+            self._refresh_filter_status()
+
+        engine = self.window_.engine
+        if engine is not None:
+            engine.refresh(emit=False)
+        if engine is not None and (engine.can_build() or engine.has_codecs()):
+            g = self._group(layout, "Video")
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(12, 9, 12, 9)
+            h.setSpacing(14)
+            text = QVBoxLayout()
+            text.setSpacing(3)
+            t = QLabel("H.264 video")
+            t.setObjectName("RowTitle")
+            text.addWidget(t)
+            self.engine_text = QLabel()
+            self.engine_text.setObjectName("RowSubtitle")
+            self.engine_text.setWordWrap(True)
+            text.addWidget(self.engine_text)
+            self.engine_progress = QProgressBar()
+            self.engine_progress.setObjectName("EngineProgress")
+            self.engine_progress.setTextVisible(False)
+            self.engine_progress.setRange(0, 1000)
+            text.addWidget(self.engine_progress)
+            self.engine_details = QPushButton("Show Details")
+            self.engine_details.setObjectName("LinkButton")
+            self.engine_details.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.engine_details.clicked.connect(lambda *_: engine.open_details())
+            text.addWidget(self.engine_details, 0, Qt.AlignmentFlag.AlignLeft)
+            h.addLayout(text, 1)
+            self.engine_button = QPushButton()
+            self.engine_button.setObjectName("SecondaryButton")
+            self.engine_button.clicked.connect(lambda *_: self._engine_action())
+            h.addWidget(self.engine_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            g.addWidget(row)
+            engine.changed.connect(self._refresh_engine_row)
+            self._refresh_engine_row()
+            engine.refresh_soon()
+
+        g = self._group(layout, "Website tracking")
+        self._row(g, "Prevent cross-site tracking", "Blocks known trackers and third-party cookies.",
+                  self._switch("preventTracking"), first=True)
+        self._row(g, "Remove tracking information from links",
+                  "Strips identifiers such as utm_ and fbclid from addresses before they load.",
+                  self._switch("stripTrackingParams"))
+        self._row(g, "Ask websites not to sell or share my data", "Sends the Global Privacy Control signal.",
+                  self._switch("globalPrivacyControl"))
+        self._row(g, "Reject cookie pop-ups", "Clicks “Reject all” on cookie consent banners for you, and hides "
+                  "banners that only say OK.", self._switch("rejectCookieBanners"))
+        self._row(g, "Protect against fingerprinting", "Makes your PC look slightly different to every site, so "
+                  "sites can't recognise you without cookies.", self._switch("fingerprintProtection"))
+
+        g = self._group(layout, "Connections")
+        self._row(g, "Secure connections (HTTPS)", "Tries the encrypted version of every site first.",
+                  self._combo("httpsMode", HTTPS_MODES), first=True)
+        self._row(g, "Encrypted DNS", "Hides the sites you look up from your network provider.",
+                  self._combo("secureDns", SECURE_DNS_PROVIDERS))
+
+        g = self._group(layout, "Downloads & websites")
+        self._row(g, "Warn before downloading apps and scripts", "Files like .exe, .msi and .ps1 can harm your PC.",
+                  self._switch("warnDownloads"), first=True)
+        self._row(g, "Website permissions", "Camera, microphone, location and more you've allowed or denied.",
+                  self._button("Manage…", lambda: self.show_page(1)))
+        self._row(g, "History and website data", "Clear what sites remember about you.",
+                  self._button("Clear…", self._clear_history))
+        self._row(g, "Remember what pages say (Muninn)", "Keeps the words of pages you visit on this PC, so the "
+                  "address field, Ctrl+K and the sidebar can find a page by what was on it. Never from private "
+                  "windows or burner tabs, or pages with a password or card field.", self._switch("rememberPages"))
+        if not self.window_.private:
+            self._row(g, "Delete cookies when Huginn closes", "Signs you out of sites you haven't chosen "
+                      "“Keep Me Signed In” for (page menu).", self._switch("clearCookiesOnQuit"))
+        return page
+
+    def _permissions_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(6)
+        note = QLabel("Sites ask before using your camera, microphone, location, clipboard or fonts. "
+                      "Notifications are always blocked. Remove a choice to be asked again.")
+        note.setObjectName("SheetNote")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        frame = QFrame()
+        frame.setObjectName("SettingsGroup")
+        inner = QVBoxLayout(frame)
+        inner.setContentsMargins(6, 6, 6, 6)
+        self.permission_list = QListWidget()
+        self.permission_list.setObjectName("PermissionList")
+        self.permission_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.permission_list.setMinimumHeight(220)
+        self.permission_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        inner.addWidget(self.permission_list)
+        layout.addWidget(frame)
+        return page
+
+    # -- pages ------------------------------------------------------------------------------
+    def show_page(self, index: int) -> None:
+        if index == 1:
+            self.reload_permissions()
+        self.stack.setCurrentIndex(index)
+        self.back_link.setVisible(index == 1)
+        self.adjustSize()
+
+    def reload_permissions(self) -> None:
+        self.permission_list.clear()
+        entries = self.window_.stored_permissions()
+        if not entries:
+            item = QListWidgetItem("No website permissions yet.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.permission_list.addItem(item)
+            return
+        for permission in entries:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(8, 4, 4, 4)
+            label = PERMISSION_INFO.get(permission.permissionType().name, ("", "", "Permission"))[2]
+            granted = permission.state() == QWebEnginePermission.State.Granted
+            text = QLabel(f"{origin_label(permission.origin())} — {label}: {'Allowed' if granted else 'Denied'}")
+            text.setObjectName("RowTitle")
+            h.addWidget(text, 1)
+            remove = QPushButton("Remove")
+            remove.setObjectName("LinkButton")
+            remove.clicked.connect(lambda *_, p=permission: (self.window_.forget_permission(p),
+                                                              self.reload_permissions()))
+            h.addWidget(remove)
+            item = QListWidgetItem()
+            item.setSizeHint(row.sizeHint())
+            self.permission_list.addItem(item)
+            self.permission_list.setItemWidget(item, row)
+
+    def _clear_history(self) -> None:
+        self.accept()
+        QTimer.singleShot(0, self.window_.show_clear_history_dialog)
+
+    def _sync_search_combo(self) -> None:
+        prefs = self.window_.prefs
+        self.search_combo.blockSignals(True)
+        self.search_combo.setCurrentIndex(max(0, self.search_combo.findData(prefs["searchEngine"])))
+        custom = self.search_combo.findData("custom")
+        self.search_combo.setItemText(custom, f"Custom ({search_engine_label(prefs)})…"
+                                      if prefs["searchEngine"] == "custom" else "Custom…")
+        self.search_combo.blockSignals(False)
+
+    def _search_chosen(self) -> None:
+        self.window_.choose_search_engine(self.search_combo.currentData())
+        self._sync_search_combo()
+
+    def _open_passwords(self) -> None:
+        window = self.window_
+        self.accept()
+        QTimer.singleShot(0, window.show_passwords)
+
+    def _refresh_engine_row(self) -> None:
+        engine = self.window_.engine
+        if engine is None or not hasattr(self, "engine_text"):
+            return
+        info = engine.describe()
+        self.engine_text.setText(info["text"])
+        self.engine_button.setText(info["button"])
+        self.engine_button.setEnabled(not info.get("disabled"))
+        self.engine_button.setObjectName("PrimaryButton" if info["button"] in ("Restart", "Update…") else "SecondaryButton")
+        self.engine_button.style().unpolish(self.engine_button)
+        self.engine_button.style().polish(self.engine_button)
+        progress = info.get("progress")
+        self.engine_progress.setVisible(progress is not None)
+        if progress is not None:
+            self.engine_progress.setValue(int(progress * 1000))
+        self.engine_details.setVisible(bool(info.get("details")))
+        if self.isVisible():
+            self.adjustSize()
+
+    def _engine_action(self) -> None:
+        engine, window = self.window_.engine, self.window_
+        phase = engine.phase()
+        if phase in ("standard", "installed") and engine.update_available():
+            window.offer_engine_build(update=True)
+        elif phase == "standard":
+            window.offer_engine_build()
+        elif phase in ("running", "waiting_permission"):
+            engine.stop()
+        elif phase == "waiting_browser":
+            window.restart_for_engine()
+        elif phase in ("paused", "failed"):
+            engine.start()
+        elif phase == "installed":
+            engine.check_for_update(force=True)
+        self._refresh_engine_row()
+
+    def _refresh_filter_status(self) -> None:
+        adblock = self.window_.guard.adblock
+        self.filter_status.setText(adblock.status_text())
+        self.filter_update.setEnabled(bool(adblock.directory) and not adblock.downloading)
+
+    def setVisible(self, visible: bool) -> None:
+        if visible and not self.isVisible():
+            place_sheet(self, self.window_)
+        super().setVisible(visible)
+
+
+# --------------------------------------------------------------------------------------
+# Main window
+# --------------------------------------------------------------------------------------
+class PasswordsDialog(QDialog):
+    """Passwords (Ctrl+Shift+P): the saved logins - search, show, copy, edit, delete - plus
+    import, export and the vault's settings. Drop a CSV or a backup on it to import."""
+
+    LIST, DETAIL, MESSAGE = range(3)
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("Sheet")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setFixedWidth(600)
+        self.setAcceptDrops(True)
+        self.window_ = window
+        self.manager: PasswordManager = window.passwords
+        self.editing: str | None = None                 # entry id ("" = a new one)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Passwords")
+        title.setObjectName("SheetTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.add_button = QPushButton("Add")
+        self.add_button.setObjectName("SecondaryButton")
+        self.add_button.clicked.connect(lambda *_: self.open_entry(""))
+        header.addWidget(self.add_button)
+        self.more_button = QPushButton("More ▾")
+        self.more_button.setObjectName("SecondaryButton")
+        self.more_button.clicked.connect(lambda *_: self.show_more_menu())
+        header.addWidget(self.more_button)
+        layout.addLayout(header)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search websites and usernames")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda *_: self.reload_list())
+        layout.addWidget(self.search)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._list_page())
+        self.stack.addWidget(self._detail_page())
+        self.stack.addWidget(self._message_page())
+        layout.addWidget(self.stack)
+
+        group = QFrame()
+        group.setObjectName("SettingsGroup")
+        g = QVBoxLayout(group)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setSpacing(0)
+        self.offer_switch = Switch(self.manager.offer_save())
+        self.offer_switch.theme = window.theme
+        self.offer_switch.toggled.connect(self.manager.set_offer_save)
+        self.windows_switch = Switch(False)
+        self.windows_switch.theme = window.theme
+        self.windows_switch.toggled.connect(self._toggle_windows_unlock)
+        self.icloud_switch = Switch(self.manager.icloud.enabled())
+        self.icloud_switch.theme = window.theme
+        self.icloud_switch.toggled.connect(self._toggle_icloud)
+        self.icloud_text = None
+        for i, (text, sub, control) in enumerate((
+                ("Offer to save passwords", "Asks after you sign in somewhere new.", self.offer_switch),
+                ("Unlock with my Windows sign-in", "Skips the master password on this PC. Anyone signed in to "
+                 "your Windows account could then use your passwords.", self.windows_switch),
+                ("Use iCloud Passwords", self.manager.icloud.describe(), self.icloud_switch))):
+            if i:
+                line = QFrame()
+                line.setObjectName("RowDivider")
+                g.addWidget(line)
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(12, 8, 12, 8)
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            t = QLabel(text)
+            t.setObjectName("RowTitle")
+            s = QLabel(sub)
+            s.setObjectName("RowSubtitle")
+            s.setWordWrap(True)
+            col.addWidget(t)
+            col.addWidget(s)
+            if control is self.icloud_switch:
+                self.icloud_text = s
+            h.addLayout(col, 1)
+            h.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+            g.addWidget(row)
+        layout.addWidget(group)
+        self.settings_group = group
+
+        footer = QHBoxLayout()
+        self.status = QLabel()
+        self.status.setObjectName("SheetNote")
+        self.status.setWordWrap(True)
+        footer.addWidget(self.status, 1)
+        done = QPushButton("Done")
+        done.setObjectName("PrimaryButton")
+        done.setDefault(True)
+        done.clicked.connect(lambda *_: self.accept())
+        footer.addWidget(done)
+        layout.addLayout(footer)
+        self.manager.changed.connect(self.refresh)
+        self.manager.icloud.changed.connect(self.refresh)
+        self.refresh()
+
+    # -- pages ---------------------------------------------------------------------------------
+    def _list_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        self.summary = QLabel()
+        self.summary.setObjectName("SheetNote")
+        v.addWidget(self.summary)
+        self.list = QListWidget()
+        self.list.setObjectName("PermissionList")
+        self.list.setMinimumHeight(280)
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.itemActivated.connect(lambda item: self.open_entry(item.data(Qt.ItemDataRole.UserRole)))
+        self.list.itemClicked.connect(lambda item: self.open_entry(item.data(Qt.ItemDataRole.UserRole)))
+        v.addWidget(self.list)
+        return page
+
+    def _detail_page(self) -> QWidget:
+        page = QWidget()
+        grid = QGridLayout(page)
+        grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://example.com")
+        self.user_edit = QLineEdit()
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.note_edit = QLineEdit()
+        self.reveal_button = QPushButton("Show")
+        self.reveal_button.setObjectName("LinkButton")
+        self.reveal_button.clicked.connect(lambda *_: self.toggle_reveal())
+        copy_user = QPushButton("Copy")
+        copy_user.setObjectName("LinkButton")
+        copy_user.clicked.connect(lambda *_: QGuiApplication.clipboard().setText(self.user_edit.text()))
+        self.copy_password_button = QPushButton("Copy")
+        self.copy_password_button.setObjectName("LinkButton")
+        self.copy_password_button.clicked.connect(lambda *_: self.copy_password())
+        self.generate_button = QPushButton("Suggest")
+        self.generate_button.setObjectName("LinkButton")
+        self.generate_button.setToolTip("Fill in a new strong password")
+        self.generate_button.clicked.connect(lambda *_: self._suggest_password())
+        for row, (label, field, extras) in enumerate((("Website", self.url_edit, ()),
+                                                      ("Username", self.user_edit, (copy_user,)),
+                                                      ("Password", self.password_edit,
+                                                       (self.reveal_button, self.copy_password_button, self.generate_button)),
+                                                      ("Notes", self.note_edit, ()))):
+            name = QLabel(label)
+            name.setObjectName("RowTitle")
+            grid.addWidget(name, row, 0)
+            grid.addWidget(field, row, 1)
+            box = QHBoxLayout()
+            box.setSpacing(4)
+            for extra in extras:
+                box.addWidget(extra)
+            box.addStretch(1)
+            grid.addLayout(box, row, 2)
+        self.previous_label = QLabel()
+        self.previous_label.setObjectName("SheetNote")
+        self.previous_label.setWordWrap(True)
+        grid.addWidget(self.previous_label, 4, 1, 1, 2)
+        self.detail_error = QLabel()
+        self.detail_error.setObjectName("SheetNote")
+        self.detail_error.setWordWrap(True)
+        grid.addWidget(self.detail_error, 5, 1, 1, 2)
+        buttons = QHBoxLayout()
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.setObjectName("LinkButton")
+        self.delete_button.clicked.connect(lambda *_: self.delete_entry())
+        buttons.addWidget(self.delete_button)
+        buttons.addStretch(1)
+        back = QPushButton("Cancel")
+        back.setObjectName("SecondaryButton")
+        back.clicked.connect(lambda *_: self.close_entry())
+        save = QPushButton("Save")
+        save.setObjectName("PrimaryButton")
+        save.clicked.connect(lambda *_: self.save_entry())
+        self.save_button = save
+        buttons.addWidget(back)
+        buttons.addWidget(save)
+        grid.addLayout(buttons, 6, 0, 1, 3)
+        grid.setColumnStretch(1, 1)
+        return page
+
+    def _message_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 18, 0, 18)
+        v.setSpacing(8)
+        self.message_title = QLabel()
+        self.message_title.setObjectName("RowTitle")
+        self.message_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.message_body = QLabel()
+        self.message_body.setObjectName("SheetNote")
+        self.message_body.setWordWrap(True)
+        self.message_body.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.message_button = QPushButton()
+        self.message_button.setObjectName("PrimaryButton")
+        self.message_button.clicked.connect(lambda *_: self._message_action())
+        v.addWidget(self.message_title)
+        v.addWidget(self.message_body)
+        v.addWidget(self.message_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        return page
+
+    # -- state ------------------------------------------------------------------------------------
+    def refresh(self) -> None:
+        vault = self.manager.vault
+        ready = self.manager.available() and vault.exists() and not vault.locked()
+        if not self.manager.available():
+            self._message("Passwords need the encryption library",
+                          "Run setup.bat in the browser's folder once to add it.", "", "")
+        elif not vault.exists():
+            self._message("Keep your passwords encrypted",
+                          f"{BROWSER_NAME} saves logins in a vault encrypted with a master password only you know. "
+                          "You can import passwords from another browser or password manager afterwards.",
+                          "Set Up…", "setup")
+        elif vault.locked():
+            self._message("Passwords are locked", "Enter your master password to see and fill them.",
+                          "Unlock…", "unlock")
+        elif self.editing is None:
+            self.stack.setCurrentIndex(self.LIST)
+            self.reload_list()
+        for widget in (self.search, self.add_button):
+            widget.setEnabled(ready)
+        self.more_button.setEnabled(self.manager.available() and vault.exists())
+        self.settings_group.setVisible(self.manager.available())
+        self.windows_switch.blockSignals(True)
+        try:
+            self.windows_switch.setChecked(vault.exists() and vault.windows_unlock())
+        except (VaultError, OSError, ValueError):
+            self.windows_switch.setChecked(False)
+        self.windows_switch.blockSignals(False)
+        self.windows_switch.setEnabled(IS_WINDOWS and ready)
+        icloud = self.manager.icloud
+        self.icloud_switch.blockSignals(True)
+        self.icloud_switch.setChecked(icloud.enabled() and icloud.available())
+        self.icloud_switch.blockSignals(False)
+        self.icloud_switch.setEnabled(icloud.available())
+        if self.icloud_text is not None:
+            self.icloud_text.setText(icloud.describe())
+        if self.isVisible():
+            self.adjustSize()
+
+    def _message(self, title: str, body: str, button: str, action: str) -> None:
+        self.editing = None
+        self.message_title.setText(title)
+        self.message_body.setText(body)
+        self.message_button.setText(button)
+        self.message_button.setVisible(bool(button))
+        self.message_button.setProperty("action", action)
+        self.stack.setCurrentIndex(self.MESSAGE)
+
+    def _message_action(self) -> None:
+        action = self.message_button.property("action")
+        if action == "setup":
+            self.window_.setup_passwords()
+        elif action == "unlock":
+            self.window_.ensure_passwords_unlocked()
+        self.refresh()
+
+    def reload_list(self) -> None:
+        vault = self.manager.vault
+        self.list.clear()
+        if vault.locked():
+            return
+        query = self.search.text().strip().lower()
+        health = vault.health()
+        entries = sorted(vault.entries, key=lambda e: (login_site(QUrl(e["url"]).host()), e["url"], e["username"].lower()))
+        shown = 0
+        for entry in entries:
+            host = QUrl(entry["url"]).host()
+            haystack = " ".join((entry["url"], entry["username"], entry.get("title", ""), entry.get("note", ""))).lower()
+            if query and query not in haystack:
+                continue
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(8, 4, 8, 4)
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            site = QLabel(host + ("" if entry["url"].startswith("https://") else "  (not secure)"))
+            site.setObjectName("RowTitle")
+            user = QLabel(entry["username"] or "No username")
+            user.setObjectName("RowSubtitle")
+            col.addWidget(site)
+            col.addWidget(user)
+            h.addLayout(col, 1)
+            flags = [label for key, label in (("reused", "Reused"), ("weak", "Weak")) if entry["id"] in health[key]]
+            if flags:
+                badge = QLabel(" · ".join(flags))
+                badge.setObjectName("RowSubtitle")
+                badge.setStyleSheet(f"color: {self.window_.theme['caution']};")
+                h.addWidget(badge)
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, entry["id"])
+            item.setSizeHint(row.sizeHint())
+            self.list.addItem(item)
+            self.list.setItemWidget(item, row)
+            shown += 1
+        total = len(vault.entries)
+        reused = len(health["reused"])
+        weak = len(health["weak"])
+        parts = [f"{total} password{'s' if total != 1 else ''}"]
+        if reused:
+            parts.append(f"{reused} reused")
+        if weak:
+            parts.append(f"{weak} weak")
+        if query:
+            parts.append(f"{shown} shown")
+        if not total:
+            parts = ["No passwords yet. Add one, sign in somewhere, or drop an export from another browser here."]
+        self.summary.setText(" · ".join(parts))
+
+    # -- one entry ------------------------------------------------------------------------------
+    def _entry(self, entry_id: str) -> dict | None:
+        return next((e for e in self.manager.vault.entries if e["id"] == entry_id), None)
+
+    def open_entry(self, entry_id: str) -> None:
+        vault = self.manager.vault
+        if vault.locked():
+            return
+        entry = self._entry(entry_id) if entry_id else None
+        self.editing = entry["id"] if entry else ""
+        view = self.window_.current_view()
+        current_origin = login_origin(view.url().toString()) if view is not None else ""
+        self.url_edit.setText(entry["url"] if entry else current_origin)
+        self.user_edit.setText(entry["username"] if entry else "")
+        self.password_edit.setText(entry["password"] if entry else "")
+        self.note_edit.setText(entry.get("note", "") if entry else "")
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password if entry else QLineEdit.EchoMode.Normal)
+        self.reveal_button.setText("Show")
+        self.reveal_button.setVisible(bool(entry))
+        self.copy_password_button.setVisible(bool(entry))
+        self.delete_button.setVisible(bool(entry))
+        previous = entry.get("previous") if entry else None
+        self.previous_label.setVisible(bool(previous))
+        self.previous_label.setText("Has a previous password (kept when it last changed)." if previous else "")
+        self.detail_error.setText("")
+        self.stack.setCurrentIndex(self.DETAIL)
+        (self.user_edit if entry else self.url_edit).setFocus()
+
+    def close_entry(self) -> None:
+        self.editing = None
+        self.password_edit.clear()
+        self.stack.setCurrentIndex(self.LIST)
+        self.reload_list()
+
+    def toggle_reveal(self) -> None:
+        if self.password_edit.echoMode() == QLineEdit.EchoMode.Password:
+            if not self.window_.ensure_passwords_confirmed("Enter your master password to show this password."):
+                return
+            self.password_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            entry = self._entry(self.editing or "")
+            if entry and entry.get("previous"):
+                self.previous_label.setText(f"Previous password: {entry['previous']}")
+            self.reveal_button.setText("Hide")
+        else:
+            self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self.reveal_button.setText("Show")
+
+    def copy_password(self) -> None:
+        if self.window_.ensure_passwords_confirmed("Enter your master password to copy this password."):
+            copy_secret(self.password_edit.text())
+            self.status.setText("Password copied. It's cleared from the clipboard in 30 seconds.")
+
+    def _suggest_password(self) -> None:
+        self.password_edit.setText(generate_password())
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+
+    def save_entry(self) -> None:
+        vault = self.manager.vault
+        url, user, password = self.url_edit.text().strip(), self.user_edit.text(), self.password_edit.text()
+        origin = login_origin(url)
+        if not origin or not password:
+            self.detail_error.setText("A login needs a web address (like https://example.com) and a password.")
+            return
+        other = vault.find(origin, user)
+        try:
+            if self.editing:
+                if other is not None and other["id"] != self.editing:
+                    self.detail_error.setText("There's already a saved login with that website and username.")
+                    return
+                vault.update(self.editing, url=origin, username=user, password=password, note=self.note_edit.text())
+            else:
+                if other is not None:
+                    self.detail_error.setText("There's already a saved login with that website and username.")
+                    return
+                vault.add_or_update(origin, user, password, note=self.note_edit.text())
+        except VaultError as e:
+            self.detail_error.setText(str(e))
+            return
+        self.editing = None
+        self.manager.notify()
+
+    def delete_entry(self) -> None:
+        entry = self._entry(self.editing or "")
+        if entry is None:
+            return
+        sheet = SheetDialog(self.window_, f"Delete the password for {QUrl(entry['url']).host()}?",
+                            f"“{entry['username'] or 'No username'}” will be removed from your passwords.",
+                            ok="Delete", danger=True)
+        if self.window_.run_dialog(sheet):
+            self.manager.vault.delete(entry["id"])
+            self.editing = None
+            self.manager.notify()
+
+    # -- more: import, export, master password, lock ---------------------------------------------------
+    def show_more_menu(self) -> None:
+        menu = prepare_menu(QMenu(self))
+        vault = self.manager.vault
+        unlocked = not vault.locked()
+        BrowserWindow._add_action(menu, "Import Passwords…", self.import_file)
+        BrowserWindow._add_action(menu, "Export Passwords…", self.export, unlocked and bool(vault.entries))
+        menu.addSeparator()
+        BrowserWindow._add_action(menu, "Change Master Password…", self.change_master, unlocked)
+        BrowserWindow._add_action(menu, "Lock Passwords", self.manager.lock, unlocked)
+        self.window_._popup_under(menu, self.more_button)
+
+    def import_file(self, path: str | None = None) -> None:
+        window = self.window_
+        path = path or window.ask_import_path()
+        if not path:
+            return
+        try:
+            try:
+                logins, skipped, encrypted = read_password_file(path)
+            except WrongPassword:
+                opened: dict = {}
+
+                def check(password: str) -> str:
+                    try:
+                        opened["result"] = read_password_file(path, password)
+                    except WrongPassword:
+                        return "That password doesn't open this backup."
+                    return ""
+                if window.ask_secret("Open Password Backup", "Enter the password that protects "
+                                     f"“{os.path.basename(path)}”.", check=check) is None:
+                    return
+                logins, skipped, encrypted = opened["result"]
+        except (VaultError, OSError, UnicodeError, csv.Error) as e:
+            window.run_dialog(SheetDialog(window, "These passwords couldn't be imported", str(e), cancel=None))
+            return
+        if not window.ensure_passwords_unlocked("Enter your master password to import passwords."):
+            return
+        counts = self.manager.vault.import_logins(logins)
+        self.manager.notify()
+        lines = [f"{counts['added']} added", f"{counts['updated']} updated (each keeps its previous password)",
+                 f"{counts['same']} already saved"]
+        if skipped:
+            lines.append(f"{skipped} skipped (no web address or password - cards, notes, app logins)")
+        sheet = SheetDialog(window, f"Imported {len(logins)} password{'s' if len(logins) != 1 else ''}",
+                            "\n".join(lines), cancel=None)
+        delete = None
+        if not encrypted:
+            delete = QCheckBox(f"Delete “{os.path.basename(path)}” now - it holds your passwords unencrypted")
+            delete.setChecked(True)
+            sheet.add_widget(delete)
+        window.run_dialog(sheet)
+        if delete is not None and delete.isChecked():
+            try:
+                os.remove(path)
+                self.status.setText(f"Imported, and deleted {os.path.basename(path)}.")
+            except OSError as e:
+                self.status.setText(f"Imported, but {os.path.basename(path)} couldn't be deleted ({e.strerror}).")
+        else:
+            self.status.setText(f"Imported {len(logins)} passwords.")
+
+    def export(self) -> None:
+        window = self.window_
+        vault = self.manager.vault
+        if not window.ensure_passwords_confirmed("Enter your master password to export your passwords."):
+            return
+        sheet = SheetDialog(window, "Export Passwords",
+                            "An encrypted backup can only be opened with a password you choose - keep it to restore "
+                            f"your passwords into {BROWSER_NAME}. A CSV file can be imported by other browsers and password "
+                            "managers, but anyone who gets the file can read every password in it.",
+                            ok="Continue", width=480)
+        choice = QComboBox()
+        choice.addItem("Encrypted backup (.sqpw) - recommended", "backup")
+        choice.addItem("CSV file for another password manager (not encrypted)", "csv")
+        sheet.add_widget(choice)
+        if not window.run_dialog(sheet):
+            return
+        kind = choice.currentData()
+        stamp = time.strftime("%Y-%m-%d")
+        if kind == "backup":
+            answer = window.ask_secret("Protect the Backup", "Choose a password for this backup (at least "
+                                       f"{MIN_MASTER_LENGTH} characters). You'll need it to restore.", confirm=True)
+            if answer is None:
+                return
+            path = window.ask_export_path(f"{BROWSER_NAME} passwords {stamp}{EXPORT_SUFFIX}")
+            if not path:
+                return
+        else:
+            path = window.ask_export_path(f"{BROWSER_NAME} passwords {stamp}.csv")
+            if not path:
+                return
+        try:
+            n = vault.export_encrypted(path, answer[0]) if kind == "backup" else vault.export_csv(path)
+        except (VaultError, OSError) as e:
+            window.run_dialog(SheetDialog(window, "Your passwords weren't exported",
+                                          getattr(e, "strerror", None) or str(e), cancel=None))
+            return
+        self.status.setText(f"Exported {n} passwords to {os.path.basename(path)}.")
+
+    def change_master(self) -> None:
+        window = self.window_
+        vault = self.manager.vault
+        old = window.ask_secret("Change Master Password", "Enter your current master password.",
+                                check=lambda pw: "" if vault.confirm(pw) else "That master password isn't right.")
+        if old is None:
+            return
+        new = window.ask_secret("Change Master Password", f"Choose a new master password (at least {MIN_MASTER_LENGTH} "
+                                "characters). If you forget it, your passwords can't be recovered.", confirm=True)
+        if new is None:
+            return
+        try:
+            self.manager.vault.change_master(old[0], new[0])
+            self.status.setText("Master password changed.")
+        except VaultError as e:
+            window.run_dialog(SheetDialog(window, "The master password wasn't changed", str(e), cancel=None))
+
+    def _toggle_icloud(self, on: bool) -> None:
+        icloud = self.manager.icloud
+        if on:
+            icloud.set_enabled(True)
+            self.window_.connect_icloud()
+        else:
+            icloud.set_enabled(False)
+        self.refresh()
+
+    def _toggle_windows_unlock(self, on: bool) -> None:
+        vault = self.manager.vault
+        if on and not self.window_.ensure_passwords_confirmed("Enter your master password to turn this on."):
+            self.refresh()
+            return
+        try:
+            vault.set_windows_unlock(on)
+        except VaultError as e:
+            self.status.setText(str(e))
+        self.refresh()
+
+    # -- drag and drop import ---------------------------------------------------------------------
+    def _dropped_file(self, event) -> str | None:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if len(urls) == 1 and urls[0].isLocalFile():
+            path = urls[0].toLocalFile()
+            if path.lower().endswith((".csv", EXPORT_SUFFIX)):
+                return path
+        return None
+
+    def dragEnterEvent(self, event) -> None:
+        if self.manager.available() and self._dropped_file(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        path = self._dropped_file(event)
+        if path:
+            event.acceptProposedAction()
+            QTimer.singleShot(0, lambda: self.import_file(path))
+
+    def done(self, result: int) -> None:
+        for source in (self.manager.changed, self.manager.icloud.changed):
+            try:
+                source.disconnect(self.refresh)
+            except (RuntimeError, TypeError):
+                pass
+        self.password_edit.clear()
+        super().done(result)
+
+    def setVisible(self, visible: bool) -> None:
+        if visible and not self.isVisible():
+            place_sheet(self, self.window_)
+        super().setVisible(visible)
+
+
+class SuggestionPanel(QWidget):
+    """Login suggestions under the field you clicked: your saved logins for the site and,
+    on sign-up forms, a strong password. It never takes the keyboard from the page - the
+    page's arrow keys, Enter and Escape move through it (see PASSWORD_SCRIPT)."""
+
+    chosen = Signal(int)
+    MARGIN = 8
+    ROW = 42
+    WIDTH = 300
+
+    def __init__(self, parent: QWidget, card: bool = True) -> None:
+        super().__init__(parent)
+        self.card = card                     # False: inside another card (the command bar)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme = LIGHT_THEME
+        self.icons: IconFactory | None = None
+        self.items: list[dict] = []          # {"title", "subtitle", "glyph", "action": (kind, value)}
+        self.current = -1
+        self.context: dict = {}              # the view and field these suggestions are for
+        self.hide()
+
+    def set_items(self, items: list[dict], icons: IconFactory, theme: dict) -> None:
+        self.items, self.icons, self.theme, self.current = items, icons, theme, -1
+        m = self.MARGIN
+        self.setFixedSize(self.WIDTH + 2 * m, len(items) * self.ROW + 2 * m + 8)
+        self.update()
+
+    def row_at(self, pos) -> int:
+        y = pos.y() - self.MARGIN - 4
+        row = int(y // self.ROW) if y >= 0 else -1
+        return row if 0 <= row < len(self.items) and self.MARGIN <= pos.x() <= self.width() - self.MARGIN else -1
+
+    def move_selection(self, step: int) -> None:
+        if self.items:
+            self.current = (self.current + step) % len(self.items) if self.current >= 0 else (0 if step > 0 else len(self.items) - 1)
+            self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        row = self.row_at(event.position().toPoint())
+        if row != self.current:
+            self.current = row
+            self.update()
+
+    def leaveEvent(self, event) -> None:
+        self.current = -1
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        row = self.row_at(event.position().toPoint())
+        event.accept()
+        if row >= 0:
+            self.chosen.emit(row)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        m = self.MARGIN
+        if self.card:
+            paint_floating_card(p, QRectF(self.rect()).adjusted(m, m, -m, -m), self.theme, radius=10.0)
+        title_font = QFont(self.font())
+        title_font.setWeight(QFont.Weight.DemiBold)
+        sub_font = QFont(self.font())
+        sub_font.setPointSizeF(max(7.0, self.font().pointSizeF() - 0.6))
+        for i, item in enumerate(self.items):
+            row = QRectF(m + 4, m + 4 + i * self.ROW, self.width() - 2 * m - 8, self.ROW)
+            text_color, sub_color, glyph_color = self.theme["text"], self.theme["text_secondary"], self.theme["accent"]
+            if i == self.current:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(qc(self.theme["accent"]))
+                p.drawRoundedRect(row.adjusted(0, 1, 0, -1), 7, 7)
+                text_color = sub_color = glyph_color = "#FFFFFF"
+            if item.get("qicon") is not None:
+                item["qicon"].paint(p, QRect(int(row.left() + 11), int(row.center().y() - 8), 16, 16))
+            elif self.icons is not None:
+                self.icons.icon(item["glyph"], glyph_color).paint(p, QRect(int(row.left() + 10), int(row.center().y() - 9), 18, 18))
+            left = row.left() + 38
+            width = row.width() - 46
+            p.setPen(qc(text_color))
+            p.setFont(title_font)
+            title = QFontMetricsF(title_font).elidedText(item["title"], Qt.TextElideMode.ElideRight, width)
+            if item.get("subtitle"):
+                p.drawText(QRectF(left, row.top() + 4, width, row.height() / 2 - 2),
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom), title)
+                p.setPen(qc(sub_color))
+                p.setFont(sub_font)
+                sub = QFontMetricsF(sub_font).elidedText(item["subtitle"], Qt.TextElideMode.ElideRight, width)
+                p.drawText(QRectF(left, row.center().y() + 1, width, row.height() / 2 - 4),
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), sub)
+            else:
+                p.drawText(QRectF(left, row.top(), width, row.height()),
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), title)
+        p.end()
+
+
+class _Sheet(QDialog):
+    """A sheet in Huginn's style: frameless card, title, optional message, content, buttons."""
+
+    def __init__(self, window: QWidget, title: str, message: str = "", width: int = 520,
+                 ok: str | None = "Done", cancel: str | None = None) -> None:
+        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("Sheet")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(width)
+        self.outer = QVBoxLayout(self)
+        self.outer.setContentsMargins(22, 20, 22, 18)
+        self.outer.setSpacing(10)
+        head = QLabel(title)
+        head.setObjectName("SheetTitle")
+        self.outer.addWidget(head)
+        if message:
+            text = QLabel(message)
+            text.setObjectName("SheetMessage")
+            text.setWordWrap(True)
+            self.outer.addWidget(text)
+        self.body = QVBoxLayout()
+        self.body.setSpacing(8)
+        self.outer.addLayout(self.body)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        if cancel:
+            c = QPushButton(cancel)
+            c.setObjectName("SecondaryButton")
+            c.clicked.connect(self.reject)
+            row.addWidget(c)
+        if ok:
+            o = QPushButton(ok)
+            o.setObjectName("PrimaryButton")
+            o.setDefault(True)
+            o.clicked.connect(self.accept)
+            row.addWidget(o)
+        self.outer.addLayout(row)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
+
+class _TrailingTextDelegate(QStyledItemDelegate):
+    """List rows with a quiet note on the right (Valhalla's times)."""
+    ROLE = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, colour, parent=None) -> None:
+        super().__init__(parent)
+        self.colour = colour                          # () -> colour string, so it follows the theme
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        note = index.data(self.ROLE)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        if note:
+            fm = opt.fontMetrics
+            room = opt.rect.width() - fm.horizontalAdvance(note) - opt.decorationSize.width() - 48
+            opt.text = fm.elidedText(opt.text, Qt.TextElideMode.ElideRight, max(40, room))
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        if note:
+            painter.save()
+            painter.setPen(qc(self.colour()))
+            painter.setFont(opt.font)
+            painter.drawText(opt.rect.adjusted(0, 0, -12, 0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, note)
+            painter.restore()
+
+
+class ValhallaSheet(_Sheet):
+    """Valhalla: every tab closed this past week, by day. Click one to bring it back."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window, "Valhalla", "Tabs you closed in the past week. Click one to bring it back.",
+                         width=560)
+        self.window_ = window
+        self.search = QLineEdit()
+        self.search.setObjectName("SidebarSearch")
+        self.search.setPlaceholderText("Search closed tabs")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda *_: self.refresh())
+        self.body.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.setObjectName("SidebarList")
+        self.list.setFrameShape(QFrame.Shape.NoFrame)
+        self.list.setIconSize(QSize(16, 16))
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setItemDelegate(_TrailingTextDelegate(lambda: window.theme["text_secondary"], self.list))
+        self.list.itemClicked.connect(self._clicked)
+        self.body.addWidget(self.list)
+        self.empty = QLabel("Nothing here - tabs you close will rest here for a week.")
+        self.empty.setObjectName("EmptyLabel")
+        self.body.addWidget(self.empty)
+
+    def refresh(self) -> None:
+        w = self.window_
+        self.list.clear()
+        query = self.search.text().strip()
+        today = time.localtime()
+        heading = None
+        shown = 0
+        for entry in w.store.closed_tabs:
+            if query and not match_score(query, entry.get("title", ""), entry["url"]):
+                continue
+            t = time.localtime(entry["time"])
+            days = (datetime.date(today.tm_year, today.tm_mon, today.tm_mday)
+                    - datetime.date(t.tm_year, t.tm_mon, t.tm_mday)).days
+            label = "Today" if days == 0 else "Yesterday" if days == 1 else time.strftime("%A", t)
+            if label != heading:
+                heading = label
+                head = QListWidgetItem(label.upper())
+                head.setFlags(Qt.ItemFlag.NoItemFlags)
+                font = QFont(self.list.font())
+                font.setPointSizeF(max(7.0, font.pointSizeF() - 1.5))
+                font.setWeight(QFont.Weight.DemiBold)
+                head.setFont(font)
+                head.setForeground(qc(w.theme["text_secondary"]))
+                self.list.addItem(head)
+            item = QListWidgetItem(w._favicon_for(entry["url"]), entry.get("title") or entry["url"])
+            item.setData(_TrailingTextDelegate.ROLE, time.strftime("%H:%M", t))
+            item.setToolTip(entry["url"])
+            item.setData(Qt.ItemDataRole.UserRole, (entry["url"], entry["time"]))
+            self.list.addItem(item)
+            shown += 1
+        self.empty.setVisible(not shown)
+        self.list.setVisible(bool(shown))
+        rows = sum(self.list.sizeHintForRow(i) for i in range(self.list.count()))
+        self.list.setFixedHeight(max(120, min(380, rows + 6)))     # fits a short list, scrolls a long one
+        self.adjustSize()
+
+    def _clicked(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data:
+            self.window_.restore_from_valhalla(*data)
+            self.refresh()
+
+
+class SiteStyleSheet(_Sheet):
+    """Page menu > Site Style...: ready-made tweaks for this site, and your own CSS."""
+
+    def __init__(self, window: "BrowserWindow", site: str) -> None:
+        super().__init__(window, f"Site Style for {site}",
+                         "Changes how this site looks, every time you visit. Turn a style off to undo it.",
+                         width=540, ok="Save", cancel="Cancel")
+        self.site = site
+        saved = window.site_styles().get(site, {})
+        self.switches: dict[str, QCheckBox] = {}
+        group = QFrame()
+        group.setObjectName("SettingsGroup")
+        g = QVBoxLayout(group)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setSpacing(0)
+        options = [(k, v) for k, v in SITE_STYLES.items() if v[0] != "*" and (site == v[0] or site.endswith("." + v[0]))]
+        options += [(k, v) for k, v in SITE_STYLES.items() if v[0] == "*"]
+        for n, (key, (_site, name, _css)) in enumerate(options):
+            if n:
+                line = QFrame()
+                line.setObjectName("RowDivider")
+                g.addWidget(line)
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(12, 8, 12, 8)
+            label = QLabel(name)
+            label.setObjectName("RowTitle")
+            h.addWidget(label, 1)
+            switch = Switch()
+            switch.setChecked(key in saved.get("on", []))
+            h.addWidget(switch)
+            g.addWidget(row)
+            self.switches[key] = switch
+        self.body.addWidget(group)
+        title = QLabel("Your own CSS for this site")
+        title.setObjectName("RowTitle")
+        self.body.addWidget(title)
+        self.editor = QPlainTextEdit(saved.get("css", ""))
+        self.editor.setObjectName("CssEditor")
+        self.editor.setPlaceholderText("/* e.g. */\n.sidebar { display: none !important; }")
+        self.editor.setFixedHeight(120)
+        self.body.addWidget(self.editor)
+
+    def chosen(self) -> list[str]:
+        return [k for k, s in self.switches.items() if s.isChecked()]
+
+
+class FocusSheet(_Sheet):
+    """Settings > Focus Hours...: which sites rest, and when."""
+
+    DAYS = ("M", "T", "W", "T", "F", "S", "S")
+
+    def __init__(self, window: "BrowserWindow", config: dict) -> None:
+        super().__init__(window, "Focus Hours",
+                         "During these hours the sites below show a calm “Not now” page instead "
+                         "(you can still open one for 5 minutes).", width=520, ok="Save", cancel="Cancel")
+        row = QHBoxLayout()
+        label = QLabel("Focus Hours")
+        label.setObjectName("RowTitle")
+        row.addWidget(label, 1)
+        self.on = Switch()
+        self.on.setChecked(bool(config.get("on")))
+        row.addWidget(self.on)
+        self.body.addLayout(row)
+        self.sites = QLineEdit(", ".join(config.get("sites", [])))
+        self.sites.setObjectName("SheetInput")
+        self.sites.setPlaceholderText("Sites, e.g. reddit.com, x.com, youtube.com")
+        self.body.addWidget(self.sites)
+        days = QHBoxLayout()
+        days.setSpacing(4)
+        self.day_buttons = []
+        for i, letter in enumerate(self.DAYS):
+            b = QPushButton(letter)
+            b.setObjectName("Segment")
+            b.setCheckable(True)
+            b.setChecked(i in config.get("days", []))
+            b.setFixedSize(34, 28)
+            b.setToolTip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")[i])
+            days.addWidget(b)
+            self.day_buttons.append(b)
+        days.addStretch(1)
+        self.start = QTimeEdit(QTime.fromString(config.get("start", "09:00"), "HH:mm"))
+        self.end = QTimeEdit(QTime.fromString(config.get("end", "17:00"), "HH:mm"))
+        for t in (self.start, self.end):
+            t.setDisplayFormat("HH:mm")
+            t.setObjectName("SheetInput")
+            t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            t.setMinimumWidth(84)
+        days.addWidget(self.start)
+        dash = QLabel("to")
+        dash.setObjectName("RowSubtitle")
+        days.addWidget(dash)
+        days.addWidget(self.end)
+        self.body.addLayout(days)
+
+    def config(self) -> dict:
+        sites = [s.strip().lower() for s in re.split(r"[,\s]+", self.sites.text()) if s.strip()]
+        return {"on": self.on.isChecked(), "sites": sites[:50],
+                "days": [i for i, b in enumerate(self.day_buttons) if b.isChecked()],
+                "start": self.start.time().toString("HH:mm"), "end": self.end.time().toString("HH:mm")}
+
+
+# --------------------------------------------------------------------------------------
+# Weather on the Start Page. Forecasts come from Open-Meteo (free for non-commercial use, no
+# account or key; data CC BY 4.0). Nothing is asked for until you pick a city, and then only
+# that city's position, rounded to about 1 km. The card speaks Old Norse like the greeting:
+# the sky's Old Norse word sits above it in runes, and in Old Norse mode it says the word.
+# --------------------------------------------------------------------------------------
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_LINKS = ("weather", "weather-off", "weather-refresh")      # safariqt: links on the weather card
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+WEATHER_REFRESH_S = 30 * 60          # a forecast is fresh for half an hour
+WEATHER_STALE_S = 6 * 3600           # older than this, it isn't shown as "now"
+WEATHER_CREDIT = "Weather data by Open-Meteo.com (CC BY 4.0)"
+
+# WMO weather code -> (icon, English, Old Norse, what the Old Norse means). Night swaps sun
+# for moon. The Old Norse is the plain word for what's in the sky, for decoration.
+_WMO = {
+    0: ("sun", "Clear", "Sól", "the sun"),
+    1: ("sun", "Mostly Clear", "Sól", "the sun"),
+    2: ("partly", "Partly Cloudy", "Sól ok ský", "sun and clouds"),
+    3: ("cloud", "Overcast", "Ský", "clouds"),
+    45: ("fog", "Fog", "Þoka", "fog"), 48: ("fog", "Freezing Fog", "Hrím", "rime"),
+    51: ("drizzle", "Light Drizzle", "Lítit regn", "a little rain"),
+    53: ("drizzle", "Drizzle", "Lítit regn", "a little rain"),
+    55: ("drizzle", "Heavy Drizzle", "Regn", "rain"),
+    56: ("sleet", "Freezing Drizzle", "Hrím", "rime"), 57: ("sleet", "Freezing Drizzle", "Hrím", "rime"),
+    61: ("rain", "Light Rain", "Regn", "rain"), 63: ("rain", "Rain", "Regn", "rain"),
+    65: ("rain", "Heavy Rain", "Regn", "rain"),
+    66: ("sleet", "Freezing Rain", "Hrím", "rime"), 67: ("sleet", "Freezing Rain", "Hrím", "rime"),
+    71: ("snow", "Light Snow", "Snjór", "snow"), 73: ("snow", "Snow", "Snjór", "snow"),
+    75: ("snow", "Heavy Snow", "Snjór", "snow"), 77: ("snow", "Snow Grains", "Snjór", "snow"),
+    80: ("rain", "Showers", "Skúr", "a shower"), 81: ("rain", "Showers", "Skúr", "a shower"),
+    82: ("rain", "Heavy Showers", "Skúr", "a shower"),
+    85: ("snow", "Snow Showers", "Snjór", "snow"), 86: ("snow", "Heavy Snow Showers", "Snjór", "snow"),
+    95: ("thunder", "Thunderstorm", "Þruma", "thunder"),
+    96: ("hail", "Thunderstorm with Hail", "Hagl", "hail"), 99: ("hail", "Thunderstorm with Hail", "Hagl", "hail"),
+}
+
+
+def weather_kind(code, is_day: bool = True) -> tuple[str, str, str, str]:
+    """(icon, English, Old Norse, meaning) for a WMO weather code."""
+    try:
+        icon, english, norse, meaning = _WMO.get(int(code), ("cloud", "Cloudy", "Ský", "clouds"))
+    except (TypeError, ValueError):
+        icon, english, norse, meaning = ("cloud", "Cloudy", "Ský", "clouds")
+    if not is_day:
+        if icon == "sun":
+            icon, norse, meaning = "moon", "Máni", "the moon"
+        elif icon == "partly":
+            icon, norse, meaning = "partly_night", "Máni ok ský", "moon and clouds"
+    return icon, english, norse, meaning
+
+
+def default_weather_units() -> str:
+    return "f" if QLocale().measurementSystem() == QLocale.MeasurementSystem.ImperialUSSystem else "c"
+
+
+def weather_url(lat: float, lon: float) -> str:
+    """Always metric (units are converted for display), position rounded to ~1 km."""
+    query = QUrlQuery()
+    for key, value in (("latitude", f"{round(float(lat), 2):.2f}"), ("longitude", f"{round(float(lon), 2):.2f}"),
+                       ("current", "temperature_2m,apparent_temperature,is_day,weather_code,wind_speed_10m"),
+                       ("daily", "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"),
+                       ("timezone", "auto"), ("forecast_days", "4")):
+        query.addQueryItem(key, value)
+    url = QUrl(WEATHER_URL)
+    url.setQuery(query)
+    return url.toString(QUrl.ComponentFormattingOption.FullyEncoded)
+
+
+def geocode_url(text: str) -> str:
+    query = QUrlQuery()
+    for key, value in (("name", text.strip()[:80]), ("count", "8"), ("language", "en"), ("format", "json")):
+        query.addQueryItem(key, value)
+    url = QUrl(GEOCODE_URL)
+    url.setQuery(query)
+    return url.toString(QUrl.ComponentFormattingOption.FullyEncoded)
+
+
+def parse_forecast(data) -> dict | None:
+    """Open-Meteo's answer -> what the card needs, or None if it isn't usable."""
+    try:
+        now = data["current"]
+        daily = data["daily"]
+        days = []
+        for i, date in enumerate(daily["time"][:4]):
+            days.append({"date": str(date), "code": int(daily["weather_code"][i]),
+                         "max": float(daily["temperature_2m_max"][i]), "min": float(daily["temperature_2m_min"][i]),
+                         "sunrise": str(daily["sunrise"][i])[-5:], "sunset": str(daily["sunset"][i])[-5:]})
+        if not days:
+            return None
+        return {"time": str(now.get("time", "")), "temp": float(now["temperature_2m"]),
+                "feels": float(now.get("apparent_temperature", now["temperature_2m"])),
+                "code": int(now["weather_code"]), "day": bool(now.get("is_day", 1)),
+                "wind": float(now.get("wind_speed_10m", 0.0)), "days": days}
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
+def parse_places(data) -> list[dict]:
+    places = []
+    for r in (data or {}).get("results", []) or []:
+        try:
+            places.append({"name": str(r["name"]), "region": str(r.get("admin1") or ""),
+                           "country": str(r.get("country") or r.get("country_code") or ""),
+                           "lat": round(float(r["latitude"]), 2), "lon": round(float(r["longitude"]), 2)})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return places
+
+
+def place_label(place: dict, long: bool = False) -> str:
+    parts = [place.get("name", "")]
+    if long:
+        parts += [place.get("region", ""), place.get("country", "")]
+    return ", ".join(p for p in parts if p)
+
+
+def _temp(celsius: float, units: str) -> str:
+    value = celsius * 9 / 5 + 32 if units == "f" else celsius
+    return f"{round(value)}°"
+
+
+def _clock(hhmm: str) -> str:
+    t = QTime.fromString(hhmm, "HH:mm")
+    return QLocale().toString(t, QLocale.FormatType.ShortFormat) if t.isValid() else hhmm
+
+
+# -- icons: little animated skies, drawn in SVG (64 x 64), coloured by the card's variables
+WEATHER_DEFS = (
+    '<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>'
+    '<radialGradient id="wxSun" cx="40%" cy="38%" r="70%"><stop offset="0" stop-color="#FFE59A"/>'
+    '<stop offset="1" stop-color="#F5A524"/></radialGradient>'
+    '<linearGradient id="wxMoon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--moon-a)"/>'
+    '<stop offset="1" style="stop-color:var(--moon-b)"/></linearGradient>'
+    '<linearGradient id="wxCloud" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--cloud-a)"/>'
+    '<stop offset="1" style="stop-color:var(--cloud-b)"/></linearGradient>'
+    '<linearGradient id="wxStorm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--storm-a)"/>'
+    '<stop offset="1" style="stop-color:var(--storm-b)"/></linearGradient>'
+    '</defs></svg>')
+_CLOUD_PATH = "M18 48 H46 A10.5 10.5 0 0 0 45.2 27 A14.5 14.5 0 0 0 17.6 30.4 A8.8 8.8 0 0 0 18 48 Z"
+
+
+def _sun(cx: float, cy: float, r: float) -> str:
+    rays = []
+    for i in range(8):
+        a = math.radians(i * 45)
+        x1, y1 = cx + math.cos(a) * (r + 4.5), cy + math.sin(a) * (r + 4.5)
+        x2, y2 = cx + math.cos(a) * (r + 9), cy + math.sin(a) * (r + 9)
+        rays.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}"/>')
+    return (f'<g class="rays" style="transform-origin:{cx}px {cy}px" stroke="#F5B83D" stroke-width="2.6" '
+            f'stroke-linecap="round">{"".join(rays)}</g><circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#wxSun)"/>')
+
+
+def _moon(cx: float, cy: float, r: float, uid: str) -> str:
+    return (f'<mask id="{uid}"><rect width="64" height="64" fill="#fff"/>'
+            f'<circle cx="{cx + r * 0.55:.1f}" cy="{cy - r * 0.42:.1f}" r="{r * 0.86:.1f}" fill="#000"/></mask>'
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#wxMoon)" mask="url(#{uid})"/>')
+
+
+def _cloud(dx: float = 0, dy: float = 0, scale: float = 1.0, storm: bool = False, back: bool = False) -> str:
+    fill = "url(#wxStorm)" if storm else "url(#wxCloud)"
+    style = ' opacity=".75"' if back else ""
+    return (f'<g class="drift{" slow" if back else ""}"><path transform="translate({dx} {dy}) scale({scale})" '
+            f'fill="{fill}" stroke="var(--cloud-edge)" stroke-width="1"{style} d="{_CLOUD_PATH}"/></g>')
+
+
+def weather_svg(icon: str, size: int = 64, still: bool = False, uid: str = "wxm") -> str:
+    parts = []
+    if icon == "sun":
+        parts.append(_sun(32, 32, 11.5))
+    elif icon == "moon":
+        parts.append(_moon(30, 33, 14, uid))
+        parts.append('<path class="twinkle" fill="var(--star)" d="M48 14 l1.2 3 3 1.2 -3 1.2 -1.2 3 -1.2 -3 -3 -1.2 3 -1.2Z"/>')
+        parts.append('<path class="twinkle late" fill="var(--star)" d="M53 30 l.8 2 2 .8 -2 .8 -.8 2 -.8 -2 -2 -.8 2 -.8Z"/>')
+    elif icon in ("partly", "partly_night"):
+        parts.append(_sun(24, 23, 8.5) if icon == "partly" else _moon(23, 24, 10, uid))
+        parts.append(_cloud(6, 7, 0.9))
+    elif icon == "cloud":
+        parts.append(_cloud(-7, -9, 0.82, back=True))
+        parts.append(_cloud(4, 4, 0.9))
+    elif icon == "fog":
+        parts.append(_cloud(0, -8))
+        parts.append('<g stroke="var(--fog)" stroke-width="3" stroke-linecap="round">'
+                     '<line class="mist" x1="14" y1="47" x2="44" y2="47"/>'
+                     '<line class="mist late" x1="20" y1="53" x2="50" y2="53"/>'
+                     '<line class="mist" x1="12" y1="59" x2="38" y2="59"/></g>')
+    else:                                                    # something falls from a cloud
+        storm = icon in ("thunder", "hail")
+        falling = []
+        if icon in ("rain", "drizzle", "thunder"):
+            xs = (25, 39) if icon in ("drizzle", "thunder") else (22, 32, 42)
+            for i, x in enumerate(xs):
+                falling.append(f'<line class="drop d{i}" x1="{x}" y1="47" x2="{x - 2.4}" y2="53.5"/>')
+            falling = [f'<g stroke="var(--rain)" stroke-width="2.4" stroke-linecap="round">{"".join(falling)}</g>']
+        if icon in ("snow", "sleet", "hail"):
+            xs = (22, 33, 43) if icon != "sleet" else (37,)
+            r = 2.2 if icon != "hail" else 1.9
+            for i, x in enumerate(xs):
+                falling.append(f'<circle class="{"hailstone" if icon == "hail" else "flake"} d{i}" cx="{x}" cy="50" '
+                               f'r="{r}" fill="var(--snow)"/>')
+            if icon == "sleet":
+                falling.append('<line class="drop d1" x1="26" y1="47" x2="23.6" y2="53.5" stroke="var(--rain)" '
+                               'stroke-width="2.4" stroke-linecap="round"/>')
+        parts.append("".join(falling))
+        parts.append(_cloud(0, -8, storm=storm))
+        if icon == "thunder":
+            parts.append('<path class="bolt" fill="#F5B83D" d="M34 38 L27.5 48.5 H32.5 L29.5 57 L38.5 45.5 H33.5 L36.5 38 Z"/>')
+    cls = "wx-icon" + (" still" if still else "")
+    return (f'<svg class="{cls}" width="{size}" height="{size}" viewBox="0 0 64 64" aria-hidden="true">'
+            f'{"".join(parts)}</svg>')
+
+
+def _weather_hide() -> str:
+    """The card's × (shown on hover): takes the weather off the Start Page."""
+    return (f'<a class="wx-hide" href="{START_SCHEME}:weather-off" title="Remove weather from the Start Page '
+            f'(page menu > Settings > Start Page > Weather brings it back)" aria-label="Remove weather">'
+            f'<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2 L8 8 M8 2 L2 8" '
+            f'stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></a>')
+
+
+def weather_card_vars(theme: dict) -> str:
+    if theme["dark"]:
+        values = {"cloud-a": "#EEF2F8", "cloud-b": "#B7C3D3", "cloud-edge": "rgba(255,255,255,.18)",
+                  "storm-a": "#9AA6B6", "storm-b": "#5E6A7B", "rain": theme["accent"], "snow": "#EEF5FF",
+                  "fog": "rgba(220,228,238,.55)", "star": "#FFE7A3", "moon-a": "#F4F7FC", "moon-b": "#C3CEE0"}
+    else:
+        values = {"cloud-a": "#FFFFFF", "cloud-b": "#C9D3DF", "cloud-edge": "rgba(30,50,70,.24)",
+                  "storm-a": "#B3BDCA", "storm-b": "#6F7C8D", "rain": theme["accent"], "snow": "#9FB9D6",
+                  "fog": "rgba(90,104,120,.45)", "star": "#E8B33A", "moon-a": "#E3E9F3", "moon-b": "#97A8C4"}
+    return ";".join(f"--{k}:{v}" for k, v in values.items())
+
+
+def render_weather(weather: dict | None, theme: dict, norse: bool = False, now: float | None = None) -> str:
+    """The Start Page's weather card ("" when it's turned off)."""
+    if not weather or not weather.get("on"):
+        return ""
+    style = weather_card_vars(theme)
+    place = weather.get("place")
+    edit = f'{START_SCHEME}:weather'
+    if not place:
+        return (f'<aside class="wx wx-setup" style="{style}">{WEATHER_DEFS}<div class="wx-top">'
+                f'{weather_svg("partly", 48, still=True)}<div class="wx-now"><div class="wx-cond"><b>Weather</b></div>'
+                f'<div class="wx-sub">See the sky where you are.</div></div></div>'
+                f'<div class="wx-meta"><a class="wx-link" href="{edit}">Add your city…</a>'
+                f'<a class="wx-link quiet" href="{START_SCHEME}:weather-off" title="Turn the weather card off '
+                f'(page menu > Settings > Start Page > Weather brings it back)">Hide</a></div></aside>')
+    forecast = weather.get("forecast")
+    fetched = float(weather.get("time") or 0)
+    now = time.time() if now is None else now
+    city = html.escape(place_label(place))
+    city_title = html.escape(f"{place_label(place, long=True)} — change city or units", quote=True)
+    if not forecast or now - fetched > WEATHER_STALE_S:
+        if weather.get("loading"):
+            text = f"Checking the skies over {city}…"
+        else:
+            text = (f"Couldn't reach the weather service. "
+                    f'<a class="wx-link" href="{START_SCHEME}:weather-refresh">Try again</a>')
+        return (f'<aside class="wx" style="{style}">{WEATHER_DEFS}{_weather_hide()}<div class="wx-top">'
+                f'{weather_svg("cloud", 48, still=True)}<div class="wx-now"><div class="wx-sub">{text}</div></div></div>'
+                f'<div class="wx-meta"><a class="wx-city" href="{edit}" title="{city_title}">{city}</a></div></aside>')
+    units = weather.get("units") or "c"
+    icon, english, old_norse, meaning = weather_kind(forecast["code"], forecast["day"])
+    shown, hover = (old_norse, english) if norse else (english, f"Old Norse: {old_norse} — {meaning}")
+    today = forecast["days"][0]
+    local_now = forecast.get("time", "")[-5:]
+    if forecast["day"]:
+        sky = f"Sunset {_clock(today['sunset'])}"
+    else:
+        rise = today["sunrise"] if local_now and local_now < today["sunrise"] else (
+            forecast["days"][1]["sunrise"] if len(forecast["days"]) > 1 else today["sunrise"])
+        sky = f"Sunrise {_clock(rise)}"
+    wind = forecast["wind"] * (0.621371 if units == "f" else 1)
+    detail = html.escape(f"Feels like {_temp(forecast['feels'], units)} · wind {round(wind)} "
+                         f"{'mph' if units == 'f' else 'km/h'}\nUpdated {time.strftime('%H:%M', time.localtime(fetched))}"
+                         f" · {WEATHER_CREDIT}", quote=True)
+    days = []
+    for n, day in enumerate(forecast["days"][1:4]):
+        d_icon, d_english, d_norse, _ = weather_kind(day["code"], True)
+        try:
+            y, m, dd = (int(x) for x in day["date"].split("-"))
+            wday = datetime.date(y, m, dd).weekday()
+            name, norse_name = NORSE_DAYS[wday][0][:3], NORSE_DAYS[wday][1]
+        except (ValueError, IndexError):
+            name, norse_name = day["date"][-5:], ""
+        tip = html.escape(f"{NORSE_DAYS[wday][0] if norse_name else name}: {d_english} "
+                          f"({d_norse}) · {_temp(day['max'], units)} / {_temp(day['min'], units)}"
+                          + (f" · {norse_name}" if norse_name else ""), quote=True)
+        days.append(f'<div class="wx-day" title="{tip}"><span>{name}</span>{weather_svg(d_icon, 28, still=True)}'
+                    f'<span><b>{_temp(day["max"], units)}</b> <i>{_temp(day["min"], units)}</i></span></div>')
+    return (f'<aside class="wx" style="{style}" title="{detail}">{WEATHER_DEFS}{_weather_hide()}'
+            f'<div class="runes wx-runes" title="{html.escape(old_norse + " — " + meaning, quote=True)}">'
+            f'{to_runes(old_norse)}</div>'
+            f'<div class="wx-top">{weather_svg(icon, 60)}'
+            f'<div class="wx-now"><div class="wx-temp">{_temp(forecast["temp"], units)}</div>'
+            f'<div class="wx-cond" title="{html.escape(hover, quote=True)}">{html.escape(shown)}</div></div>'
+            f'<div class="wx-hl"><span title="High">↑ {_temp(today["max"], units)}</span>'
+            f'<span title="Low">↓ {_temp(today["min"], units)}</span></div></div>'
+            f'<div class="wx-meta"><a class="wx-city" href="{edit}" title="{city_title}">{city}</a>'
+            f'<span>{sky}</span></div>'
+            f'<div class="wx-days">{"".join(days)}</div></aside>')
+
+
+
+
+class WeatherService(QObject):
+    """Fetches the forecast for your city (only once you've picked one), keeps the last one,
+    and says when it changed. fetch_json is the one place that touches the network."""
+
+    changed = Signal()
+
+    def __init__(self, settings: QSettings, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.loading = False
+        self.error = False
+        self._net: QNetworkAccessManager | None = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(10 * 60 * 1000)
+        self._timer.timeout.connect(lambda: self.refresh())
+        self._timer.start()
+
+    # -- settings
+    def enabled(self) -> bool:
+        return self.settings.value("weatherOn", True, type=bool)
+
+    def place(self) -> dict | None:
+        try:
+            place = json.loads(str(self.settings.value("weatherPlace", "") or "null"))
+        except ValueError:
+            return None
+        return place if isinstance(place, dict) and "lat" in place and "lon" in place else None
+
+    def units(self) -> str:
+        units = str(self.settings.value("weatherUnits", "") or "")
+        return units if units in ("c", "f") else default_weather_units()
+
+    def set_enabled(self, on: bool) -> None:
+        self.settings.setValue("weatherOn", bool(on))
+        if on:
+            self.refresh()
+        self.changed.emit()
+
+    def set_place(self, place: dict | None, units: str | None = None) -> None:
+        old = self.place()
+        if units in ("c", "f"):
+            self.settings.setValue("weatherUnits", units)
+        self.settings.setValue("weatherPlace", json.dumps(place) if place else "")
+        if place and (not old or (old["lat"], old["lon"]) != (place["lat"], place["lon"])):
+            self.settings.remove("weatherCache")
+            self.refresh(force=True)
+        self.changed.emit()
+
+    # -- the forecast
+    def cached(self) -> dict | None:
+        try:
+            cache = json.loads(str(self.settings.value("weatherCache", "") or "null"))
+        except ValueError:
+            return None
+        place = self.place()
+        if not isinstance(cache, dict) or not place or (cache.get("lat"), cache.get("lon")) != (place["lat"], place["lon"]):
+            return None
+        return cache
+
+    def snapshot(self) -> dict:
+        """What the Start Page shows."""
+        cache = self.cached() or {}
+        return {"on": self.enabled(), "place": self.place(), "units": self.units(), "forecast": cache.get("forecast"),
+                "time": cache.get("time", 0), "loading": self.loading, "error": self.error}
+
+    def refresh(self, force: bool = False) -> None:
+        place = self.place()
+        if not self.enabled() or place is None or self.loading:
+            return
+        cache = self.cached()
+        if cache and not force and time.time() - float(cache.get("time", 0)) < WEATHER_REFRESH_S:
+            return
+        self.loading = True
+        lat, lon = place["lat"], place["lon"]
+        self.fetch_json(weather_url(lat, lon), lambda data, lat=lat, lon=lon: self._got(lat, lon, data))
+
+    def _got(self, lat: float, lon: float, data) -> None:
+        self.loading = False
+        forecast = parse_forecast(data) if data is not None else None
+        self.error = forecast is None
+        if forecast is not None:
+            self.settings.setValue("weatherCache", json.dumps({"lat": lat, "lon": lon, "time": time.time(),
+                                                               "forecast": forecast}))
+        self.changed.emit()
+
+    def search(self, text: str, callback) -> None:
+        """Places matching what you typed -> callback(list of places; [] if none or offline)."""
+        if len(text.strip()) < 2:
+            callback([])
+            return
+        self.fetch_json(geocode_url(text), lambda data: callback(parse_places(data)))
+
+    def fetch_json(self, url: str, callback) -> None:
+        if self._net is None:
+            self._net = QNetworkAccessManager(self)
+        request = QNetworkRequest(QUrl(url))
+        request.setTransferTimeout(15000)
+        request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, BROWSER_NAME)
+        request.setAttribute(QNetworkRequest.Attribute.CookieLoadControlAttribute, QNetworkRequest.LoadControl.Manual)
+        request.setAttribute(QNetworkRequest.Attribute.CookieSaveControlAttribute, QNetworkRequest.LoadControl.Manual)
+        reply = self._net.get(request)
+
+        def done() -> None:
+            data = None
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                try:
+                    data = json.loads(bytes(reply.readAll()).decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    data = None
+            reply.deleteLater()
+            callback(data)
+
+        reply.finished.connect(done)
+
+
+class WeatherSheet(_Sheet):
+    """Settings > Weather Location...: find your city, °F or °C, on or off."""
+
+    def __init__(self, window: "BrowserWindow", service: WeatherService) -> None:
+        super().__init__(window, "Weather",
+                         "Shown on the Start Page. Huginn asks Open-Meteo.com (free, no account) for the forecast "
+                         "at your city, rounded to about 1 km - nothing about you or your browsing.",
+                         width=500, ok="Save", cancel="Cancel")
+        self.service = service
+        self.chosen = service.place()
+        row = QHBoxLayout()
+        label = QLabel("Weather on the Start Page")
+        label.setObjectName("RowTitle")
+        row.addWidget(label, 1)
+        self.on = Switch()
+        self.on.setChecked(service.enabled())
+        row.addWidget(self.on)
+        self.body.addLayout(row)
+        self.current = QLabel()
+        self.current.setObjectName("RowSubtitle")
+        self.body.addWidget(self.current)
+        search_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setObjectName("SheetInput")
+        self.search.setPlaceholderText("Search for your city")
+        self.search.setClearButtonEnabled(True)
+        self.search.returnPressed.connect(self._find)
+        search_row.addWidget(self.search, 1)
+        find = QPushButton("Find")
+        find.setObjectName("SecondaryButton")
+        find.clicked.connect(self._find)
+        search_row.addWidget(find)
+        self.body.addLayout(search_row)
+        self.results = QListWidget()
+        self.results.setObjectName("SidebarList")
+        self.results.setFrameShape(QFrame.Shape.NoFrame)
+        self.results.itemClicked.connect(self._pick)
+        self.results.hide()
+        self.body.addWidget(self.results)
+        units = QHBoxLayout()
+        units_label = QLabel("Temperature")
+        units_label.setObjectName("RowTitle")
+        units.addWidget(units_label, 1)
+        self.unit_buttons = {}
+        group = QButtonGroup(self)
+        for key, text in (("f", "°F"), ("c", "°C")):
+            b = QPushButton(text)
+            b.setObjectName("Segment")
+            b.setCheckable(True)
+            b.setFixedSize(52, 28)
+            b.setChecked(service.units() == key)
+            group.addButton(b)
+            units.addWidget(b)
+            self.unit_buttons[key] = b
+        self.body.addLayout(units)
+        credit = QLabel(WEATHER_CREDIT)
+        credit.setObjectName("RowSubtitle")
+        self.body.addWidget(credit)
+        self._show_current()
+
+    def _show_current(self) -> None:
+        self.current.setText(f"Showing: {place_label(self.chosen, long=True)}" if self.chosen
+                             else "No city yet - search for yours below.")
+
+    def _find(self) -> None:
+        text = self.search.text().strip()
+        if not text:
+            return
+        self.results.clear()
+        self.results.addItem("Searching…")
+        self.results.show()
+        self._fit()
+        self.service.search(text, self._found)
+
+    def _found(self, places: list[dict]) -> None:
+        try:
+            self.results.clear()
+        except RuntimeError:                           # the sheet was closed meanwhile
+            return
+        if not places:
+            self.results.addItem("No places found (or the weather service can't be reached)")
+        for place in places:
+            item = QListWidgetItem(place_label(place, long=True))
+            item.setData(Qt.ItemDataRole.UserRole, place)
+            self.results.addItem(item)
+        self._fit()
+
+    def _fit(self) -> None:
+        rows = sum(self.results.sizeHintForRow(i) for i in range(self.results.count()))
+        self.results.setFixedHeight(max(32, min(200, rows + 6)))
+        self.adjustSize()
+
+    def _pick(self, item: QListWidgetItem) -> None:
+        place = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(place, dict):
+            self.chosen = place
+            self._show_current()
+
+    def units(self) -> str:
+        return "c" if self.unit_buttons["c"].isChecked() else "f"
+
+
+class CommandBar(QWidget):
+    """Ctrl+K: one box to jump to any open tab, favorite, history page, Reading List
+    entry, setting or command. Type a few letters, arrows to pick, Enter to go."""
+
+    WIDTH = 620
+    MARGIN = 8
+
+    def __init__(self, parent: QWidget, provider) -> None:
+        super().__init__(parent)
+        self.provider = provider                     # text -> list of suggestion items
+        self.theme = LIGHT_THEME
+        self.icons: "IconFactory | None" = None
+        m = self.MARGIN
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(m + 10, m + 10, m + 10, m + 6)
+        layout.setSpacing(4)
+        self.field = QLineEdit()
+        self.field.setObjectName("CommandInput")
+        self.field.setPlaceholderText("Search tabs, favorites, history and commands")
+        self.field.installEventFilter(self)
+        self.field.textChanged.connect(self.refresh)
+        layout.addWidget(self.field)
+        self.list = SuggestionPanel(self, card=False)
+        self.list.WIDTH = self.WIDTH - 2 * m - 20
+        self.list.chosen.connect(self.activate)
+        self.list.show()
+        layout.addWidget(self.list)
+        self.hint = QLabel("↑ ↓ to choose · Enter to go · Esc to close")
+        self.hint.setObjectName("RowSubtitle")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(self.hint)
+        self.hide()
+
+    def open(self, theme: dict, icons: "IconFactory") -> None:
+        self.theme, self.icons = theme, icons
+        self.field.clear()
+        self.refresh("")
+        self.show()
+        self.raise_()
+        self.field.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def refresh(self, text: str = "") -> None:
+        items = self.provider(self.field.text())[:9]
+        self.list.set_items(items, self.icons, self.theme)
+        self.list.current = 0 if items else -1
+        self.list.setVisible(bool(items))
+        self.setFixedWidth(self.WIDTH)
+        self.adjustSize()
+        parent = self.parentWidget()
+        self.move((parent.width() - self.width()) // 2, TOOLBAR_HEIGHT - 4)
+
+    def activate(self, row: int) -> None:
+        if 0 <= row < len(self.list.items):
+            action = self.list.items[row].get("action")
+            self.close_bar()
+            if callable(action):
+                action()
+
+    def close_bar(self) -> None:
+        self.hide()
+        parent = self.parentWidget()
+        if hasattr(parent, "_focus_current_view"):
+            parent._focus_current_view()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.field:
+            if event.type() == QEvent.Type.KeyPress:
+                key = event.key()
+                if key == Qt.Key.Key_Escape:
+                    self.close_bar()
+                    return True
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                    self.list.move_selection(-1 if key in (Qt.Key.Key_Up, Qt.Key.Key_Backtab) else 1)
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self.activate(self.list.current)
+                    return True
+            elif event.type() == QEvent.Type.FocusOut and event.reason() not in (
+                    Qt.FocusReason.PopupFocusReason, Qt.FocusReason.ActiveWindowFocusReason):
+                QTimer.singleShot(0, self, lambda: None if self.field.hasFocus() else self.hide())
+        return super().eventFilter(obj, event)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        m = self.MARGIN
+        paint_floating_card(p, QRectF(self.rect()).adjusted(m, m, -m, -m), self.theme, radius=14.0)
+        p.end()
+
+
+class TabManager(QDialog):
+    """Like GX Control: what each tab costs in memory and processor, with Sleep and Close,
+    and a RAM limit that puts the heaviest background tabs to sleep when Huginn goes over."""
+
+    LIMITS = {0: "No limit", 1024: "1 GB", 2048: "2 GB", 3072: "3 GB", 4096: "4 GB", 6144: "6 GB", 8192: "8 GB"}
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.window_ = window
+        self.setObjectName("Sheet")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(600)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 20, 22, 18)
+        outer.setSpacing(10)
+        head = QHBoxLayout()
+        title = QLabel("Tab Manager")
+        title.setObjectName("SheetTitle")
+        head.addWidget(title, 1)
+        self.total = QLabel()
+        self.total.setObjectName("RowSubtitle")
+        head.addWidget(self.total)
+        outer.addLayout(head)
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("SettingsScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.group = QFrame()
+        self.group.setObjectName("SettingsGroup")
+        self.rows_layout = QVBoxLayout(self.group)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(0)
+        holder = QWidget()
+        holder.setObjectName("SettingsPage")
+        hl = QVBoxLayout(holder)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(self.group)
+        hl.addStretch(1)
+        self.scroll.setWidget(holder)
+        self.scroll.setFixedHeight(330)
+        outer.addWidget(self.scroll)
+        limit_row = QHBoxLayout()
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        t = QLabel("RAM limit")
+        t.setObjectName("RowTitle")
+        s = QLabel("Over the limit, the background tabs using the most memory go to sleep.")
+        s.setObjectName("RowSubtitle")
+        s.setWordWrap(True)
+        text.addWidget(t)
+        text.addWidget(s)
+        limit_row.addLayout(text, 1)
+        self.limit = QComboBox()
+        for mb, label in self.LIMITS.items():
+            self.limit.addItem(label, mb)
+        self.limit.setCurrentIndex(max(0, self.limit.findData(window.ram_limit_mb)))
+        self.limit.currentIndexChanged.connect(lambda i: window.set_ram_limit(self.limit.itemData(i)))
+        limit_row.addWidget(self.limit)
+        outer.addLayout(limit_row)
+        buttons = QHBoxLayout()
+        self.sleep_all = QPushButton("Sleep Background Tabs")
+        self.sleep_all.setObjectName("SecondaryButton")
+        self.sleep_all.clicked.connect(lambda *_: (window.sleep_background_tabs(), self.refresh()))
+        buttons.addWidget(self.sleep_all)
+        buttons.addStretch(1)
+        done = QPushButton("Done")
+        done.setObjectName("PrimaryButton")
+        done.clicked.connect(lambda *_: self.close())
+        buttons.addWidget(done)
+        outer.addLayout(buttons)
+        self.rows: list[dict] = []
+        self._cpu: dict[int, tuple[float, float]] = {}
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self.refresh)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._timer.start()
+        self.refresh()
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _cpu_percent(self, pid: int, cpu: float) -> float:
+        now = time.monotonic()
+        then = self._cpu.get(pid)
+        self._cpu[pid] = (now, cpu)
+        if then is None or now - then[0] <= 0:
+            return 0.0
+        return max(0.0, (cpu - then[1]) / (now - then[0]) * 100)
+
+    def refresh(self) -> None:
+        window = self.window_
+        stats = window.tab_stats()
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.rows = []
+        theme = window.theme
+        for i, entry in enumerate(stats["tabs"]):
+            if i:
+                line = QFrame()
+                line.setObjectName("RowDivider")
+                self.rows_layout.addWidget(line)
+                line.show()
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(12, 7, 10, 7)
+            h.setSpacing(10)
+            icon = QLabel()
+            icon.setPixmap(entry["icon"].pixmap(QSize(16, 16)))
+            h.addWidget(icon)
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            name = QLabel(QFontMetrics(self.font()).elidedText(entry["title"], Qt.TextElideMode.ElideRight, 250))
+            name.setObjectName("RowTitle")
+            info = QLabel(entry["detail"])
+            info.setObjectName("RowSubtitle")
+            col.addWidget(name)
+            col.addWidget(info)
+            h.addLayout(col, 1)
+            memory = QLabel(entry["memory_text"])
+            memory.setObjectName("RowTitle")
+            memory.setMinimumWidth(70)
+            memory.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            h.addWidget(memory)
+            cpu = QLabel(f"{self._cpu_percent(entry['pid'], entry['cpu']):.0f}%" if entry["pid"] else "–")
+            cpu.setObjectName("RowSubtitle")
+            cpu.setMinimumWidth(38)
+            cpu.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            h.addWidget(cpu)
+            sleep = QToolButton()
+            sleep.setObjectName("FieldButton")
+            sleep.setFixedSize(26, 26)
+            sleep.setIcon(window.icons.icon("moon", theme["text_secondary"]))
+            sleep.setToolTip("Sleep this tab")
+            sleep.setEnabled(entry["can_sleep"])
+            sleep.clicked.connect(partial(self._sleep, entry["view"]))
+            close = QToolButton()
+            close.setObjectName("FieldButton")
+            close.setFixedSize(26, 26)
+            close.setIcon(window.icons.icon("close", theme["text_secondary"]))
+            close.setToolTip("Close this tab")
+            close.clicked.connect(partial(self._close, entry["view"]))
+            h.addWidget(sleep)
+            h.addWidget(close)
+            self.rows_layout.addWidget(row)
+            row.show()                                   # counted in the height right away
+            self.rows.append({"view": entry["view"], "sleep": sleep, "close": close, "memory": memory})
+        self.group.adjustSize()
+        self.scroll.setFixedHeight(max(60, min(380, self.group.sizeHint().height() + 2)))   # no empty space
+        self.adjustSize()
+        self.total.setText(f"{BROWSER_NAME} is using {format_size(stats['total'])}"
+                           + (f" of {self.LIMITS[window.ram_limit_mb]}" if window.ram_limit_mb else ""))
+
+    def _sleep(self, view: "WebView", *_) -> None:
+        self.window_.sleep_tab_now(view)
+        self.refresh()
+
+    def _close(self, view: "WebView", *_) -> None:
+        self.window_.close_view_anywhere(view)
+        self.refresh()
+
+
+class PopOutPlayer(QWidget):
+    """A small player that stays on top of other windows: the video from a tab, playing on
+    while you do something else. Drag it by its top bar; resize it from the corner."""
+
+    returned = Signal(float)                     # where the video was, to carry on in the tab
+
+    def __init__(self, browser: "BrowserWindow", profile: QWebEngineProfile, url: QUrl, start: float,
+                 playing: bool, title: str) -> None:
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.browser = browser
+        self.setObjectName("PopOut")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(f"{title} — {BROWSER_NAME}")
+        self.setMinimumSize(260, 170)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.bar = QWidget()
+        self.bar.setObjectName("PopOutBar")
+        self.bar.setFixedHeight(30)
+        self.bar.setCursor(Qt.CursorShape.SizeAllCursor)
+        h = QHBoxLayout(self.bar)
+        h.setContentsMargins(10, 0, 4, 0)
+        h.setSpacing(4)
+        self.title = QLabel(QFontMetrics(self.font()).elidedText(title, Qt.TextElideMode.ElideRight, 260))
+        self.title.setObjectName("RowSubtitle")
+        h.addWidget(self.title, 1)
+        self.back = QToolButton()
+        self.back.setObjectName("FieldButton")
+        self.back.setFixedSize(24, 24)
+        self.back.setToolTip("Back to the tab")
+        self.close_button = QToolButton()
+        self.close_button.setObjectName("FieldButton")
+        self.close_button.setFixedSize(24, 24)
+        self.close_button.setToolTip("Close")
+        h.addWidget(self.back)
+        h.addWidget(self.close_button)
+        layout.addWidget(self.bar)
+        self.view = QWebEngineView()
+        page = QWebEnginePage(profile, self.view)
+        page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        self.view.setPage(page)
+        layout.addWidget(self.view, 1)
+        grip = QSizeGrip(self)
+        grip.setFixedSize(14, 14)
+        self._grip = grip
+        self.back.clicked.connect(lambda *_: self.finish(True))
+        self.close_button.clicked.connect(lambda *_: self.finish(False))
+        self.start, self.playing = start, playing
+        self._finished = False
+        self.view.loadFinished.connect(self._loaded)
+        self.view.setUrl(url)
+        self.set_theme(browser.theme, browser.icons)
+        screen = (browser.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+        self.resize(480, 300)
+        self.move(screen.right() - self.width() - 24, screen.bottom() - self.height() - 24)
+
+    def set_theme(self, theme: dict, icons: "IconFactory") -> None:
+        self.setStyleSheet(f"QWidget#PopOut {{ background: #000; border: 1px solid {theme['divider']}; }}"
+                           f"QWidget#PopOutBar {{ background: {theme['chrome']}; }}")
+        self.back.setIcon(icons.icon("popout", theme["text_secondary"]))
+        self.close_button.setIcon(icons.icon("close", theme["text_secondary"]))
+
+    def _loaded(self, ok: bool) -> None:
+        if ok:
+            js = VIDEO_FILL_JS.replace("%START%", str(float(self.start))).replace("%PLAYING%", "true" if self.playing else "false")
+            self.view.page().runJavaScript(js, APPLICATION_WORLD)
+
+    def finish(self, back: bool) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self.view.page().runJavaScript(VIDEO_TIME_JS, APPLICATION_WORLD,
+                                       lambda t: (self.returned.emit(float(t) if back and isinstance(t, (int, float)) else -2.0),
+                                                  self.close()))
+        QTimer.singleShot(1500, self.close)            # in case the page doesn't answer
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._grip.move(self.width() - self._grip.width(), self.height() - self._grip.height())
+        self._grip.raise_()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if IS_WIN11:
+            set_dwm_attribute(int(self.winId()), DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.bar.geometry().contains(event.position().toPoint()):
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.startSystemMove()
+        super().mousePressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        if not self._finished:
+            self._finished = True
+            self.returned.emit(-2.0)
+        super().closeEvent(event)
+
+
+class SplitPane(QWidget):
+    """Split View: a second page beside the tabs, in its own rounded card, with a small
+    address field. Links it opens in new windows become tabs."""
+
+    closeRequested = Signal()
+    toTabRequested = Signal()
+
+    def __init__(self, browser: "BrowserWindow") -> None:
+        super().__init__()
+        self.browser = browser
+        self.chrome = None                            # set by the window (for CornerCap)
+        self.tab_style = browser.tab_style
+        self.view: "WebView | None" = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, CARD_MARGIN, CARD_MARGIN)
+        layout.setSpacing(0)
+        head = QWidget()
+        head.setFixedHeight(TAB_ROW_HEIGHT)
+        h = QHBoxLayout(head)
+        h.setContentsMargins(4, 2, 0, 7)
+        h.setSpacing(4)
+        self.back = QToolButton()
+        self.field = QLineEdit()
+        self.field.setObjectName("SplitAddress")
+        self.field.setPlaceholderText("Search or enter website name")
+        self.to_tab = QToolButton()
+        self.to_tab.setToolTip("Open as a tab")
+        self.close_button = QToolButton()
+        self.close_button.setToolTip("Close Split View")
+        for b in (self.back, self.to_tab, self.close_button):
+            b.setObjectName("FieldButton")
+            b.setFixedSize(26, 26)
+        h.addWidget(self.back)
+        h.addWidget(self.field, 1)
+        h.addWidget(self.to_tab)
+        h.addWidget(self.close_button)
+        layout.addWidget(head)
+        self.holder = QVBoxLayout()
+        self.holder.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.holder, 1)
+        self.caps = [CornerCap(self) for _ in range(4)]
+        self.back.clicked.connect(lambda *_: self.view and self.view.back())
+        self.field.returnPressed.connect(self._go)
+        self.to_tab.clicked.connect(lambda *_: self.toTabRequested.emit())
+        self.close_button.clicked.connect(lambda *_: self.closeRequested.emit())
+
+    def set_view(self, view: "WebView") -> None:
+        self.view = view
+        self.holder.addWidget(view)
+        view.urlChanged.connect(self._url_changed)
+        self.update_caps()
+
+    def _url_changed(self, url: QUrl) -> None:
+        if not self.field.hasFocus():
+            self.field.setText("" if is_start_page(url) else edit_text_for(url))
+
+    def _go(self) -> None:
+        url = url_from_user_input(self.field.text().strip())
+        if url is not None and self.view is not None:
+            self.view.setUrl(url)
+            self.view.setFocus()
+
+    def card_rect(self) -> QRect:
+        return self.view.geometry() if self.view is not None else self.rect()
+
+    def set_theme(self, theme: dict, icons: "IconFactory") -> None:
+        self.back.setIcon(icons.icon("back", theme["text_secondary"]))
+        self.to_tab.setIcon(icons.icon("tabs", theme["text_secondary"]))
+        self.close_button.setIcon(icons.icon("close", theme["text_secondary"]))
+        for cap in self.caps:
+            cap.update()
+
+    def update_caps(self) -> None:
+        r, s = self.card_rect(), CornerCap.SIZE
+        spots = ((r.left() - 1, r.top() - 1), (r.right() - s + 2, r.top() - 1),
+                 (r.left() - 1, r.bottom() - s + 2), (r.right() - s + 2, r.bottom() - s + 2))
+        for cap, (x, y) in zip(self.caps, spots):
+            cap.setGeometry(x, y, s, s)
+            cap.setVisible(self.chrome is not None)
+            cap.raise_()
+            cap.update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.update_caps)
+
+
+class BrowserWindow(QWidget):
+    """Frameless top-level window hosting the toolbar, sidebar and tabbed web views."""
+
+    def __init__(self, profile: QWebEngineProfile, store: BrowserStore,
+                 start_handler: StartPageSchemeHandler, blocker: PrivacyGuard,
+                 main_window: "BrowserWindow | None" = None) -> None:
+        super().__init__()
+        self.profile = profile
+        self.store = store
+        self.settings = store.settings
+        self.start_handler = start_handler
+        self.blocker = self.guard = blocker
+        self.adblock = blocker.adblock
+        if self.adblock is not None:
+            self.adblock.changed.connect(self._on_filters_changed)
+        # A Private Browsing window belongs to the main window: it shares Favorites and
+        # settings, but has its own off-the-record profile and keeps no history.
+        self.main_window = main_window
+        self.private = main_window is not None
+        self._private_windows: list[BrowserWindow] = []
+        self.engine: EngineManager | None = None          # set by attach_engine()
+        self.passwords: PasswordManager | None = None     # set by attach_passwords()
+        self.typing_sounds: TypingSounds | None = None   # set by create_browser()
+        self.sleep_tabs = self.settings.value("sleepTabs", True, type=bool)
+        self.restore_tabs = self.settings.value("restoreSession", True, type=bool)
+        self.spellcheck = self.settings.value("spellCheck", True, type=bool)
+        start_handler.norse = self.settings.value("norseGreeting", False, type=bool)
+        start_handler.recap = self.settings.value("weeklyRecap", True, type=bool)
+        start_handler.ripple = self.settings.value("auroraRipple", False, type=bool)
+        self.weather: WeatherService | None = None        # the main window's (set by create_browser)
+        self._welcome_imported = False
+        start_handler.welcome_state = self.welcome_state
+        self.fingerprint_secret = secrets.token_hex(16)    # new every session: sites can't link visits
+        self.downloads = DownloadManager(None if self.private else self.settings, self)
+        self.groups: list[dict] = [{"name": "", "views": [], "current": 0}]   # tab groups; 0 is the plain one
+        self.group_index = 0
+        self._switching_group = False
+        self._closing = False
+        self._shot: dict | None = None
+        self.updater: "Updater | None" = None          # a friend's copy (set by create_browser)
+        self._update_ready: tuple | None = None
+        self.data_dir = tempfile.gettempdir()
+        self._session_timer = QTimer(self)
+        self._session_timer.setSingleShot(True)
+        self._session_timer.setInterval(SESSION_SAVE_MS)
+        self._session_timer.timeout.connect(self.save_session)
+        mode = str(self.settings.value("darkWebsites", "off"))
+        self.dark_websites = mode if mode in DARK_WEBSITE_MODES else "off"
+        self.ram_limit_mb = self.settings.value("ramLimitMB", 0, type=int)
+        self.tab_manager: TabManager | None = None
+        self.pop_out: PopOutPlayer | None = None
+        self._containers: dict[str, QWebEngineProfile] = {}       # tab groups with their own logins
+        self._container_cookies: dict[str, CookieKeeper] = {}
+        self._offline_saves: dict[str, str] = {}                  # Reading List copies being saved
+        self._remote_suggestions: dict[str, list[str]] = {}
+        self._last_typed = ""
+        self._completing = False
+        self._pinning = False
+        self._suggest_net = QNetworkAccessManager(self)
+        self._suggest_timer = QTimer(self)
+        self._suggest_timer.setSingleShot(True)
+        self._suggest_timer.setInterval(220)
+        self._suggest_timer.timeout.connect(self._fetch_remote_suggestions)
+        self.muninn: Muninn | None = None              # set by create_browser (main window)
+        self.valhalla: ValhallaSheet | None = None
+        self.living = self.settings.value("livingTheme", False, type=bool)
+        self.game_mode: GameMode | None = None
+        self._game_slept = 0
+        self.reader_voice = ReadAloud(self)
+        self.reader_voice.stateChanged.connect(self._reading_aloud_changed)
+        self._focus_pauses: dict[str, float] = {}
+        self._banner_sites: set[str] = set()
+        self._phase_timer = QTimer(self)
+        self._phase_timer.setInterval(10 * 60 * 1000)
+        self._phase_timer.timeout.connect(self._check_phase)
+        self._phase_timer.start()
+        self._ram_timer = QTimer(self)
+        self._ram_timer.setInterval(RAM_CHECK_MS)
+        self._ram_timer.timeout.connect(self.enforce_ram_limit)
+        self._ram_timer.start()
+        self.tint_enabled = self.settings.value("tintWithPage", False, type=bool)
+        self.tint_theme_colours = self.settings.value("tintUseThemeColour", True, type=bool)
+        self._icloud_pending = None
+        self.prefs = load_privacy_prefs(self.settings)
+        self.cookies = CookieKeeper(profile.cookieStore(), self)
+        profile.cookieStore().setCookieFilter(blocker.allow_cookie)
+        # Seams for tests: how sheets are run and where downloads are saved.
+        self.run_dialog = lambda dialog: dialog.exec()
+        self.ask_save_path = self._ask_save_path
+        self.ask_import_path = lambda: QFileDialog.getOpenFileName(
+            self, "Import Passwords", os.path.expanduser("~"),
+            "Password exports (*.csv *.sqpw);;All files (*)")[0]
+        self.find_import_sources = find_import_sources
+        self.is_default_browser = is_default_browser
+        self.register_browser = register_with_windows
+        self.open_default_apps = open_default_apps_settings
+        self._default_waiting = False          # sent to Settings to pick Huginn
+        self._default_offer_due = False        # the one-time offer, a little after starting
+        self.ask_bookmarks_file = lambda: QFileDialog.getOpenFileName(
+            self, "Import Bookmarks", os.path.expanduser("~"), "Bookmarks files (*.html *.htm);;All files (*)")[0]
+        self.ask_export_path = lambda name: QFileDialog.getSaveFileName(
+            self, "Export Passwords", os.path.join(os.path.expanduser("~"), "Documents", name))[0]
+        self.screenshot_folder = lambda: QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
+        self.package_folder = lambda: QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DesktopLocation) or os.path.expanduser("~")
+        self.open_path = lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        self.icons = IconFactory()
+        self.app_icon = make_app_icon()
+        self.theme = LIGHT_THEME
+        self.tab_style = SafariTabStyle()
+        self.appearance = str(self.settings.value("appearance", "system"))
+        self.realm = str(self.settings.value("realm", DEFAULT_REALM))
+        if self.realm not in REALMS:
+            self.realm = DEFAULT_REALM
+        self.always_show_tab_bar = self.settings.value("alwaysShowTabBar", False, type=bool)
+        self._closed_tabs: list[QUrl] = []
+        self._overview_closing = False
+        self._fullscreen_view: WebView | None = None
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.setInterval(3500)
+        self._start_refresh_timer = QTimer(self)
+        self._start_refresh_timer.setSingleShot(True)
+        self._start_refresh_timer.setInterval(800)
+        self._start_refresh_timer.timeout.connect(self._refresh_start_pages)
+        self._sleep_timer = QTimer(self)
+        self._sleep_timer.setInterval(TAB_SLEEP_CHECK_MS)
+        self._sleep_timer.timeout.connect(self.sleep_idle_tabs)
+        self._sleep_timer.start()
+        self.clock = time.monotonic                       # tests move time forward
+        self._inspector: QWebEngineView | None = None
+        self._qwindow: QWindow | None = None
+        self._edge_cursor_active = False
+        self._restore_maximized = False
+        self._sidebar_before_fullscreen = False
+        self._native_frame = WindowsFrame(self) if (IS_WINDOWS and os.environ.get("SAFARIQT_QT_FRAME") != "1") else None
+
+        # Frameless window. On Windows, WindowsFrame restores the native frame behaviour;
+        # elsewhere the min/max/system-menu hints keep taskbar minimize working.
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowMinMaxButtonsHint
+                            | Qt.WindowType.WindowSystemMenuHint)
+        styled(self, "BrowserWindow")
+        self.setWindowTitle(self._title_suffix())
+        self.setWindowIcon(self.app_icon)
+        self.setMinimumSize(720, 460)
+
+        # The style sheet must exist before widgets that get a custom QStyle (the tab strip)
+        # are created; Qt only wraps those in its style-sheet style at setStyle() time.
+        self.theme = self._resolve_theme()
+        QApplication.instance().setStyleSheet(QSS_TEMPLATE.substitute(self.theme))
+        self._build_ui()
+        self._build_shortcuts()
+        profile.downloadRequested.connect(self._on_download_requested)
+        hints = QGuiApplication.styleHints()
+        if hasattr(hints, "colorSchemeChanged"):                     # Qt 6.5+
+            hints.colorSchemeChanged.connect(self._on_system_color_scheme_changed)
+        apply_spellcheck(profile, self.spellcheck)
+        self.apply_privacy_prefs()
+        self.apply_theme()
+        self._restore_state()
+
+    # ---------------------------------------------------------------------------- UI
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(1, 1, 1, 1)        # 1px frame where Windows draws none
+        root.setSpacing(0)
+        self.chrome = chrome = ChromeFrame()
+        root.addWidget(chrome)
+        column = QVBoxLayout(chrome)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+
+        self.toolbar = Toolbar(self)
+        self.address = self.toolbar.address
+        if self.private:
+            self.address.page_glyph = "private"
+            self.address.edit.setProperty("private", True)
+            self.address.page_button.setToolTip("Private Browsing: page menu, privacy and settings")
+        column.addWidget(self.toolbar)
+
+        self.body = QWidget()
+        row = QHBoxLayout(self.body)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self.sidebar = Sidebar(self.store, self.icons)
+        self.tabs = BrowserTabWidget(self.tab_style)
+        self.tabs.setTabBarAutoHide(not self.always_show_tab_bar)
+        row.addWidget(self.sidebar)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("BodySplitter")
+        self.splitter.setHandleWidth(4)
+        self.splitter.setChildrenCollapsible(False)
+        self.split = SplitPane(self)
+        self.splitter.addWidget(self.tabs)
+        self.splitter.addWidget(self.split)
+        self.split.hide()
+        row.addWidget(self.splitter, 1)
+        column.addWidget(self.body, 1)
+
+        self.overview = TabOverview(self.body)
+        self.overview.activated.connect(self._on_overview_activated)
+        self.overview.closeRequested.connect(self._on_overview_close)
+
+        # Everything that shows the realm gradient paints it through the ChromeFrame.
+        self.tabs.chrome = chrome
+        self.overview.canvas.chrome = chrome
+        chrome.dependents.extend(self.tabs.caps + [self.overview.canvas] + self.split.caps)
+        self.split.chrome = chrome
+
+        self.status_bubble = StatusBubble(self.tabs)
+        self.fullscreen_notice = QLabel(self.tabs)
+        self.fullscreen_notice.setObjectName("FullscreenNotice")
+        self.fullscreen_notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.fullscreen_notice.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.fullscreen_notice.hide()
+        self._notice_timer.timeout.connect(self.fullscreen_notice.hide)
+        self.warning_panel = WarningPanel(self.tabs)
+        self.warning_panel.goBack.connect(self._warning_go_back)
+        self.warning_panel.proceed.connect(self._warning_proceed)
+        self.permission_prompt = PermissionPrompt(self.tabs)
+        self.permission_prompt.answered.connect(self._answer_permission)
+        self.engine_bar = NoticeBar(self.tabs)
+        self.engine_bar.answered.connect(self._answer_engine_bar)
+        self.password_bar = NoticeBar(self.tabs)
+        self.password_bar.answered.connect(self._answer_password_bar)
+        self.password_bar.other.connect(self._never_save_password)
+        self.suggestions = SuggestionPanel(self.tabs)
+        self.suggestions.chosen.connect(self._choose_suggestion)
+        self.default_bar = NoticeBar(self.tabs)
+        self.default_bar.answered.connect(self._answer_default_bar)
+        self.default_bar.other.connect(self._never_offer_default)
+        self.find_bar = FindBar(self.tabs)
+        self.find_bar.searched.connect(self._find)
+        self.find_bar.closed.connect(self.close_find_bar)
+        self._find_view: WebView | None = None
+        self.update_bar = NoticeBar(self.tabs)
+        self.update_bar.answered.connect(self._answer_update_bar)
+        self.address_panel = SuggestionPanel(self)
+        self.address_panel.chosen.connect(self._choose_address_suggestion)
+        self.command_bar = CommandBar(self, self.command_suggestions)
+        self.downloads_panel = DownloadsPanel(self.downloads, self.icons, self)
+        self.downloads_panel.openRequested.connect(lambda path: self.open_path(path))
+        self.downloads_panel.retryRequested.connect(self.retry_download)
+        self.downloads.changed.connect(self._sync_downloads_button)
+        # Bars over the page follow the page card. Watched on the card itself: when the
+        # tab widget hears about a resize, the card hasn't been laid out yet.
+        (self.tabs.stack or self.tabs).installEventFilter(self)
+
+        tb = self.toolbar
+        for controls in (tb.lights, tb.window_buttons):
+            controls.closeClicked.connect(self.close)
+            controls.minimizeClicked.connect(self.showMinimized)
+            controls.zoomClicked.connect(self.toggle_maximize)
+        tb.set_button_style(str(self.settings.value("windowButtons", "mac") or "mac"))
+        tb.sidebar_button.clicked.connect(lambda *_: self.toggle_sidebar())
+        tb.sidebar_menu_button.clicked.connect(lambda *_: self.show_sidebar_menu())
+        tb.back_button.clicked.connect(lambda *_: self.go_back())
+        tb.forward_button.clicked.connect(lambda *_: self.go_forward())
+        tb.share_button.clicked.connect(lambda *_: self.show_share_menu())
+        tb.new_tab_button.clicked.connect(lambda *_: self.new_tab())
+        tb.overview_button.clicked.connect(lambda *_: self.toggle_overview())
+        tb.downloads_button.clicked.connect(lambda *_: self.show_downloads())
+        self.address.readerRequested.connect(self.toggle_reader)
+        self.address.edit.key_hook = self._address_key
+        self.address.edit.textEdited.connect(self._on_address_edited)
+        self.address.edit.focusChanged.connect(self._on_address_focus)
+        self.address.submitted.connect(lambda *_: self.address_panel.hide())
+        sb = self.sidebar
+        sb.icon_for = self._favicon_for
+        sb.addReadingRequested.connect(self.add_to_reading_list)
+        sb.readingOpenRequested.connect(self.open_reading_item)
+        sb.splitRequested.connect(self.open_split_view)
+        sb.moveToFolderRequested.connect(self.move_bookmark_to_folder)
+        sb.folderRenameRequested.connect(self.rename_bookmark_folder)
+        sb.folderDeleteRequested.connect(self.delete_bookmark_folder)
+        sb.panel_factory = self._make_panel_view
+        sb.memory_search = self.muninn_search
+        sb.panelAddRequested.connect(self.add_web_panel)
+        sb.panelRemoveRequested.connect(self.remove_web_panel)
+        if not self.private:
+            sb.panels = self.web_panels()
+            sb.set_panels_enabled(self.settings.value("webPanelsOn", False, type=bool))
+        self.split.closeRequested.connect(self.close_split_view)
+        self.split.toTabRequested.connect(self.split_to_tab)
+        self.tabs.bar.menuRequested.connect(self.show_tab_menu)
+        self.tabs.bar.tabMoved.connect(lambda *_: None if self._pinning else QTimer.singleShot(0, self._sync_pins))
+        self.address.audioRequested.connect(lambda: self.toggle_mute())
+        self.tabs.bar.muteToggled.connect(self._toggle_mute_at)
+        self.tabs.bar.tabMoved.connect(self.schedule_session_save)
+
+        self.address.submitted.connect(self.navigate)
+        self.address.reloadRequested.connect(self.reload)
+        self.address.stopRequested.connect(self.stop)
+        self.address.pageMenuRequested.connect(self.show_page_menu)
+        self.address.edit.escapePressed.connect(self._focus_current_view)
+
+        # Connect to the bar itself: QTabWidget only forwards tabCloseRequested when its
+        # built-in close buttons are enabled, and ours are custom.
+        self.tabs.bar.tabCloseRequested.connect(self.close_tab)
+        self.tabs.bar.tabBarClicked.connect(self._leaving_tab)
+        self.tabs.currentChanged.connect(self._on_current_tab_changed)
+        self.sidebar.openRequested.connect(self._open_from_sidebar)
+        self.sidebar.addBookmarkRequested.connect(self.add_bookmark_for_current)
+        self.sidebar.clearHistoryRequested.connect(self.show_clear_history_dialog)
+        self.store.bookmarksChanged.connect(self._refresh_start_pages)
+
+    def _build_shortcuts(self) -> None:
+        def bind(keys, slot) -> None:
+            for key in (keys if isinstance(keys, (list, tuple)) else [keys]):
+                QShortcut(QKeySequence(key), self).activated.connect(slot)
+
+        bind("Ctrl+T", self.new_tab)
+        bind("Ctrl+Shift+N", self.open_private_window)
+        bind("Ctrl+,", self.show_privacy_settings)
+        bind("Ctrl+Shift+P", self.show_passwords)
+        bind("Ctrl+Shift+Delete", self.show_clear_history_dialog)
+        bind(["Ctrl+W", "Ctrl+F4"], self.close_current_tab)
+        bind("Ctrl+Shift+T", self.reopen_closed_tab)
+        bind(["Ctrl+L", "Alt+D", "F6"], self.focus_address_bar)
+        bind(["Ctrl+R", "F5"], self.reload)
+        bind(["Alt+Left", "Ctrl+["], self.go_back)
+        bind(["Alt+Right", "Ctrl+]"], self.go_forward)
+        bind(["Alt+Home", "Ctrl+Shift+H"], self.go_home)
+        bind(["Ctrl+Tab", "Ctrl+PgDown"], self.next_tab)
+        bind(["Ctrl+Shift+Tab", "Ctrl+Shift+Backtab", "Ctrl+PgUp"], self.previous_tab)
+        bind(["Ctrl+Shift+\\", "Ctrl+Shift+|"], self.toggle_overview)
+        bind("Ctrl+Shift+L", self.toggle_sidebar)
+        bind("Ctrl+D", self.add_bookmark_for_current)
+        bind("Ctrl+F", self.show_find_bar)
+        bind(["F3", "Ctrl+G"], self.find_next)
+        bind(["Shift+F3", "Ctrl+Shift+G"], self.find_previous)
+        bind("F9", self.toggle_reader)
+        bind("Ctrl+J", self.show_downloads)
+        bind("Ctrl+Shift+S", partial(self.take_screenshot, True))
+        bind("Ctrl+M", self.toggle_mute)
+        bind(["Ctrl+K", "Ctrl+E"], self.show_command_bar)
+        bind("Ctrl+Shift+D", self.add_to_reading_list)
+        bind("Shift+Esc", self.show_tab_manager)
+        bind("Ctrl+Alt+N", self.new_burner_tab)
+        bind(["Ctrl+=", "Ctrl++"], self.zoom_in)
+        bind("Ctrl+-", self.zoom_out)
+        bind("Ctrl+0", self.zoom_reset)
+        bind(["F12", "Ctrl+Shift+I"], self.open_inspector)
+        bind("Ctrl+Q", self.quit_all)
+        for n in range(1, 9):
+            bind(f"Ctrl+{n}", partial(self.select_tab, n - 1))
+        bind("Ctrl+9", lambda: self.select_tab(self.tabs.count() - 1))
+        # Escape closes the tab overview / page fullscreen; enabled only while one is showing
+        # so it never steals Escape from the address field or the page.
+        self._escape_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self._escape_shortcut.activated.connect(self._on_escape)
+        self._escape_shortcut.setEnabled(False)
+
+    # ---------------------------------------------------------------------------- theme
+    def _effective_dark(self) -> bool:
+        if self.appearance in ("light", "dark"):
+            return self.appearance == "dark"
+        hints = QGuiApplication.styleHints()
+        if hasattr(hints, "colorScheme"):
+            scheme = hints.colorScheme()
+            if scheme == Qt.ColorScheme.Dark:
+                return True
+            if scheme == Qt.ColorScheme.Light:
+                return False
+        if IS_WINDOWS:                                 # fallback for older Qt builds
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                    return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+            except OSError:
+                pass
+        return False
+
+    def _resolve_theme(self) -> dict:
+        theme = build_theme(self._effective_dark(), self.realm)
+        return living_theme(theme, time.localtime()) if getattr(self, "living", False) else theme
+
+    def apply_theme(self) -> None:
+        # Note: web pages' prefers-color-scheme always follows Windows (Qt WebEngine offers
+        # no per-app override), so "Use System Setting" keeps chrome and pages matched.
+        theme = self._resolve_theme()
+        self.theme = theme
+        app = QApplication.instance()
+        app.setPalette(build_palette(theme))
+        app.setStyleSheet(QSS_TEMPLATE.substitute(theme))
+        self.icons.set_colors(theme["icon"], theme["icon_disabled"])
+        self.tab_style.theme = theme
+        HuginnStyle.theme = theme                       # menus
+        HuginnStyle.icon_source = self.icons
+        self.chrome.set_theme(theme)
+        self.toolbar.refresh_style(self.icons, theme)
+        for view in self.views():                  # no white flash behind dark pages
+            self._sync_page_background(view)
+        self.tabs.bar.set_close_icon(self.icons.icon("close", theme["text_secondary"]))
+        if self.private:                                # dark address pill, like Safari
+            self.address.set_style(self.icons, dict(theme, **PRIVATE_FIELD[theme["dark"]]))
+            placeholder = self.address.edit.palette()
+            placeholder.setColor(QPalette.ColorRole.PlaceholderText, QColor("#9AA3AD"))
+            self.address.edit.setPalette(placeholder)
+        self.tabs.update()
+        self.tabs.bar.update()
+        self.sidebar.refresh(theme)
+        self.start_handler.theme = theme
+        for view in self.views():
+            self._sync_tab_icon(view)
+        self._refresh_start_pages()
+        if self._qwindow is not None:
+            self._apply_native_effects()
+        if self.overview.isVisible():
+            self._populate_overview()
+        self.permission_prompt.theme = theme
+        self.engine_bar.theme = theme
+        self.engine_bar.setProperty("kind", None)            # re-render in the new colours
+        self.password_bar.theme = theme
+        self.password_bar.setProperty("kind", None)
+        self.default_bar.theme = theme
+        self.default_bar.setProperty("kind", None)
+        self.hide_password_suggestions()
+        self.find_bar.set_theme(theme, self.icons)
+        self.update_bar.theme = theme
+        self.downloads_panel.set_theme(theme)
+        self.split.set_theme(theme, self.icons)
+        if self.pop_out is not None:
+            self.pop_out.set_theme(theme, self.icons)
+        if self.dark_websites == "auto":
+            for view in self.all_views() + ([self.split.view] if self.split.view else []):
+                self._apply_dark(view)
+        self._sync_permission_prompt()
+        self._sync_warning_panel()
+        self._apply_tint(animate=False)
+        for view in self.views():
+            self._on_audio_changed(view)
+        if self._update_ready is not None:
+            self._sync_update_bar()
+
+    def all_windows(self) -> list["BrowserWindow"]:
+        """The main window and its Private Browsing windows (settings apply to all)."""
+        main = self.main_window or self
+        windows = [main]
+        for window in list(main._private_windows):
+            try:
+                window.isVisible()                      # raises once Qt has deleted it
+                windows.append(window)
+            except RuntimeError:
+                main._private_windows.remove(window)
+        return windows
+
+    def set_appearance(self, mode: str, *_) -> None:
+        self.settings.setValue("appearance", mode)
+        for window in self.all_windows():               # one app-wide style sheet: keep in step
+            window.appearance = mode
+            window.apply_theme()
+        self._sync_welcome()
+
+    def set_realm(self, realm: str, *_) -> None:
+        realm = realm if realm in REALMS else DEFAULT_REALM
+        self.settings.setValue("realm", realm)
+        for window in self.all_windows():
+            window.realm = realm
+            window.apply_theme()
+        self._sync_welcome()
+
+    def _on_system_color_scheme_changed(self, *_) -> None:
+        # Windows sends this on many unrelated setting changes; restyling the whole window
+        # (and redrawing Start Pages) only when light/dark really changed avoids a flicker.
+        if self.appearance == "system" and self._effective_dark() != self.theme["dark"]:
+            self.apply_theme()
+
+    def _apply_native_effects(self) -> None:
+        hwnd = int(self.winId())
+        set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if self.theme["dark"] else 0)
+        if IS_WIN11:
+            # Page fullscreen goes truly edge to edge: no rounded corners, no 1px DWM outline.
+            edge_to_edge = self._fullscreen_view is not None
+            set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                              DWMWCP_DONOTROUND if edge_to_edge else DWMWCP_ROUND)
+            set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR,
+                              DWMWA_COLOR_NONE if edge_to_edge else colorref(self.theme["frame"]))
+
+    def schedule_start_page_refresh(self, *_) -> None:
+        """Coalesces refreshes (e.g. several touch icons arriving at once)."""
+        self._start_refresh_timer.start()
+
+    def open_from_another_launch(self, targets: list[str]) -> None:
+        """A second launch handed us its URLs (see SingleInstance); show them here."""
+        for target in targets:
+            self.add_tab(url_from_user_input(target) or QUrl(START_URL))
+        if not targets:
+            self.new_tab()
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _refresh_start_pages(self) -> None:
+        """New icons, favorites or theme: the Start Page is redrawn in place (a reload
+        would flash the page, and icons often arrive a few at a time)."""
+        page_html = None
+        for view in self.views():
+            if not is_start_page(view.url()) or view.url().path() not in ("start", ""):
+                continue                                # the welcome tour, Focus Hours' page: not ours to swap
+            if view.loading:
+                view.reload()
+                continue
+            if page_html is None:
+                handler = self.start_handler
+                page_html = render_start_page(handler.theme, handler.store, handler.tracking_prevention,
+                                              handler.favicons, handler.private, handler.norse, handler.recap,
+                                              handler.weather, handler.ripple)
+            view.page().runJavaScript(START_PAGE_SWAP_JS % json.dumps(page_html), APPLICATION_WORLD)
+
+    # ---------------------------------------------------------------------------- tabs
+    def views(self) -> list[WebView]:
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+
+    def current_view(self) -> WebView | None:
+        view = self.tabs.currentWidget()
+        return view if isinstance(view, WebView) else None
+
+    def _new_view(self, lazy: dict | None = None, profile: QWebEngineProfile | None = None) -> WebView:
+        view = WebView(self, profile or self.current_profile())
+        view.page().setBackgroundColor(qc(self.theme["content"]))     # until it has a page: no white flash
+        self._apply_dark(view)
+        self._wire_view(view)
+        if lazy is not None:
+            view.pending = {"url": str(lazy.get("url", "")), "title": str(lazy.get("title") or "")}
+        return view
+
+    def add_tab(self, url: QUrl | None = None, *, background: bool = False,
+                after_current: bool = False, lazy: dict | None = None,
+                profile: QWebEngineProfile | None = None) -> WebView:
+        """Create a tab. url=None leaves it empty (WebEngine fills it for createWindow).
+        lazy {"url", "title"}: a restored tab that loads when it's first shown."""
+        view = self._new_view(lazy, profile)
+        position = self.tabs.currentIndex() + 1 if (after_current and self.tabs.count()) else self.tabs.count()
+        if not background:
+            self._capture_thumbnail(self.current_view())    # the tab being left, for the overview
+        index = self.tabs.insertTab(position, view, self._tab_icon(view) if lazy else (
+            self.app_icon if (url is not None and is_start_page(url)) else self._fallback_favicon()),
+            self._tab_title(view) if lazy else "New Tab")
+        if url is not None and lazy is None:
+            view.setUrl(url)
+        self.schedule_session_save()
+        if not background:
+            self.tabs.setCurrentIndex(index)
+        if self.overview.isVisible():
+            self.hide_overview()
+        if self._fullscreen_view is not None:
+            self.tabs.tabBar().hide()
+        self.tabs.update_caps()
+        return view
+
+    def new_tab(self) -> None:
+        self.add_tab(QUrl(START_URL))
+        QTimer.singleShot(0, self.focus_address_bar)    # Safari puts the cursor in the field
+
+    def close_tab(self, index: int) -> None:
+        view = self.tabs.widget(index)
+        if view is None:
+            return
+        if view is self._fullscreen_view:                # never strand the window fullscreen
+            self._exit_page_fullscreen()
+        url = without_credentials(view.tab_url())
+        if not _is_blank(url) and not view.burner:
+            self._closed_tabs.append(url)
+            del self._closed_tabs[:-25]
+            self._to_valhalla(view)
+        if self.tabs.count() <= 1:                       # like Safari: last tab closes window
+            self.close()
+            return
+        view.permission_queue.clear()                    # its prompts go with it
+        self.hide_password_suggestions(view)
+        self.tabs.removeTab(index)
+        view.deleteLater()
+        self.schedule_session_save()
+        self._sync_permission_prompt()
+        self._sync_warning_panel()
+        if self.overview.isVisible():                    # e.g. a background page closed itself
+            QTimer.singleShot(0, self._populate_overview)
+
+    def close_current_tab(self) -> None:
+        if self.tabs.count():
+            self.close_tab(self.tabs.currentIndex())
+
+    def _close_view(self, view: WebView, *_) -> None:       # window.close() from a page
+        index = self.tabs.indexOf(view)
+        if index >= 0:
+            self.close_tab(index)
+
+    def reopen_closed_tab(self) -> None:
+        if self._closed_tabs:
+            self.add_tab(self._closed_tabs.pop())
+
+    def select_tab(self, index: int, *_) -> None:
+        if 0 <= index < self.tabs.count():
+            self._leaving_tab(index)
+            self.tabs.setCurrentIndex(index)
+
+    def next_tab(self) -> None:
+        if self.tabs.count():
+            self.select_tab((self.tabs.currentIndex() + 1) % self.tabs.count())
+
+    def previous_tab(self) -> None:
+        if self.tabs.count():
+            self.select_tab((self.tabs.currentIndex() - 1) % self.tabs.count())
+
+    def _leaving_tab(self, index: int) -> None:
+        """Snapshot the tab being left, for the tab overview. Taken at the moment of
+        switching (the screen changes anyway), not while you're looking at the page."""
+        if 0 <= index < self.tabs.count() and index != self.tabs.currentIndex():
+            self._capture_thumbnail(self.current_view())
+
+    def set_always_show_tab_bar(self, on: bool, *_) -> None:
+        self.always_show_tab_bar = bool(on)
+        self.settings.setValue("alwaysShowTabBar", self.always_show_tab_bar)
+        self.tabs.setTabBarAutoHide(not self.always_show_tab_bar)
+
+    def _wire_view(self, view: WebView) -> None:
+        view.titleChanged.connect(partial(self._sync_tab_title, view))
+        view.iconChanged.connect(partial(self._on_icon_changed, view))
+        view.urlChanged.connect(partial(self._on_url_changed, view))
+        view.loadStarted.connect(partial(self._on_load_started, view))
+        view.loadProgress.connect(partial(self._on_load_progress, view))
+        view.loadFinished.connect(partial(self._on_load_finished, view))
+        page = view.page()
+        page.recentlyAudibleChanged.connect(partial(self._on_audio_changed, view))
+        page.audioMutedChanged.connect(partial(self._on_audio_changed, view))
+        page.linkHovered.connect(partial(self._on_link_hovered, view))
+        page.fullScreenRequested.connect(partial(self._on_fullscreen_requested, view))
+        page.windowCloseRequested.connect(partial(self._close_view, view))
+        page.permissionRequested.connect(partial(self._on_permission_requested, view))
+        page.certificateError.connect(partial(self._on_certificate_error, view))
+        page.loadingChanged.connect(partial(self._on_loading_changed, view))
+
+    def _fallback_favicon(self) -> QIcon:
+        return self.icons.icon("globe", self.theme["text_secondary"])
+
+    def _tab_title(self, view: WebView) -> str:
+        if view.pending is not None:
+            return view.pending["title"] or bare_host(QUrl(view.pending["url"])) or "New Tab"
+        url = view.url()
+        target = focus_target(url)
+        if target is not None:
+            return f"Not now · {bare_display_host(target)}"
+        if is_start_page(url) and url.path() == "welcome":
+            return f"Welcome to {BROWSER_NAME}"
+        if is_start_page(url):
+            return "Start Page"
+        title = view.title().strip()
+        # While loading, WebEngine reports the URL as the title; show the site instead.
+        if not title or (("/" in title or "." in title) and title.rstrip("/") in url.toString()):
+            title = bare_host(url) or display_text_for(url) or "New Tab"
+        return title
+
+    def _sync_tab_title(self, view: WebView, *_) -> None:
+        index = self.tabs.indexOf(view)
+        if index < 0:
+            return
+        title = self._tab_title(view)
+        self.tabs.setTabText(index, title)
+        self.tabs.setTabToolTip(index, plain_tooltip(title))
+        if view is self.current_view():
+            self.setWindowTitle(f"{title} — {self._title_suffix()}")
+        self.schedule_session_save()
+
+    def _tab_icon(self, view: WebView) -> QIcon:
+        if view.burner:
+            return self.icons.icon("flame", self.theme["accent"])
+        if view.pending is not None:
+            url = QUrl(view.pending["url"])
+            if is_start_page(url):
+                return self.app_icon
+            icon = self.start_handler.favicons.icon(bare_host(url))
+            return self._fallback_favicon() if icon.isNull() else icon
+        if focus_target(view.url()) is not None:
+            return self.icons.icon("moon", self.theme["accent"])
+        if is_start_page(view.url()):
+            return self.app_icon
+        icon = view.icon()
+        return self._fallback_favicon() if icon.isNull() else icon
+
+    def _sync_tab_icon(self, view: WebView, *_) -> None:
+        index = self.tabs.indexOf(view)
+        if index >= 0:
+            self.tabs.setTabIcon(index, self._tab_icon(view))
+
+    def _on_icon_changed(self, view: WebView, *_) -> None:
+        self._sync_tab_icon(view)
+        # Save only here: on urlChanged the icon still belongs to the previous site.
+        url = view.url()
+        if not self.private and url.scheme() in ("http", "https") and not view.icon().isNull():
+            self.start_handler.favicons.store(bare_host(url), view.icon())
+
+    def _not_secure(self, view: WebView) -> bool:
+        url = view.url()
+        return url.scheme() == "https" and (view.warning is not None
+                                            or url.host().lower() in self.guard.insecure_hosts)
+
+    def _show_url(self, view: WebView) -> None:
+        glyph = "private" if self.private else ("flame" if view.burner else "page")
+        if glyph != self.address.page_glyph:
+            self.address.page_glyph = glyph
+            self.address._update_buttons()
+        self.address.set_url(view.url(), self._not_secure(view))
+
+    def _on_url_changed(self, view: WebView, url: QUrl) -> None:
+        self.hide_password_suggestions(view)
+        if url.scheme() not in ("http", "https", "file"):
+            view.page_colours = None
+            if view is self.current_view():
+                self._apply_tint()
+        if view is self.current_view():
+            self._show_url(view)
+            self._update_nav_buttons()
+        self._apply_site_zoom(view)
+        self._apply_dark(view)
+        self._sync_page_background(view)
+        if view.reader_on or view.readerable:            # a new page (or a single-page app's next one)
+            view.reader_on = view.readerable = False
+            self._sync_reader_button(view)
+        QTimer.singleShot(1500, partial(self._recheck_reader, view, url.toString()))
+        self._sync_tab_title(view)
+        self._sync_tab_icon(view)
+
+    def _on_load_started(self, view: WebView) -> None:
+        self.hide_password_suggestions(view)
+        view.colours_reported = False
+        view.loading, view.progress = True, 0
+        if view is self.current_view():
+            self.address.start_progress()
+            self._update_nav_buttons()
+
+    def _on_load_progress(self, view: WebView, value: int) -> None:
+        view.progress = value
+        if view is self.current_view():
+            self.address.update_progress(value)
+
+    def _sync_page_background(self, view: QWebEngineView) -> None:
+        """What shows where a page paints no background of its own: the theme's colour on
+        the Start Page and blank tabs, white (as in every browser) on websites - a dark
+        canvas under a page written for white made its black text unreadable."""
+        url = view.url()
+        web = url.scheme() in ("http", "https", "file", "data") and not is_start_page(url)
+        if web and self._wants_dark(url):
+            web = False                                  # Make Websites Dark turns their text light
+        try:
+            view.page().setBackgroundColor(QColor("#FFFFFF") if web else qc(self.theme["content"]))
+        except RuntimeError:
+            pass
+
+    def _recheck_reader(self, view: WebView, url: str) -> None:
+        try:
+            if view.url().toString() == url and not view.loading:
+                self._check_reader(view)
+        except RuntimeError:
+            pass
+
+    def _on_load_finished(self, view: WebView, ok: bool) -> None:
+        view.loading, view.progress = False, 100
+        if ok:
+            self._check_reader(view)
+        if self.tint_enabled:
+            QTimer.singleShot(1500, partial(self._drop_stale_tint, view))
+        if view is self.current_view():
+            self.address.finish_progress()
+            self._update_nav_buttons()
+            if self.find_bar.isVisible() and self.find_bar.text():
+                self._find(self.find_bar.text())       # the new page's matches
+        url = without_credentials(view.url())
+        if (ok and not self.private and not view.burner and view.warning is None
+                and url.scheme() in ("http", "https") and self.tabs.indexOf(view) >= 0):
+            self.store.add_history(view.title(), url.toString())
+            self.store.count_stat("pages")
+            if self.prefs.get("rememberPages") and self.muninn is not None:
+                QTimer.singleShot(MUNINN_DELAY_MS, self, partial(self._muninn_capture, view, url.toString()))
+
+    def _on_link_hovered(self, view: WebView, url: str) -> None:
+        if view is self.current_view():                 # look-alike hosts show as xn-- here too
+            self.status_bubble.show_link(edit_text_for(QUrl(url)) if url else "")
+
+    def _on_current_tab_changed(self, index: int) -> None:
+        if self._switching_group:
+            return
+        view = self.tabs.widget(index)
+        if not isinstance(view, WebView):
+            return
+        view.load_pending()
+        self.wake_tab(view)
+        self.schedule_session_save()
+        if not self._overview_closing:        # e.g. Ctrl+2 while the overview is open
+            self._leave_overview()
+        if self._fullscreen_view is not None and view is not self._fullscreen_view:
+            self._exit_page_fullscreen()           # switching tabs leaves page fullscreen
+        self.hide_password_suggestions()
+        self._show_url(view)
+        self._sync_warning_panel()
+        self._sync_permission_prompt()
+        self._apply_tint()
+        self.address.reset_progress(view.loading, view.progress)
+        self._update_nav_buttons()
+        self._sync_tab_title(view)
+        self._sync_reader_button(view)
+        self._on_audio_changed(view)
+        self.status_bubble.show_link("")
+        self.tabs.bar.update()
+        view.setFocus()
+        if self.find_bar.isVisible():                    # find on the newly shown page instead
+            self._find(self.find_bar.text())
+            self.find_bar.field.setFocus()
+
+    def _update_nav_buttons(self) -> None:
+        view = self.current_view()
+        history = view.history() if view else None
+        self.toolbar.back_button.setEnabled(bool(history and history.canGoBack()))
+        self.toolbar.forward_button.setEnabled(bool(history and history.canGoForward()))
+
+    def _capture_thumbnail(self, view: WebView, *_) -> None:
+        """Keeps a small snapshot of the visible page for the tab overview."""
+        try:
+            if view is None or view is not self.current_view() or not view.isVisible() or self.overview.isVisible():
+                return
+            pixmap = view.grab()
+            if not pixmap.isNull():
+                view.thumbnail = pixmap.scaledToWidth(min(pixmap.width(), 560),
+                                                      Qt.TransformationMode.SmoothTransformation)
+        except RuntimeError:
+            pass                                       # the tab was closed meanwhile
+
+    # ---------------------------------------------------------------------------- find on page
+    def show_find_bar(self) -> None:
+        view = self.current_view()
+        if view is None or self._fullscreen_view is not None:
+            return
+        bar = self.find_bar
+        self._place_find_bar()
+        bar.show()
+        bar.raise_()
+        bar.field.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        bar.field.selectAll()
+        if bar.text():
+            self._find(bar.text())
+
+    def _place_find_bar(self) -> None:
+        card = self.tabs.card_rect()
+        self.find_bar.setFixedWidth(max(320, min(470, card.width() - 8)))     # fits a narrow window
+        self.find_bar.move(max(card.left(), card.right() - self.find_bar.width() - 4), card.top() + 2)
+
+    def _find(self, text: str, backwards: bool = False) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        if self._find_view is not None and self._find_view is not view:
+            try:
+                self._find_view.findText("")             # clear the other tab's highlights
+            except RuntimeError:
+                pass
+        self._find_view = view
+        if not text:
+            view.findText("")
+            self.find_bar.set_result(0, 0)
+            return
+        flags = QWebEnginePage.FindFlag.FindBackward if backwards else QWebEnginePage.FindFlag(0)
+        view.findText(text, flags, partial(self._found, view))
+
+    def _found(self, view: WebView, result) -> None:
+        if view is self.current_view() and self.find_bar.isVisible():
+            self.find_bar.set_result(result.activeMatch(), result.numberOfMatches())
+
+    def find_next(self) -> None:
+        if self.find_bar.isVisible() and self.find_bar.text():
+            self.find_bar.find_next()
+        else:
+            self.show_find_bar()
+
+    def find_previous(self) -> None:
+        if self.find_bar.isVisible() and self.find_bar.text():
+            self.find_bar.find_previous()
+        else:
+            self.show_find_bar()
+
+    def close_find_bar(self) -> None:
+        if not self.find_bar.isVisible():
+            return
+        self.find_bar.hide()
+        view = self._find_view
+        self._find_view = None
+        if view is not None:
+            try:
+                view.findText("")
+            except RuntimeError:
+                pass
+        self._focus_current_view()
+
+    # ---------------------------------------------------------------------------- default browser
+    def make_default_browser(self, *_) -> None:
+        """Registers Huginn with Windows and opens Default apps, where Windows lets you pick it."""
+        try:
+            self.register_browser()
+        except OSError as e:
+            self.run_dialog(SheetDialog(self, f"{BROWSER_NAME} couldn't register with Windows", str(e), cancel=None))
+            return
+        self.settings.setValue("registeredWithWindows", " ".join(browser_launch_command()))
+        self.settings.setValue("defaultBrowserOffer", "done")
+        self._default_waiting = True
+        self.open_default_apps()
+        self._sync_default_bar()
+
+    def _default_notice(self) -> tuple | None:
+        if self.private or self.is_default_browser() is not False:
+            return None
+        if self._default_waiting:
+            return ("waiting", f"In Settings, click <b>Set default</b> under {BROWSER_NAME} (or choose "
+                    f"{BROWSER_NAME} for HTTP and HTTPS).", "globe", "Open Settings", "Done", None)
+        if not self._default_offer_due or str(self.settings.value("defaultBrowserOffer", "")) in ("never", "done"):
+            return None
+        later = self.settings.value("defaultBrowserOfferAfter", 0.0, type=float)
+        if later and time.time() < later:
+            return None
+        return ("offer", f"Make {BROWSER_NAME} your default browser? Links you open in other apps will "
+                "open here.", "globe", "Make Default", "Not Now", "Don't Ask Again")
+
+    def offer_default_browser(self) -> None:
+        self._default_offer_due = True
+        self._sync_default_bar()
+
+    def _sync_default_bar(self) -> None:
+        bar = getattr(self, "default_bar", None)
+        if bar is None:
+            return
+        notice = self._default_notice()
+        busy = any(b.isVisible() for b in (self.password_bar, self.engine_bar, self.permission_prompt))
+        if notice is None or busy or self._fullscreen_view is not None:
+            bar.hide()
+            bar.setProperty("kind", None)
+            return
+        kind, text, glyph, accept, decline, extra = notice
+        if bar.property("kind") != kind:
+            bar.set_notice(kind, text, glyph, self.icons, self.theme, accept, decline, extra)
+        self._place_permission_prompt(bar)
+        bar.show()
+        bar.raise_()
+
+    def _answer_default_bar(self, accepted: bool) -> None:
+        kind = self.default_bar.property("kind")
+        if kind == "waiting":
+            if accepted:
+                self.open_default_apps()
+            else:
+                self._default_waiting = False
+        elif accepted:
+            self.make_default_browser()
+            return
+        else:                                         # Not Now: ask again in a month
+            self.settings.setValue("defaultBrowserOfferAfter", time.time() + 30 * 24 * 3600)
+        self._default_offer_due = False
+        self._sync_default_bar()
+
+    def _never_offer_default(self) -> None:
+        self.settings.setValue("defaultBrowserOffer", "never")
+        self._default_offer_due = False
+        self._sync_default_bar()
+
+    def _check_default_after_settings(self) -> None:
+        if self._default_waiting and self.is_default_browser():
+            self._default_waiting = False
+            self._sync_default_bar()
+            self.status_bubble.show_message(f"{BROWSER_NAME} is now your default browser", 4000)
+
+    # ---------------------------------------------------------------------------- importing
+    def import_from(self, source: dict | None, *_) -> tuple[int, int] | None:
+        """Brings over another browser's bookmarks and history (source None: an exported
+        bookmarks file) and says what was added. Returns (bookmarks, history) added."""
+        if source is None:
+            path = self.ask_bookmarks_file()
+            if not path:
+                return None
+            name = os.path.basename(path)
+            try:
+                bookmarks, history = read_bookmarks_html(path), []
+            except BrowserImportError as e:
+                self.run_dialog(SheetDialog(self, f"Couldn't import “{name}”", str(e), cancel=None))
+                return None
+        else:
+            name = source["browser"]
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)   # a big history takes a moment
+            try:
+                bookmarks, history = read_import_source(source)
+            except BrowserImportError as e:
+                QApplication.restoreOverrideCursor()
+                self.run_dialog(SheetDialog(self, f"Couldn't import from {name}", str(e), cancel=None))
+                return None
+            QApplication.restoreOverrideCursor()
+        added_b = self.store.import_bookmarks(bookmarks)
+        added_h = self.store.import_history(history)
+        self.store.flush()
+
+        def count(n: int, one: str, many: str) -> str:
+            return f"{n:,} {one if n == 1 else many}"
+        if added_b or added_h:
+            parts = []
+            if added_b:
+                parts.append(f"{count(added_b, 'bookmark', 'bookmarks')} to Favorites")
+            if added_h:
+                parts.append(f"{count(added_h, 'page', 'pages')} to History")
+            title = f"Imported from {name}"
+            body = f"Added {' and '.join(parts)}."
+            if added_b:
+                body += " They're in the sidebar (Ctrl+Shift+L); the first ones are on the Start Page too."
+        elif bookmarks or history:
+            title, body = f"Nothing new to import from {name}", f"Everything there is already in {BROWSER_NAME}."
+        else:
+            title, body = f"Nothing to import from {name}", "It has no bookmarks or history to bring over."
+        self.run_dialog(SheetDialog(self, title, body, cancel=None))
+        return added_b, added_h
+
+    # ---------------------------------------------------------------------------- tab sleeping
+    def set_sleep_tabs(self, on: bool, *_) -> None:
+        self.settings.setValue("sleepTabs", bool(on))
+        for window in self.all_windows():
+            window.sleep_tabs = bool(on)
+            if not on:
+                for view in window.all_views():
+                    window.wake_tab(view, reload_discarded=False)
+
+    def wake_tab(self, view: WebView, reload_discarded: bool = True) -> None:
+        """The tab is shown again (or sleeping was turned off): back to normal."""
+        page = view.page()
+        state = page.lifecycleState()
+        if view is self.current_view():
+            view.hidden_since = None
+        if state != QWebEnginePage.LifecycleState.Active and (reload_discarded or
+                                                              state != QWebEnginePage.LifecycleState.Discarded):
+            page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        self._mark_asleep(view, page.lifecycleState() != QWebEnginePage.LifecycleState.Active)
+
+    def _mark_asleep(self, view: WebView, asleep: bool) -> None:
+        index = self.tabs.indexOf(view)
+        if index >= 0 and (self.tabs.bar.tabData(index) == "asleep") != asleep:
+            self.tabs.bar.setTabData(index, "asleep" if asleep else None)
+            self.tabs.bar.update()
+
+    def sleep_idle_tabs(self) -> None:
+        """Freezes tabs nobody has looked at for a while and later unloads them - never the
+        tab you're on, one playing sound, still loading, or one Chromium says must stay
+        awake (e.g. using the camera); a page with typed-in text is only frozen."""
+        if not self.sleep_tabs:
+            return
+        now = self.clock()
+        current = self.current_view()
+        Lifecycle = QWebEnginePage.LifecycleState
+        for view in self.all_views():
+            if view.pending is not None:                   # not loaded yet: nothing to put to sleep
+                continue
+            if view is current or view is self._fullscreen_view:
+                view.hidden_since = None
+                continue
+            if view.hidden_since is None:
+                view.hidden_since = now
+                continue
+            page = view.page()
+            idle = now - view.hidden_since
+            if view.loading or page.recentlyAudible() or page.isVisible():
+                continue
+            state, allowed = page.lifecycleState(), page.recommendedState()
+            if state == Lifecycle.Active and idle >= TAB_FREEZE_AFTER and allowed != Lifecycle.Active:
+                page.runJavaScript(EDITED_FIELDS_JS, APPLICATION_WORLD, partial(self._freeze_tab, view))
+            elif (state == Lifecycle.Frozen and idle >= TAB_DISCARD_AFTER and allowed == Lifecycle.Discarded
+                  and not view.has_edits):
+                page.setLifecycleState(Lifecycle.Discarded)
+                self._mark_asleep(view, True)
+
+    def _freeze_tab(self, view: WebView, edited) -> None:
+        try:
+            if view not in self.all_views() or view is self.current_view() or view.page().isVisible():
+                return
+            view.has_edits = bool(edited)
+            page = view.page()
+            if page.lifecycleState() == QWebEnginePage.LifecycleState.Active and not page.recentlyAudible():
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Frozen)
+                self._mark_asleep(view, page.lifecycleState() != QWebEnginePage.LifecycleState.Active)
+        except RuntimeError:
+            pass                                          # the tab was closed meanwhile
+
+    # ---------------------------------------------------------------------------- session
+    def all_views(self) -> list[WebView]:
+        """Every tab of this window, also those in the tab groups not showing."""
+        views = self.views()
+        for i, group in enumerate(self.groups):
+            if i != self.group_index:
+                views += [v for v in group["views"] if v not in views]
+        return views
+
+    def schedule_session_save(self, *_) -> None:
+        if not self.private and not self._closing:
+            self._session_timer.start()
+
+    def _store_current_group(self) -> None:
+        group = self.groups[self.group_index]
+        group["views"] = self.views()
+        group["current"] = max(0, self.tabs.currentIndex())
+
+    def session_data(self) -> dict:
+        self._store_current_group()
+        groups = []
+        for group in self.groups:
+            tabs = []
+            for view in group["views"]:
+                url = without_credentials(view.tab_url())
+                if view.burner or (url.scheme() == START_SCHEME and url.path() == "welcome"):
+                    continue                                 # burner tabs and the tour are never kept
+                if url.isValid() and not url.isEmpty() and url.toString() != "about:blank":
+                    tabs.append({"url": url.toString(), "title": view.tab_title()[:300]}
+                                | ({"pinned": True} if view.pinned else {}))
+            groups.append({"name": group["name"], "tabs": tabs, "container": group.get("container"),
+                           "current": min(group["current"], max(0, len(tabs) - 1))})
+        return {"groups": groups, "group": self.group_index, "time": time.time()}
+
+    def save_session(self) -> None:
+        if self.private:
+            return
+        self._session_timer.stop()
+        self.settings.setValue("session", json.dumps(self.session_data()))
+
+    def set_restore_tabs(self, on: bool, *_) -> None:
+        self.restore_tabs = bool(on)
+        self.settings.setValue("restoreSession", self.restore_tabs)
+
+    def restore_session(self) -> bool:
+        """Reopens the tabs (and tab groups) open when Huginn last closed. Only the tab
+        you were on loads straight away; the others load when you click them."""
+        try:
+            data = json.loads(str(self.settings.value("session", "") or ""))
+        except ValueError:
+            return False
+        groups = data.get("groups") if isinstance(data, dict) else None
+        if not isinstance(groups, list) or not any(isinstance(g, dict) and g.get("tabs") for g in groups):
+            return False
+        current = data.get("group") if isinstance(data.get("group"), int) else 0
+        show = 0
+        for i, raw in enumerate(groups[:50]):
+            if not isinstance(raw, dict):
+                continue
+            tabs = [t for t in raw.get("tabs", []) if isinstance(t, dict) and isinstance(t.get("url"), str)]
+            name = str(raw.get("name") or "")[:60] if i else ""
+            if i:
+                if not tabs:
+                    continue
+                container = raw.get("container") if isinstance(raw.get("container"), str) else None
+                if container and not re.fullmatch(r"[0-9a-f]{8}", container):
+                    container = None
+                self.groups.append({"name": name or f"Group {i}", "views": [], "current": 0,
+                                    "container": container, "container_id": container})
+            index = len(self.groups) - 1
+            chosen = raw.get("current") if isinstance(raw.get("current"), int) else 0
+            chosen = min(max(0, chosen), max(0, len(tabs) - 1))
+            if index == 0 and tabs:
+                for n, tab in enumerate(tabs[:200]):
+                    view = self.add_tab(QUrl(tab["url"]), background=True, lazy=None if n == chosen else tab,
+                                        profile=self.profile)
+                    view.pinned = bool(tab.get("pinned"))
+                self.select_tab(min(chosen, self.tabs.count() - 1))
+                self._sync_pins()
+            else:
+                group = self.groups[index]
+                profile = self.group_profile(index)
+                for tab in tabs[:200]:
+                    view = self._new_view(lazy=tab, profile=profile)
+                    view.pinned = bool(tab.get("pinned"))
+                    group["views"].append(view)
+                group["current"] = chosen
+            if i == current:
+                show = index
+        if show:
+            self.switch_group(show)
+        if not self.tabs.count():
+            self.add_tab(QUrl(START_URL))
+        return True
+
+    # ---------------------------------------------------------------------------- tab groups
+    def group_name(self, index: int | None = None) -> str:
+        index = self.group_index if index is None else index
+        return self.groups[index]["name"] or "Main Tabs"
+
+    def switch_group(self, index: int, *_) -> None:
+        if self.private or index == self.group_index or not 0 <= index < len(self.groups):
+            return
+        self._leave_overview()
+        self.close_find_bar()
+        self._capture_thumbnail(self.current_view())
+        self._store_current_group()
+        self._switching_group = True
+        self.tabs.setUpdatesEnabled(False)
+        try:
+            while self.tabs.count():
+                self.tabs.removeTab(0)                       # the pages stay alive
+            self.group_index = index
+            group = self.groups[index]
+            for view in group["views"]:
+                self.tabs.addTab(view, self._tab_icon(view), self._tab_title(view))
+                view.hidden_since = None
+        finally:
+            self._switching_group = False
+        if not self.tabs.count():
+            self.add_tab(QUrl(START_URL))
+        else:
+            target = min(group["current"], self.tabs.count() - 1)
+            self.tabs.setCurrentIndex(target)
+            self._on_current_tab_changed(target)
+            for view in self.views():
+                self._sync_tab_title(view)
+                self._on_audio_changed(view)
+                self._mark_asleep(view, view.page().lifecycleState() != QWebEnginePage.LifecycleState.Active)
+            self._sync_pins()
+        self.tabs.setUpdatesEnabled(True)
+        self.tabs.update_caps()
+        self._sync_tab_title(self.current_view()) if self.current_view() else None
+        self.status_bubble.show_message(f"Tab group: {self.group_name()}", 2500)
+        self.schedule_session_save()
+
+    def ask_text(self, title: str, message: str, text: str = "", placeholder: str = "",
+                 ok: str = "OK", allow_empty: bool = False, max_length: int = 60) -> str | None:
+        """A sheet with one text field: the text, or None if cancelled (or left empty,
+        unless allow_empty)."""
+        sheet = SheetDialog(self, title, message, ok=ok)
+        field = QLineEdit(text)
+        field.setObjectName("SheetInput")
+        field.setPlaceholderText(placeholder)
+        field.setMaxLength(max_length)
+        sheet.add_widget(field)
+        sheet.text_field = field                                  # for tests
+        field.setFocus()
+        field.selectAll()
+        accepted = self.run_dialog(sheet)
+        value = field.text().strip()
+        sheet.deleteLater()
+        if not accepted:
+            return None
+        return value if (value or allow_empty) else None
+
+    def new_tab_group(self, move_view: WebView | None = None, *_) -> int | None:
+        if self.private:
+            return None
+        name = self.ask_text("New Tab Group", "Keep a set of tabs together - for work, a trip, a game - and "
+                             "switch between sets from the sidebar menu.", placeholder="Name, e.g. Work",
+                             ok="Create")
+        if not name:
+            return None
+        self.groups.append({"name": name, "views": [], "current": 0})
+        index = len(self.groups) - 1
+        if move_view is not None:
+            self.move_tab_to_group(move_view, index)
+        self.switch_group(index)
+        return index
+
+    def move_tab_to_group(self, view: WebView, index: int, *_) -> None:
+        if index == self.group_index or not 0 <= index < len(self.groups) or self.tabs.indexOf(view) < 0:
+            return
+        if self.tabs.count() <= 1:
+            self.add_tab(QUrl(START_URL))                   # a group always has a tab
+        self._switching_group = True
+        try:
+            self.tabs.removeTab(self.tabs.indexOf(view))
+        finally:
+            self._switching_group = False
+        self._on_current_tab_changed(self.tabs.currentIndex())
+        target_profile = self.group_profile(index)
+        if view.page().profile() is not target_profile:      # other logins there: reopen it there
+            moved = self._new_view({"url": view.tab_url().toString(), "title": view.tab_title()}, target_profile)
+            moved.pinned = view.pinned
+            view.setParent(None)
+            view.deleteLater()
+            view = moved
+        self.groups[index]["views"].append(view)
+        self.status_bubble.show_message(f"Moved to {self.group_name(index)}", 2500)
+        self.schedule_session_save()
+
+    def rename_tab_group(self, index: int, *_) -> None:
+        if index <= 0 or index >= len(self.groups):
+            return
+        name = self.ask_text("Rename Tab Group", "", text=self.groups[index]["name"], ok="Rename")
+        if name:
+            self.groups[index]["name"] = name
+            self.setWindowTitle(self._title_suffix())
+            if self.current_view() is not None:
+                self._sync_tab_title(self.current_view())
+            self.schedule_session_save()
+
+    def delete_tab_group(self, index: int, *_) -> None:
+        if index <= 0 or index >= len(self.groups):
+            return
+        if index == self.group_index:
+            self._store_current_group()
+        views = list(self.groups[index]["views"])
+        n = len(views)
+        dialog = SheetDialog(self, f"Delete “{self.group_name(index)}”?",
+                             f"Its {n} tab{'s' if n != 1 else ''} will close." if n else "", ok="Delete", danger=True)
+        if not self.run_dialog(dialog):
+            return
+        if index == self.group_index:
+            self.switch_group(0)
+        for view in views:
+            url = without_credentials(view.tab_url())
+            if not _is_blank(url):
+                self._closed_tabs.append(url)
+            view.permission_queue.clear()
+            view.deleteLater()
+        del self._closed_tabs[:-25]
+        del self.groups[index]
+        if self.group_index > index:
+            self.group_index -= 1
+        self.status_bubble.show_message("Tab group deleted", 2500)
+        self.schedule_session_save()
+
+    # ---------------------------------------------------------------------------- sound
+    def _on_audio_changed(self, view: WebView, *_) -> None:
+        try:
+            page = view.page()
+            state = "muted" if page.isAudioMuted() else ("playing" if page.recentlyAudible() else None)
+        except RuntimeError:
+            return
+        if state == "playing":
+            self._watch_audible(view)
+        index = self.tabs.indexOf(view)
+        if index >= 0:
+            color = self.theme["text_secondary"] if state == "muted" else self.theme["accent"]
+            icon = None if state is None else self.icons.icon("speaker_muted" if state == "muted" else "speaker", color)
+            self.tabs.bar.set_audio(index, icon, "Unmute Tab" if state == "muted" else "Mute Tab")
+        if view is self.current_view():
+            self.address.set_audio(state)
+
+    def toggle_mute(self, view: WebView | None = None, *_) -> None:
+        view = view if isinstance(view, WebView) else self.current_view()
+        if view is None:
+            return
+        page = view.page()
+        page.setAudioMuted(not page.isAudioMuted())
+        self._on_audio_changed(view)
+
+    def _toggle_mute_at(self, index: int) -> None:
+        view = self.tabs.widget(index)
+        if isinstance(view, WebView):
+            self.toggle_mute(view)
+
+    # ---------------------------------------------------------------------------- reader
+    def reader_prefs(self) -> dict:
+        size = self.settings.value("readerSize", 2, type=int)
+        font = str(self.settings.value("readerFont", "serif"))
+        theme = str(self.settings.value("readerTheme", ""))
+        return {"size": min(max(0, size), len(READER_SIZES) - 1), "font": font if font in ("serif", "sans") else "serif",
+                "theme": theme if theme in READER_THEMES else ("dark" if self.theme["dark"] else "light")}
+
+    def save_reader_prefs(self, data: dict) -> None:
+        if isinstance(data.get("size"), int) and 0 <= data["size"] < len(READER_SIZES):
+            self.settings.setValue("readerSize", data["size"])
+        if data.get("font") in ("serif", "sans"):
+            self.settings.setValue("readerFont", data["font"])
+        if data.get("theme") in READER_THEMES:
+            self.settings.setValue("readerTheme", data["theme"])
+
+    def _check_reader(self, view: WebView) -> None:
+        source = reader_source()
+        url = view.url()
+        if not source or url.scheme() not in ("http", "https", "file"):
+            return
+        view.page().runJavaScript(READER_CHECK_JS.replace("%SOURCE%", source), APPLICATION_WORLD,
+                                  partial(self._reader_checked, view, url.toString()))
+
+    def _reader_checked(self, view: WebView, url: str, result) -> None:
+        try:
+            if view.url().toString() != url:
+                return
+        except RuntimeError:
+            return
+        view.readerable = bool(result)
+        self._sync_reader_button(view)
+
+    def _sync_reader_button(self, view: WebView) -> None:
+        if view is self.current_view():
+            self.address.set_reader(True if view.reader_on else (False if view.readerable else None))
+
+    def toggle_reader(self, *_) -> None:
+        view = self.current_view()
+        source = reader_source()
+        if view is None or not source or view.url().scheme() not in ("http", "https", "file"):
+            return
+        js = (READER_TOGGLE_JS.replace("%SOURCE%", source).replace("%SIZES%", json.dumps(READER_SIZES))
+              .replace("%PREFS%", json.dumps(self.reader_prefs())).replace("%THEMES%", json.dumps(READER_THEMES)))
+        channel = _webchannel_js()
+        if channel:
+            js = "if (!window.__safariqtObjects) { (function () {\n" + channel + "\n})(); }\n" + js
+        view.page().runJavaScript(js, APPLICATION_WORLD, partial(self._reader_toggled, view))
+
+    def _reader_toggled(self, view: WebView, result) -> None:
+        try:
+            view.reader_on = result == "open"
+        except RuntimeError:
+            return
+        if result == "none":
+            view.readerable = False
+            self.status_bubble.show_message("Reader isn't available for this page", 2500)
+        self._sync_reader_button(view)
+
+    def on_reader_closed(self, view: WebView) -> None:
+        view.reader_on = False
+        self._sync_reader_button(view)
+
+    # ---------------------------------------------------------------------------- downloads
+    def _sync_downloads_button(self) -> None:
+        button = self.toolbar.downloads_capsule
+        button.setVisible(bool(self.downloads.entries))
+        self.toolbar.downloads_ring.set_value(self.downloads.progress())
+
+    def show_downloads(self, *_) -> None:
+        self.toolbar.downloads_capsule.show()
+        self.downloads_panel.set_theme(self.theme)
+        self.downloads_panel.show_under(self.toolbar.downloads_capsule)
+
+    def retry_download(self, url: str) -> None:
+        view = self.current_view()
+        if view is not None and url.startswith(("http://", "https://")):
+            view.page().download(QUrl(url))
+
+    # ---------------------------------------------------------------------------- screenshots
+    def take_screenshot(self, whole: bool = True, *_) -> None:
+        view = self.current_view()
+        if view is None or self._shot is not None:
+            return
+        if not whole:
+            self._save_screenshot(view, view.grab().toImage())
+            return
+        js = ("(function () { var e = document.scrollingElement || document.documentElement;"
+              " return JSON.stringify([Math.max(e.scrollHeight, document.body ? document.body.scrollHeight : 0),"
+              " innerHeight, scrollY]); })()")
+        self._shot = {"view": view}
+        view.page().runJavaScript(js, APPLICATION_WORLD, partial(self._shot_measured, view))
+
+    def _shot_measured(self, view: WebView, metrics) -> None:
+        try:
+            metrics = json.loads(metrics)                 # (arrays don't come through runJavaScript)
+            height, viewport, start = (int(metrics[0]), int(metrics[1]), int(metrics[2]))
+        except (TypeError, ValueError, IndexError):
+            height = viewport = start = 0
+        if viewport <= 0 or height <= viewport + 2:
+            self._shot = None
+            self._save_screenshot(view, view.grab().toImage())
+            return
+        first = view.grab()
+        scale = first.height() / viewport if viewport else 1.0
+        height = min(height, int(30000 / max(scale, 0.01)), 20000)
+        stops = list(range(0, max(1, height - viewport), viewport)) + [max(0, height - viewport)]
+        cover = QLabel(self.tabs)                    # a still image hides the scrolling
+        cover.setPixmap(first)
+        cover.setGeometry(QRect(view.mapTo(self.tabs, QPoint(0, 0)), view.size()))
+        cover.show()
+        cover.raise_()
+        self._shot = {"view": view, "stops": stops, "parts": [], "start": start, "scale": scale,
+                      "height": height, "cover": cover, "hid": False}
+        self._shot_next()
+
+    def _shot_next(self) -> None:
+        shot = self._shot
+        if shot is None:
+            return
+        view = shot["view"]
+        if not shot["stops"]:
+            self._shot_finish()
+            return
+        y = shot["stops"].pop(0)
+        hide = "" if not shot["parts"] or shot["hid"] else SHOT_HIDE_FIXED_JS
+        shot["hid"] = shot["hid"] or bool(hide)
+        js = ("(function () { document.documentElement.style.scrollBehavior = 'auto';" + hide +
+              f" window.scrollTo(0, {int(y)}); return scrollY; }})()")
+        try:
+            view.page().runJavaScript(js, APPLICATION_WORLD, self._shot_scrolled)
+        except RuntimeError:
+            self._shot_finish(failed=True)
+
+    def _shot_scrolled(self, y) -> None:
+        QTimer.singleShot(220, partial(self._shot_grab, y))
+
+    def _shot_grab(self, y) -> None:
+        shot = self._shot
+        if shot is None:
+            return
+        try:
+            shot["parts"].append((int(y or 0), shot["view"].grab().toImage()))
+        except RuntimeError:
+            self._shot_finish(failed=True)
+            return
+        self._shot_next()
+
+    def _shot_finish(self, failed: bool = False) -> None:
+        shot, self._shot = self._shot, None
+        if shot is None:
+            return
+        view = shot["view"]
+        try:
+            view.page().runJavaScript(SHOT_RESTORE_JS + f" window.scrollTo(0, {int(shot['start'])});",
+                                      APPLICATION_WORLD)
+        except RuntimeError:
+            failed = True
+        QTimer.singleShot(250, shot["cover"].deleteLater)
+        if failed or not shot["parts"]:
+            return
+        scale, width = shot["scale"], shot["parts"][0][1].width()
+        image = QImage(width, int(shot["height"] * scale), QImage.Format.Format_RGB32)
+        image.fill(QColor("#FFFFFF"))
+        p = QPainter(image)
+        for y, part in shot["parts"]:
+            p.drawImage(QPoint(0, int(round(y * scale))), part)
+        p.end()
+        self._save_screenshot(view, image)
+
+    def _save_screenshot(self, view: WebView, image: QImage) -> str | None:
+        if image.isNull():
+            return None
+        folder = self.screenshot_folder()
+        os.makedirs(folder, exist_ok=True)
+        site = re.sub(r"[^\w.\-]+", " ", bare_host(view.url()) or "Page").strip() or "Page"
+        stamp = time.strftime("%Y-%m-%d at %H.%M.%S")
+        path = os.path.join(folder, f"Screenshot {site} {stamp}.png")
+        n = 2
+        while os.path.exists(path):
+            path = os.path.join(folder, f"Screenshot {site} {stamp} ({n}).png")
+            n += 1
+        if not image.save(path, "PNG"):
+            self.status_bubble.show_message("The screenshot couldn't be saved", 3000)
+            return None
+        self.downloads.add_file(path)
+        self.status_bubble.show_message("Screenshot saved to Downloads", 3000)
+        return path
+
+    # ---------------------------------------------------------------------------- spelling & cookies
+    def set_spellcheck(self, on: bool, *_) -> None:
+        self.settings.setValue("spellCheck", bool(on))
+        for window in self.all_windows():
+            window.spellcheck = bool(on)
+            apply_spellcheck(window.profile, bool(on))
+
+    def set_norse_greeting(self, on: bool, *_) -> None:
+        """The Start Page greets in Old Norse (English on hover) - or in English (Old Norse on
+        hover, the default)."""
+        self.settings.setValue("norseGreeting", bool(on))
+        for window in self.all_windows():
+            window.start_handler.norse = bool(on)
+            window._refresh_start_pages()
+
+    def keep_cookie_sites(self) -> set[str]:
+        try:
+            sites = json.loads(str(self.settings.value("keepCookies", "[]") or "[]"))
+        except ValueError:
+            sites = []
+        return {str(s) for s in sites if isinstance(s, str)} if isinstance(sites, list) else set()
+
+    def set_keep_cookies(self, host: str, keep: bool, *_) -> None:
+        site = registrable_domain(host.lower())
+        sites = self.keep_cookie_sites()
+        sites = sites | {site} if keep else sites - {site}
+        self.settings.setValue("keepCookies", json.dumps(sorted(sites)))
+
+    def clear_cookies_now(self) -> int:
+        """At quit, with 'Delete cookies when Huginn closes' on (the cookie database is
+        cleaned again before the next start, in case this is cut short)."""
+        return self.cookies.delete_except(self.keep_cookie_sites())
+
+    # ---------------------------------------------------------------------------- sharing & updates
+    def share_with_friends(self, *_) -> str | None:
+        """Makes the zip to give friends (on the Desktop)."""
+        url = self.ask_text(
+            "Share Huginn With Friends",
+            "This makes a zip on your Desktop for a friend to unpack and install with “Install Huginn.bat” (a "
+            "few clicks, no admin rights). Nothing of yours goes in it - no bookmarks, history, passwords or settings.\n\n"
+            "Optional, for updates: the web address where you'll upload updates (huginn-update.json), e.g. a "
+            "GitHub release. Their copy checks it daily and only installs updates signed by this PC.",
+            text=str(self.settings.value("updateUrl", "")), placeholder="https://…/huginn-update.json  (optional)",
+            ok="Create Package", allow_empty=True, max_length=500)
+        if url is None:
+            return None
+        url = url.strip()
+        if url and not url.startswith("https://"):
+            self.run_dialog(SheetDialog(self, "Use an https:// address",
+                                        "Updates are only fetched over a secure connection.", cancel=None))
+            return None
+        try:
+            version = next_version(app_version())
+            target = os.path.join(self.package_folder(), f"Huginn {version}.zip")
+            version = create_friend_package(target, self.data_dir, url)
+        except Exception as e:
+            self.run_dialog(SheetDialog(self, "The package couldn't be made", str(e), cancel=None))
+            return None
+        self.settings.setValue("updateUrl", url)
+        note = (" Their copy will look for updates at the address you gave; use Publish Update for Friends in "
+                "the page menu when you've changed something.") if url else ""
+        self.run_dialog(SheetDialog(self, "Package ready",
+                                    f"“{os.path.basename(target)}” is on your Desktop. Send it to a friend: they "
+                                    f"unpack it and double-click “Install Huginn.bat”.{note}", cancel=None))
+        return target
+
+    def publish_update(self, *_) -> str | None:
+        url = str(self.settings.value("updateUrl", ""))
+        notes = self.ask_text("Publish Update for Friends",
+                              "Makes the two files to upload, in a folder on your Desktop. Optional: a line about "
+                              "what's new (friends see it).", placeholder="What's new (optional)", ok="Publish",
+                              allow_empty=True, max_length=300)
+        if notes is None:
+            return None
+        try:
+            version = next_version(app_version())
+            folder = os.path.join(self.package_folder(), f"Huginn Update {version}")
+            version, files = publish_update(folder, self.data_dir, notes or "")
+        except Exception as e:
+            self.run_dialog(SheetDialog(self, "The update couldn't be made", str(e), cancel=None))
+            return None
+        where = QUrl(url).resolved(QUrl(".")).toString() if url else "your update address"
+        self.run_dialog(SheetDialog(self, f"Update {version} ready",
+                                    f"Upload both files in “{os.path.basename(folder)}” (on your Desktop) to "
+                                    f"{where}, replacing the old ones. Your friends' copies pick it up within a day.",
+                                    cancel=None))
+        return folder
+
+    def check_for_updates(self, *_) -> None:
+        if self.updater is not None:
+            self.settings.setValue("updateCheckedAt", 0.0)
+            self.updater.check()
+            self.status_bubble.show_message("Checking for updates…", 2500)
+
+    def on_update_ready(self, version: str, notes: str) -> None:
+        self._update_ready = (version, notes)
+        self._sync_update_bar()
+
+    def _sync_update_bar(self) -> None:
+        bar = self.update_bar
+        if self._update_ready is None or self._fullscreen_view is not None:
+            bar.hide()
+            return
+        version, notes = self._update_ready
+        text = f"{BROWSER_NAME} {html.escape(version)} is installed. Restart to use it."
+        if notes:
+            text += f"<br><span style='opacity:.75'>{html.escape(notes)}</span>"
+        bar.set_notice("update", text, "gift", self.icons, self.theme, "Restart", "Later")
+        self._place_permission_prompt(bar)
+        bar.show()
+        bar.raise_()
+
+    def _answer_update_bar(self, restart: bool) -> None:
+        self.update_bar.hide()
+        if restart:
+            self.restart_for_update()
+        else:
+            self._update_ready = None
+
+    def restart_for_update(self) -> None:
+        main = self.main_window or self
+        main.save_session()
+        if restart_browser(os.getpid()):
+            main.quit_all()
+
+    # ---------------------------------------------------------------------------- address bar suggestions
+    def _favicon_for(self, url: str) -> QIcon:
+        q = QUrl(url)
+        if is_start_page(q):
+            return self.app_icon
+        icon = self.start_handler.favicons.icon(bare_host(q))
+        return self._fallback_favicon() if icon.isNull() else icon
+
+    def address_suggestions(self, text: str) -> list[dict]:
+        """What the address field offers for `text`: open tabs, favorites, history and
+        Reading List entries that match, after the search (or the address) itself."""
+        text = text.strip()
+        if not text:
+            return []
+        items: list[dict] = []
+        target = url_from_user_input(text)
+        looks_like_site = target is not None and " " not in text and ("." in text or ":" in text)
+        engine = SEARCH_ENGINES.get(self.prefs["searchEngine"], ("Search", ""))[0]
+        if looks_like_site:
+            items.append({"title": strip_scheme(target.toString()), "subtitle": "Go to site", "glyph": "globe",
+                          "action": partial(self.navigate, text)})
+        items.append({"title": text, "subtitle": f"Search {engine if engine != 'Custom…' else 'the web'}",
+                      "glyph": "search", "action": partial(self.navigate_search, text)})
+        seen = {strip_scheme(target.toString())} if looks_like_site else set()
+        current = self.current_view()
+        tabs = []
+        for view in self.all_views():
+            if view is current:
+                continue
+            url = view.tab_url().toString()
+            score = match_score(text, view.tab_title(), strip_scheme(url))
+            if score and url not in seen:
+                tabs.append((score, {"title": view.tab_title() or strip_scheme(url), "subtitle": "Switch to Tab",
+                                     "qicon": self._tab_icon(view), "action": partial(self.reveal_view, view)}))
+                seen.add(url)
+        items += [i for _, i in sorted(tabs, key=lambda t: -t[0])[:2]]
+        found = []
+        for bm in self.store.bookmarks:
+            score = match_score(text, bm.get("title", ""), strip_scheme(bm["url"]))
+            if score and strip_scheme(bm["url"]) not in seen:
+                found.append((score + 2, bm["url"], bm.get("title") or bm["url"], "Favorite"))
+        for entry in self.store.reading_list:
+            score = match_score(text, entry.get("title", ""), strip_scheme(entry["url"]))
+            if score:
+                found.append((score + 1, entry["url"], entry.get("title") or entry["url"], "Reading List"))
+        if not self.private:
+            for entry in history_ranked(self.store.history[:3000])[:400]:
+                score = match_score(text, entry["title"], strip_scheme(entry["url"]))
+                if score:
+                    found.append((score + min(3.0, entry["score"]), entry["url"], entry["title"], "History"))
+        for _score, url, title, kind in sorted(found, key=lambda f: -f[0]):
+            key = strip_scheme(url)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"title": title, "subtitle": f"{strip_scheme(url)}  ·  {kind}", "qicon": self._favicon_for(url),
+                          "action": partial(self.navigate, url), "url": url})
+            if len(items) >= 7:
+                break
+        if len(items) < 8 and len(text) >= 4:
+            for hit in self.muninn_search(text, 2):
+                if strip_scheme(hit["url"]) not in seen:
+                    seen.add(strip_scheme(hit["url"]))
+                    items.append({"title": hit["title"], "subtitle": f"From a page you read: {Muninn.quote(hit['snippet'], 80)}",
+                                  "glyph": "reading", "action": partial(self.navigate, hit["url"]), "url": hit["url"]})
+        for suggestion in self._remote_suggestions.get(text.lower(), [])[:3]:
+            if suggestion.lower() != text.lower() and len(items) < 9:
+                items.append({"title": suggestion, "subtitle": f"{engine} suggestion", "glyph": "search",
+                              "action": partial(self.navigate_search, suggestion)})
+        return items
+
+    def navigate_search(self, text: str) -> None:
+        self._leave_overview()
+        view = self.current_view() or self.add_tab(None)
+        url = QUrl(SEARCH_URL.format(quote_plus(text)))
+        view.setUrl(url)
+        self.address.set_url(url)
+        view.setFocus()
+
+    def inline_completion(self, text: str) -> str:
+        """The rest of a site address you've been to that starts with what you typed."""
+        typed = text.lower()
+        if len(typed) < 2 or " " in typed or "/" in typed:
+            return ""
+        candidates = [b["url"] for b in self.store.bookmarks]
+        if not self.private:
+            candidates += [e["url"] for e in history_ranked(self.store.history[:3000])[:300]]
+        for url in candidates:
+            host = strip_scheme(url).split("/")[0]
+            if host.lower().startswith(typed) and len(host) > len(typed):
+                return host[len(text):]
+        return ""
+
+    def _on_address_edited(self, text: str) -> None:
+        edit = self.address.edit
+        if self._completing:
+            return
+        # Backspace over the completion, or deleting what you typed: don't complete again.
+        deleting = text == self._last_typed or (len(text) < len(self._last_typed) and self._last_typed.startswith(text))
+        self._last_typed = text
+        if not deleting and edit.cursorPosition() == len(text):
+            rest = self.inline_completion(text)
+            if rest:
+                self._completing = True
+                edit.setText(text + rest)
+                edit.setSelection(len(text), len(rest))
+                self._completing = False
+        self._show_address_suggestions(text)
+        if self.prefs.get("searchSuggestions") and not self.private and text.strip():
+            self._suggest_timer.start()
+
+    def _show_address_suggestions(self, text: str) -> None:
+        panel = self.address_panel
+        items = self.address_suggestions(text)
+        if not items or not self.address.edit.hasFocus():
+            panel.hide()
+            return
+        panel.WIDTH = max(380, self.address.width() + 40)
+        panel.set_items(items, self.icons, self.theme)
+        anchor = self.address.mapTo(self, QPoint(self.address.width() // 2, self.address.height()))
+        panel.move(anchor.x() - panel.width() // 2, anchor.y() - 2)
+        panel.show()
+        panel.raise_()
+
+    def _fetch_remote_suggestions(self) -> None:
+        text = self._last_typed.strip()
+        template = SUGGEST_URLS.get(self.prefs["searchEngine"])
+        if not text or not template or text.lower() in self._remote_suggestions:
+            return
+        request = QNetworkRequest(QUrl(template.format(quote_plus(text))))
+        request.setAttribute(QNetworkRequest.Attribute.CookieSaveControlAttribute, QNetworkRequest.LoadControl.Manual)
+        request.setAttribute(QNetworkRequest.Attribute.CookieLoadControlAttribute, QNetworkRequest.LoadControl.Manual)
+        reply = self._suggest_net.get(request)
+        reply.finished.connect(partial(self._remote_arrived, reply, text))
+
+    def _remote_arrived(self, reply: QNetworkReply, text: str) -> None:
+        try:
+            data = json.loads(bytes(reply.readAll().data()).decode("utf-8", "replace"))
+            words = [str(s) for s in data[1]][:5] if isinstance(data, list) and len(data) > 1 else []
+        except (ValueError, TypeError, IndexError):
+            words = []
+        reply.deleteLater()
+        self._remote_suggestions[text.lower()] = words
+        if len(self._remote_suggestions) > 200:
+            self._remote_suggestions.clear()
+        if self.address.edit.hasFocus() and self._last_typed.strip() == text:
+            current = self.address_panel.current
+            self._show_address_suggestions(text)
+            self.address_panel.current = current
+            self.address_panel.update()
+
+    def _address_key(self, event) -> bool:
+        panel = self.address_panel
+        if not panel.isVisible():
+            return False
+        key = event.key()
+        if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            panel.move_selection(1 if key == Qt.Key.Key_Down else -1)
+            item = panel.items[panel.current] if 0 <= panel.current < len(panel.items) else None
+            if item is not None and item.get("url"):
+                self._completing = True
+                self.address.edit.setText(strip_scheme(item["url"]))
+                self._completing = False
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and panel.current >= 0:
+            self._choose_address_suggestion(panel.current)
+            return True
+        if key == Qt.Key.Key_Escape:
+            panel.hide()
+            return False
+        return False
+
+    def _choose_address_suggestion(self, row: int) -> None:
+        panel = self.address_panel
+        if 0 <= row < len(panel.items):
+            action = panel.items[row].get("action")
+            panel.hide()
+            if callable(action):
+                action()
+
+    def _on_address_focus(self, focused: bool) -> None:
+        if not focused:
+            QTimer.singleShot(120, self, lambda: None if self.address.edit.hasFocus() else self.address_panel.hide())
+        else:
+            self._last_typed = ""
+
+    def reveal_view(self, view: "WebView") -> None:
+        """Shows a tab wherever it is (switching tab group if needed)."""
+        if view in self.views():
+            self.select_tab(self.tabs.indexOf(view))
+            return
+        for i, group in enumerate(self.groups):
+            if view in group["views"]:
+                self.switch_group(i)
+                self.select_tab(self.tabs.indexOf(view))
+                return
+
+    # ---------------------------------------------------------------------------- command bar (Ctrl+K)
+    def show_command_bar(self, *_) -> None:
+        self.address_panel.hide()
+        self.command_bar.open(self.theme, self.icons)
+
+    def _commands(self) -> list[tuple[str, str, object]]:
+        view = self.current_view()
+        cmds = [("New Tab", "plus", self.new_tab), ("New Private Window", "private", self.open_private_window),
+                ("Reopen Closed Tab", "reload", self.reopen_closed_tab), ("Show All Tabs", "tabs", self.toggle_overview),
+                ("Find on Page", "search", self.show_find_bar), ("Reader", "reader", self.toggle_reader),
+                ("Take Screenshot of Whole Page", "screenshot", partial(self.take_screenshot, True)),
+                ("Take Screenshot of Visible Part", "screenshot", partial(self.take_screenshot, False)),
+                ("Mute / Unmute Tab", "speaker", self.toggle_mute), ("Pin / Unpin Tab", "pin", self.toggle_pin),
+                ("Pop Out Video", "popout", self.pop_out_video), ("Split View", "split", self.toggle_split_view),
+                ("Add to Reading List", "reading", self.add_to_reading_list),
+                ("Add to Favorites", "star", self.add_bookmark_for_current),
+                ("Tab Manager", "gauge", self.show_tab_manager), ("Downloads", "download", self.show_downloads),
+                ("Show / Hide Sidebar", "sidebar", self.toggle_sidebar),
+                ("Privacy & Security", "shield", self.show_privacy_settings),
+                ("Clear History", "clock", self.show_clear_history_dialog),
+                ("Zoom In", "plus", self.zoom_in), ("Zoom Out", "stop", self.zoom_out), ("Actual Size", "search", self.zoom_reset),
+                ("Web Inspector", "pointer", self.open_inspector), ("New Tab Group", "group", self.new_tab_group),
+                ("Greet in Old Norse" if not self.start_handler.norse else "Greet in English", "sidebar",
+                 partial(self.set_norse_greeting, not self.start_handler.norse)),
+                ("New Burner Tab", "flame", self.new_burner_tab), ("Valhalla — Closed Tabs", "valhalla", self.show_valhalla),
+                ("Read Aloud", "voice", self.read_aloud), ("Site Style", "palette", self.show_site_style),
+                ("Focus Hours", "moon", self.show_focus_settings),
+                ("Game Mode On / Off", "game", self.toggle_game_mode_now),
+                ("Add Web Panel", "panel", self.add_web_panel),
+                ("Change Theme With Time of Day", "sidebar", partial(self.set_living_theme, not self.living)),
+                ("Weather Location", "weather", self.show_weather_settings),
+                ("Welcome Tour", "sparkle", self.show_welcome),
+                ("Rippling Aurora On / Off", "sidebar", partial(self.set_aurora_ripple, not self.start_handler.ripple)),
+                ("Window Buttons on the Right (Windows)" if self.toolbar.button_style == "mac"
+                 else "Window Buttons on the Left (Mac)", "sidebar",
+                 partial(self.set_window_buttons, "windows" if self.toolbar.button_style == "mac" else "mac"))]
+        if self.passwords is not None:
+            cmds.append(("Passwords", "key", self.show_passwords))
+        for key, spec in REALMS.items():
+            cmds.append((f"Theme: {spec['label']}", "sidebar", partial(self.set_realm, key)))
+        for mode, label in (("light", "Light"), ("dark", "Dark"), ("system", "Follow Windows")):
+            cmds.append((f"Appearance: {label}", "moon", partial(self.set_appearance, mode)))
+        for mode, label in DARK_WEBSITE_MODES.items():
+            cmds.append((f"Websites: {label}", "moon", partial(self.set_dark_websites, mode)))
+        for speed in VIDEO_SPEEDS:
+            cmds.append((f"Video Speed {speed:g}×", "speed", partial(self.set_video_speed, speed)))
+        if not self.private:
+            for i in range(len(self.groups)):
+                cmds.append((f"Tab Group: {self.group_name(i)}", "group", partial(self.switch_group, i)))
+        return cmds if view is not None else [c for c in cmds if c[1] in ("plus", "private", "tabs", "sidebar", "shield")]
+
+    def command_suggestions(self, text: str) -> list[dict]:
+        text = text.strip()
+        items: list[tuple[float, dict]] = []
+        for i, view in enumerate(self.all_views()):
+            url = view.tab_url().toString()
+            score = match_score(text, view.tab_title(), strip_scheme(url)) if text else (5.0 - i * 0.01)
+            if score:
+                items.append((score + 1.5, {"title": view.tab_title() or strip_scheme(url), "subtitle": "Switch to Tab",
+                                            "qicon": self._tab_icon(view), "action": partial(self.reveal_view, view)}))
+        if not text:
+            return [i for _, i in items[:9]]
+        for name, glyph, action in self._commands():
+            score = match_score(text, name)
+            if score:
+                items.append((score + 1.0, {"title": name, "subtitle": "Command", "glyph": glyph, "action": action}))
+        for item in self.address_suggestions(text):
+            if item.get("subtitle") == "Switch to Tab":
+                continue
+            base = 0.5 if item.get("glyph") in ("search", "globe") else match_score(text, item["title"], item.get("url", ""))
+            items.append((base, item))
+        seen = {i.get("url") for _, i in items if i.get("url")}
+        for hit in self.muninn_search(text, 4):
+            if hit["url"] not in seen:
+                items.append((0.4, {"title": hit["title"], "subtitle": f"From a page you read: {Muninn.quote(hit['snippet'], 100)}",
+                                    "glyph": "reading", "action": partial(self.navigate, hit["url"]), "url": hit["url"]}))
+        items.sort(key=lambda pair: -pair[0])
+        return [i for _, i in items]
+
+    # ---------------------------------------------------------------------------- bookmark folders
+    def _open_url(self, url: QUrl, new_tab: bool) -> None:
+        if new_tab:
+            self.add_tab(url, background=True, after_current=True)
+        else:
+            self._leave_overview()
+            (self.current_view() or self.add_tab(None)).setUrl(url)
+
+    def move_bookmark_to_folder(self, url: str, *_) -> None:
+        folders = self.store.bookmark_folders()
+        name = self.ask_text("Move to Folder", "Type a folder's name - an existing one" +
+                             (f" ({', '.join(folders[:6])})" if folders else "") + " or a new one. Leave it empty "
+                             "to take it out of its folder.", placeholder="Folder name", ok="Move", allow_empty=True)
+        if name is not None:
+            self.store.set_bookmark_folder(url, name)
+
+    def rename_bookmark_folder(self, folder: str, *_) -> None:
+        name = self.ask_text("Rename Folder", "", text=folder, ok="Rename")
+        if name:
+            self.store.rename_folder(folder, name)
+
+    def delete_bookmark_folder(self, folder: str, *_) -> None:
+        count = sum(1 for b in self.store.bookmarks if b.get("folder") == folder)
+        dialog = SheetDialog(self, f"Delete the folder “{folder}”?",
+                             f"Its {count} favorite{'s' if count != 1 else ''} will be deleted too.", ok="Delete", danger=True)
+        if self.run_dialog(dialog):
+            self.store.delete_folder(folder)
+
+    # ---------------------------------------------------------------------------- reading list
+    def add_to_reading_list(self, *_) -> None:
+        view = self.current_view()
+        if view is None or view.url().scheme() not in ("http", "https"):
+            return
+        url = without_credentials(view.url()).toString()
+        title = view.title().strip() or display_text_for(view.url())
+        if not self.store.add_reading(url, title):
+            self.status_bubble.show_message("Already in your Reading List")
+            return
+        self.status_bubble.show_message("Added to Reading List — saving a copy to read offline", 2500)
+        if not self.private:
+            folder = os.path.join(self.data_dir, "reading")
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, hashlib.sha1(url.encode()).hexdigest()[:16] + ".mhtml")
+            self._offline_saves[path] = url
+            view.page().save(path, QWebEngineDownloadRequest.SavePageFormat.MimeHtmlSaveFormat)
+
+    def _offline_saved(self, url: str, path: str, download, state) -> None:
+        if state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
+            self.store.set_reading_saved(url, path)
+
+    def open_reading_item(self, url: str, offline: bool = False, new_tab: bool = False) -> None:
+        entry = next((e for e in self.store.reading_list if e["url"] == url), None)
+        if entry is None:
+            return
+        self.store.mark_read(url, True)
+        target = QUrl.fromLocalFile(entry["saved"]) if offline and entry.get("saved") else QUrl(url)
+        self._open_url(target, new_tab)
+
+    # ---------------------------------------------------------------------------- pinned tabs
+    def toggle_pin(self, view: "WebView | None" = None, *_) -> None:
+        view = view if isinstance(view, WebView) else self.current_view()
+        if view is None or self.tabs.indexOf(view) < 0:
+            return
+        view.pinned = not view.pinned
+        pinned_count = sum(1 for v in self.views() if v.pinned and v is not view)
+        index = self.tabs.indexOf(view)
+        self._pinning = True
+        try:
+            self.tabs.bar.moveTab(index, pinned_count)
+        finally:
+            self._pinning = False
+        self._sync_pins()
+        self._on_audio_changed(view)
+        self.schedule_session_save()
+
+    def _sync_pins(self, *_) -> None:
+        """Pinned tabs stay together on the left."""
+        if self._switching_group:
+            return
+        bar = self.tabs.bar
+        self._pinning = True
+        try:
+            moved = True
+            while moved:
+                moved = False
+                for i in range(1, self.tabs.count()):
+                    left, right = self.tabs.widget(i - 1), self.tabs.widget(i)
+                    if isinstance(left, WebView) and isinstance(right, WebView) and right.pinned and not left.pinned:
+                        bar.moveTab(i, i - 1)
+                        moved = True
+        finally:
+            self._pinning = False
+        bar.refresh_layout()
+
+    # ---------------------------------------------------------------------------- per-site zoom
+    def site_zooms(self) -> dict:
+        try:
+            data = json.loads(str(self.settings.value("siteZoom", "{}") or "{}"))
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def _apply_site_zoom(self, view: "WebView") -> None:
+        host = bare_host(view.url())
+        if host == view.zoom_host:
+            return
+        view.zoom_host = host
+        factor = self.site_zooms().get(host, 1.0) if host else 1.0
+        if isinstance(factor, (int, float)) and abs(view.zoomFactor() - factor) > 0.001:
+            view.setZoomFactor(float(factor))
+
+    def _remember_zoom(self, view: "WebView", factor: float) -> None:
+        host = bare_host(view.url())
+        if not host or self.private:
+            return
+        zooms = self.site_zooms()
+        if abs(factor - 1.0) < 0.001:
+            zooms.pop(host, None)
+        else:
+            zooms[host] = round(factor, 3)
+        self.settings.setValue("siteZoom", json.dumps(zooms))
+        for window in self.all_windows():
+            for other in window.all_views():
+                if other is not view and bare_host(other.url()) == host:
+                    other.setZoomFactor(factor)
+
+    # ---------------------------------------------------------------------------- dark websites
+    def dark_off_sites(self) -> set[str]:
+        try:
+            return set(json.loads(str(self.settings.value("darkOffSites", "[]") or "[]")))
+        except (ValueError, TypeError):
+            return set()
+
+    def _wants_dark(self, url: QUrl) -> bool:
+        mode = self.dark_websites
+        if mode == "off" or (mode == "auto" and not self.theme["dark"]):
+            return False
+        return registrable_domain(url.host().lower()) not in self.dark_off_sites() if url.host() else True
+
+    def _apply_dark(self, view: QWebEngineView) -> None:
+        attribute = getattr(QWebEngineSettings.WebAttribute, "ForceDarkMode", None)
+        if attribute is not None:
+            try:
+                view.page().settings().setAttribute(attribute, self._wants_dark(view.url()))
+            except RuntimeError:
+                pass
+
+    def set_dark_websites(self, mode: str, *_) -> None:
+        if mode not in DARK_WEBSITE_MODES:
+            return
+        self.settings.setValue("darkWebsites", mode)
+        for window in self.all_windows():
+            window.dark_websites = mode
+            for view in window.all_views() + ([window.split.view] if window.split.view else []):
+                window._apply_dark(view)
+                window._sync_page_background(view)
+
+    def set_site_dark(self, host: str, on: bool, *_) -> None:
+        site = registrable_domain(host.lower())
+        sites = self.dark_off_sites()
+        sites = sites - {site} if on else sites | {site}
+        self.settings.setValue("darkOffSites", json.dumps(sorted(sites)))
+        for window in self.all_windows():
+            for view in window.all_views():
+                if registrable_domain(view.url().host().lower()) == site:
+                    window._apply_dark(view)
+                    window._sync_page_background(view)
+
+    # ---------------------------------------------------------------------------- tab manager & RAM limit
+    def tab_stats(self) -> dict:
+        """Memory and processor use per tab (tabs of one site can share a process)."""
+        Lifecycle = QWebEnginePage.LifecycleState
+        tabs, pids = [], {}
+        for view in self.all_views():
+            page = view.page()
+            pid = int(page.renderProcessPid() or 0) if view.pending is None else 0
+            state = page.lifecycleState()
+            pids.setdefault(pid, []).append(view)
+            tabs.append({"view": view, "pid": pid, "state": state})
+        usage = {pid: process_stats(pid) for pid in pids if pid}
+        total_pids = {os.getpid()} | set(child_processes(os.getpid())) | {p for p in pids if p}
+        total = sum((process_stats(p) or (0, 0))[0] for p in total_pids)
+        out = []
+        for t in tabs:
+            mem, cpu = usage.get(t["pid"]) or (0, 0.0)
+            sharing = len(pids.get(t["pid"], [])) if t["pid"] else 0
+            if t["view"].pending is not None:
+                detail = "Not loaded yet"
+            elif t["state"] == Lifecycle.Discarded:
+                detail = "Sleeping (unloaded)"
+            elif t["state"] == Lifecycle.Frozen:
+                detail = "Sleeping"
+            elif t["view"].page().recentlyAudible():
+                detail = "Playing sound"
+            else:
+                detail = "Active" if t["view"] is self.current_view() else "In the background"
+            if sharing > 1:
+                detail += f" · shares memory with {sharing - 1} other tab{'s' if sharing > 2 else ''}"
+            out.append({"view": t["view"], "pid": t["pid"], "cpu": cpu, "memory": mem,
+                        "memory_text": format_size(mem) if mem else "–",
+                        "title": t["view"].tab_title() or strip_scheme(t["view"].tab_url().toString()) or "New Tab",
+                        "detail": detail, "icon": self._tab_icon(t["view"]),
+                        "can_sleep": t["view"] is not self.current_view() and t["state"] == Lifecycle.Active
+                        and t["view"].pending is None})
+        out.sort(key=lambda e: -e["memory"])
+        return {"tabs": out, "total": total}
+
+    def show_tab_manager(self, *_) -> None:
+        if self.tab_manager is None:
+            self.tab_manager = TabManager(self)
+        place_sheet(self.tab_manager, self)
+        self.tab_manager.show()
+        self.tab_manager.raise_()
+
+    def set_ram_limit(self, mb: int, *_) -> None:
+        self.ram_limit_mb = int(mb or 0)
+        self.settings.setValue("ramLimitMB", self.ram_limit_mb)
+        self.enforce_ram_limit()
+
+    def sleep_tab_now(self, view: "WebView") -> bool:
+        """Puts a background tab to sleep at once (unloads it unless something is typed in it)."""
+        Lifecycle = QWebEnginePage.LifecycleState
+        try:
+            page = view.page()
+            if view is self.current_view() or view.pending is not None or page.lifecycleState() != Lifecycle.Active:
+                return False
+        except RuntimeError:
+            return False
+
+        def done(edited) -> None:
+            try:
+                if view is self.current_view() or page.lifecycleState() != Lifecycle.Active:
+                    return
+                view.has_edits = bool(edited)
+                page.setLifecycleState(Lifecycle.Frozen)
+                if not view.has_edits and not page.recentlyAudible():
+                    page.setLifecycleState(Lifecycle.Discarded)
+                self._mark_asleep(view, page.lifecycleState() != Lifecycle.Active)
+            except RuntimeError:
+                pass
+        page.runJavaScript(EDITED_FIELDS_JS, APPLICATION_WORLD, done)
+        return True
+
+    def sleep_background_tabs(self, *_) -> int:
+        return sum(1 for view in self.all_views() if self.sleep_tab_now(view))
+
+    def enforce_ram_limit(self) -> int:
+        """Over the RAM limit: the background tabs using the most memory go to sleep."""
+        if not self.ram_limit_mb:
+            return 0
+        stats = self.tab_stats()
+        excess = stats["total"] - self.ram_limit_mb * 1024 * 1024
+        slept = 0
+        counted: set[int] = set()
+        for entry in stats["tabs"]:
+            if excess <= 0:
+                break
+            view = entry["view"]
+            if not entry["can_sleep"] or view.page().recentlyAudible() or view is self._fullscreen_view:
+                continue
+            if self.sleep_tab_now(view):
+                slept += 1
+                if entry["pid"] not in counted:
+                    excess -= entry["memory"]
+                    counted.add(entry["pid"])
+        return slept
+
+    def close_view_anywhere(self, view: "WebView") -> None:
+        index = self.tabs.indexOf(view)
+        if index >= 0:
+            self.close_tab(index)
+            return
+        for group in self.groups:
+            if view in group["views"]:
+                group["views"].remove(view)
+                view.deleteLater()
+                self.schedule_session_save()
+
+    # ---------------------------------------------------------------------------- video
+    def set_video_speed(self, speed: float, *_) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        view.video_speed = float(speed)
+        view.page().runJavaScript(VIDEO_RATE_JS.replace("%RATE%", repr(float(speed))), APPLICATION_WORLD,
+                                  lambda n: self.status_bubble.show_message(
+                                      f"Video speed {speed:g}×" if n else "No video on this page", 2000))
+
+    def pop_out_video(self, *_) -> None:
+        view = self.current_view()
+        if view is None or view.url().scheme() not in ("http", "https", "file"):
+            return
+        view.page().runJavaScript(VIDEO_FIND_JS, APPLICATION_WORLD, partial(self._pop_out_found, view))
+
+    def _pop_out_found(self, view: "WebView", result) -> None:
+        try:
+            info = json.loads(result) if result else None
+        except (ValueError, TypeError):
+            info = None
+        if not info:
+            self.status_bubble.show_message("There's no video on this page to pop out", 2500)
+            return
+        if self.pop_out is not None:
+            self.pop_out.finish(False)
+        player = PopOutPlayer(self, view.page().profile(), view.url(), float(info.get("time", -1)),
+                              bool(info.get("playing", True)), view.title() or bare_host(view.url()))
+        player.returned.connect(partial(self._pop_out_returned, view))
+        self.pop_out = player
+        player.show()
+
+    def _pop_out_returned(self, view: "WebView", t: float) -> None:
+        self.pop_out = None
+        if t < -1.5:
+            return                                   # closed: the tab's video stays paused
+        try:
+            self.reveal_view(view)
+            view.page().runJavaScript(VIDEO_RESUME_JS.replace("%TIME%", repr(float(t))), APPLICATION_WORLD)
+            self.activateWindow()
+        except RuntimeError:
+            pass
+
+    # ---------------------------------------------------------------------------- split view
+    def toggle_split_view(self, *_) -> None:
+        if self.split.isVisible():
+            self.close_split_view()
+        else:
+            self.open_split_view()
+
+    def open_split_view(self, url: QUrl | None = None, *_) -> "WebView":
+        if self.split.view is None:
+            view = WebView(self, self.current_profile())
+            view.page().setBackgroundColor(qc(self.theme["content"]))
+            view.urlChanged.connect(lambda *_: self._sync_page_background(view))
+            self._apply_dark(view)
+            self.split.set_view(view)
+        if not self.split.isVisible():
+            self.split.show()
+            total = self.splitter.width()
+            self.splitter.setSizes([total // 2, total - total // 2])
+            self.tabs.setTabBarAutoHide(False)
+        view = self.split.view
+        target = url if isinstance(url, QUrl) and url.isValid() else QUrl(START_URL)
+        view.setUrl(target)
+        if is_start_page(target):
+            self.split.field.setFocus()
+        QTimer.singleShot(0, self.split.update_caps)
+        return view
+
+    def close_split_view(self, *_) -> None:
+        if self.split.view is not None:
+            view, self.split.view = self.split.view, None
+            view.setParent(None)
+            view.deleteLater()
+        self.split.hide()
+        self.tabs.setTabBarAutoHide(not self.always_show_tab_bar)
+        self._focus_current_view()
+
+    def split_to_tab(self) -> None:
+        view = self.split.view
+        if view is not None:
+            url = view.url()
+            self.close_split_view()
+            self.add_tab(url)
+
+    # ---------------------------------------------------------------------------- separate logins per group
+    def current_profile(self) -> QWebEngineProfile:
+        if self.private:
+            return self.profile
+        return self.group_profile(self.group_index)
+
+    def group_profile(self, index: int) -> QWebEngineProfile:
+        name = self.groups[index].get("container") if 0 <= index < len(self.groups) else None
+        return self._container_profile(name) if name else self.profile
+
+    def all_profiles(self) -> list[QWebEngineProfile]:
+        return [self.profile] + list(self._containers.values())
+
+    def _container_profile(self, name: str) -> QWebEngineProfile:
+        profile = self._containers.get(name)
+        if profile is not None:
+            return profile
+        app = QApplication.instance()
+        profile = (QWebEngineProfile(f"{APP_NAME}-{name}", app) if not self.profile.isOffTheRecord()
+                   else QWebEngineProfile(app))
+        self._setup_profile(profile)
+        self._containers[name] = profile
+        self._container_cookies[name] = CookieKeeper(profile.cookieStore(), self)
+        return profile
+
+    def set_group_separate(self, index: int, on: bool, *_) -> None:
+        """Gives a tab group its own cookies and site data (its own logins), or shares the
+        main ones again. Its tabs reopen in the new place (pages reload)."""
+        if self.private or index <= 0 or index >= len(self.groups):
+            return
+        group = self.groups[index]
+        if bool(group.get("container")) == bool(on):
+            return
+        if on:
+            group["container"] = group.get("container_id") or secrets.token_hex(4)
+            group["container_id"] = group["container"]
+        else:
+            group["container"] = None
+        profile = self.group_profile(index)
+        if index == self.group_index:
+            self._store_current_group()
+        new_views = []
+        for view in group["views"]:
+            fresh = self._new_view({"url": view.tab_url().toString(), "title": view.tab_title()}, profile)
+            fresh.pinned = view.pinned
+            new_views.append(fresh)
+        old = group["views"]
+        group["views"] = new_views
+        if index == self.group_index:
+            current = group["current"]
+            self._switching_group = True
+            self.tabs.setUpdatesEnabled(False)
+            try:
+                while self.tabs.count():
+                    self.tabs.removeTab(0)
+                for view in new_views:
+                    self.tabs.addTab(view, self._tab_icon(view), self._tab_title(view))
+            finally:
+                self._switching_group = False
+            if not new_views:
+                self.add_tab(QUrl(START_URL))
+            else:
+                self.tabs.setCurrentIndex(min(current, self.tabs.count() - 1))
+                self._on_current_tab_changed(self.tabs.currentIndex())
+            self.tabs.setUpdatesEnabled(True)
+            self._sync_pins()
+        for view in old:
+            view.setParent(None)
+            view.deleteLater()
+        self.status_bubble.show_message(
+            f"“{self.group_name(index)}” now has its own logins" if on else f"“{self.group_name(index)}” shares your logins again", 3000)
+        self.schedule_session_save()
+
+    # ---------------------------------------------------------------------------- Muninn
+    def set_remember_pages(self, on: bool, *_) -> None:
+        self.set_privacy_pref("rememberPages", bool(on))
+
+    def _muninn_capture(self, view: "WebView", url: str) -> None:
+        try:
+            if (self.private or view.burner or not self.prefs.get("rememberPages") or self.muninn is None
+                    or view.url().toString() != url or view.loading):
+                return
+        except RuntimeError:
+            return
+        view.page().runJavaScript(MUNINN_JS, APPLICATION_WORLD, partial(self._muninn_got, view, url))
+
+    def _muninn_got(self, view: "WebView", url: str, result) -> None:
+        try:
+            data = json.loads(result) if result else None
+            title = view.title()
+        except (ValueError, TypeError, RuntimeError):
+            return
+        if data and not data.get("skip") and self.muninn is not None:
+            self.muninn.remember(url, title, data.get("text", ""))
+
+    def muninn_search(self, text: str, limit: int = 6) -> list[dict]:
+        if self.private or self.muninn is None or len(text.strip()) < 3:
+            return []
+        return self.muninn.search(text, limit)
+
+    # ---------------------------------------------------------------------------- Valhalla
+    def _to_valhalla(self, view: "WebView") -> None:
+        if self.private or view.burner:
+            return
+        url = without_credentials(view.tab_url())
+        if url.scheme() in ("http", "https", "file"):
+            self.store.add_closed(url.toString(), view.tab_title() or bare_host(url))
+
+    def show_valhalla(self, *_) -> None:
+        if self.valhalla is None:
+            self.valhalla = ValhallaSheet(self)
+        self.valhalla.refresh()
+        place_sheet(self.valhalla, self)
+        self.valhalla.show()
+        self.valhalla.raise_()
+        self.valhalla.search.setFocus()
+
+    def restore_from_valhalla(self, url: str, time_: float) -> None:
+        self.store.remove_closed(url, time_)
+        self.add_tab(QUrl(url))
+
+    # ---------------------------------------------------------------------------- living theme & recap
+    def set_living_theme(self, on: bool, *_) -> None:
+        self.settings.setValue("livingTheme", bool(on))
+        for window in self.all_windows():
+            window.living = bool(on)
+            window.apply_theme()
+        self._sync_welcome()
+
+    def _check_phase(self) -> None:
+        if self.living and self.theme.get("phase") != day_phase(time.localtime().tm_hour)[1]:
+            self.apply_theme()
+
+    def set_window_buttons(self, style: str, *_) -> None:
+        """Window buttons on the left like a Mac, or on the right like Windows."""
+        style = "windows" if style == "windows" else "mac"
+        self.settings.setValue("windowButtons", style)
+        for window in self.all_windows():
+            window.toolbar.set_button_style(style)
+
+    def set_aurora_ripple(self, on: bool, *_) -> None:
+        """Rippling Aurora: curtains of light drifting across the Start Page (off by default)."""
+        self.settings.setValue("auroraRipple", bool(on))
+        for window in self.all_windows():
+            window.start_handler.ripple = bool(on)
+            window._refresh_start_pages()
+
+    def set_weekly_recap(self, on: bool, *_) -> None:
+        self.settings.setValue("weeklyRecap", bool(on))
+        for window in self.all_windows():
+            window.start_handler.recap = bool(on)
+            window._refresh_start_pages()
+
+    # ---------------------------------------------------------------------------- Game Mode
+    def _game_mode(self) -> "GameMode | None":
+        """The one Game Mode watcher (it lives with the main window)."""
+        return next((w.game_mode for w in self.all_windows() if w.game_mode is not None), None)
+
+    def set_game_mode(self, on: bool, *_) -> None:
+        self.settings.setValue("gameMode", bool(on))
+        game = self._game_mode()
+        if game is not None:
+            game.enabled = bool(on)
+            game.check()
+
+    def toggle_game_mode_now(self, *_) -> None:
+        game = self._game_mode()
+        if game is not None:
+            game.forced = not game.forced
+            game.check()
+
+    def on_game_mode(self, on: bool) -> None:
+        """A full-screen game started (or ended)."""
+        slept = 0
+        if on:
+            for window in self.all_windows():
+                slept += window.sleep_background_tabs()
+        try:
+            set_process_priority(on)
+        except Exception:
+            pass
+        TypingSounds.paused = on
+        if not on:
+            self.status_bubble.show_message("Game Mode ended — everything's back to normal", 3500)
+        self._game_slept = slept
+
+    # ---------------------------------------------------------------------------- web panels
+    def web_panels(self) -> list[dict]:
+        try:
+            panels = json.loads(str(self.settings.value("webPanels", "[]") or "[]"))
+        except ValueError:
+            panels = []
+        return [p for p in panels if isinstance(p, dict) and isinstance(p.get("url"), str)][:12]
+
+    def set_web_panels_enabled(self, on: bool, *_) -> None:
+        self.settings.setValue("webPanelsOn", bool(on))
+        self.sidebar.set_panels_enabled(bool(on))
+        if on and not self.sidebar.is_open():
+            self.toggle_sidebar()
+
+    def add_web_panel(self, url: QUrl | None = None, *_) -> None:
+        view = self.current_view()
+        url = url if isinstance(url, QUrl) else (view.url() if view else QUrl())
+        if url.scheme() not in ("http", "https"):
+            self.status_bubble.show_message("Open the site you want as a panel first", 2500)
+            return
+        panels = self.web_panels()
+        if any(p["url"] == url.toString() for p in panels):
+            return
+        title = (view.title() if view and view.url() == url else "") or bare_display_host(url)
+        panels.append({"url": url.toString(), "title": title})
+        self.settings.setValue("webPanels", json.dumps(panels))
+        self.sidebar.set_panels(panels)
+        if not self.sidebar.panels_enabled:
+            self.set_web_panels_enabled(True)
+        self.sidebar.show_panel(len(panels) - 1)
+
+    def remove_web_panel(self, index: int) -> None:
+        panels = self.web_panels()
+        if 0 <= index < len(panels):
+            del panels[index]
+            self.settings.setValue("webPanels", json.dumps(panels))
+            self.sidebar.set_panels(panels)
+
+    def _make_panel_view(self, url: str) -> "WebView":
+        view = WebView(self, self.profile)
+        view.page().setBackgroundColor(QColor("#FFFFFF"))
+        view.is_panel = True
+        view.setUrl(QUrl(url))
+        return view
+
+    # ---------------------------------------------------------------------------- site styles
+    def site_styles(self) -> dict:
+        try:
+            data = json.loads(str(self.settings.value("siteStyles", "{}") or "{}"))
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def save_site_style(self, site: str, on: list[str], css: str) -> None:
+        styles = self.site_styles()
+        if on or css.strip():
+            styles[site] = {"on": [i for i in on if i in SITE_STYLES], "css": css[:20000]}
+        else:
+            styles.pop(site, None)
+        self.settings.setValue("siteStyles", json.dumps(styles))
+        self.apply_site_styles()
+
+    def apply_site_styles(self) -> None:
+        rules = style_rules(self.site_styles())
+        for window in self.all_windows():
+            for profile in window.all_profiles():
+                set_style_script(profile, rules)
+            for view in window.all_views():                        # live: no reload needed
+                if view.pending is None and view.url().scheme() in ("http", "https"):
+                    view.page().runJavaScript(STYLE_JS.replace("%RULES%", json.dumps(rules)), APPLICATION_WORLD)
+
+    def show_site_style(self, *_) -> None:
+        view = self.current_view()
+        if view is None or view.url().scheme() not in ("http", "https"):
+            return
+        sheet = SiteStyleSheet(self, registrable_domain(view.url().host().lower()))
+        if self.run_dialog(sheet):
+            self.save_site_style(sheet.site, sheet.chosen(), sheet.editor.toPlainText())
+        sheet.deleteLater()
+
+    # ---------------------------------------------------------------------------- focus hours
+    def focus_config(self) -> dict:
+        try:
+            data = json.loads(str(self.settings.value("focusHours", "") or "{}"))
+        except ValueError:
+            data = {}
+        config = dict(DEFAULT_FOCUS)
+        if isinstance(data, dict):
+            config.update({k: v for k, v in data.items() if k in DEFAULT_FOCUS})
+        return config
+
+    def save_focus_config(self, config: dict) -> None:
+        self.settings.setValue("focusHours", json.dumps(config))
+
+    def focus_block(self, url: QUrl) -> QUrl | None:
+        """During Focus Hours, a resting site's address becomes the calm 'Not now' page."""
+        if url.scheme() not in ("http", "https") or self.private:
+            return None
+        config = self.focus_config()
+        until = focus_until(config, time.localtime())
+        if until is None:
+            return None
+        site = registrable_domain(url.host().lower())
+        sites = {registrable_domain(s.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0])
+                 for s in config["sites"] if s.strip()}
+        if site not in sites or self._focus_pauses.get(site, 0) > time.time():
+            return None
+        page = QUrl(f"{START_SCHEME}:focus")
+        query = QUrlQuery()
+        query.addQueryItem("site", site)
+        query.addQueryItem("until", str(int(until)))
+        query.addQueryItem("url", url.toString())
+        page.setQuery(query)
+        return page
+
+    def focus_allow(self, url: QUrl) -> QUrl | None:
+        query = QUrlQuery(url)
+        target = QUrl(query.queryItemValue("url", QUrl.ComponentFormattingOption.FullyDecoded))
+        if target.scheme() not in ("http", "https"):
+            return None
+        self._focus_pauses[registrable_domain(target.host().lower())] = time.time() + FOCUS_PAUSE_S
+        return target
+
+    def show_focus_settings(self, *_) -> None:
+        sheet = FocusSheet(self, self.focus_config())
+        if self.run_dialog(sheet):
+            self.save_focus_config(sheet.config())
+        sheet.deleteLater()
+
+    # ---------------------------------------------------------------------------- privacy grade
+    def page_grade(self, view: "WebView") -> tuple[str, list[str]] | None:
+        url = view.url()
+        if url.scheme() not in ("http", "https") or not url.host():
+            return None
+        site = registrable_domain(url.host().lower())
+        guard = self.guard
+        secure = (url.scheme() == "https" and not self._not_secure(view)) or _is_local_host(url.host())
+        return privacy_grade(secure,
+                             guard.trackers_by_site.get(site, 0), len(guard.third_parties.get(site, ())),
+                             site in self._banner_sites)
+
+    def on_consent_event(self, view: "WebView", what: str) -> None:
+        site = registrable_domain(view.url().host().lower())
+        if site:
+            self._banner_sites.add(site)
+        if not self.private:
+            self.store.count_stat("banners")
+
+    # ---------------------------------------------------------------------------- burner tabs
+    def new_burner_tab(self, url: QUrl | None = None, *_) -> "WebView":
+        """A tab with no cookies, logins or history that leaves nothing behind when closed."""
+        app = QApplication.instance()
+        profile = QWebEngineProfile(app)                    # unnamed = off the record
+        self._setup_profile(profile)
+        view = self.add_tab(url if isinstance(url, QUrl) and url.isValid() else QUrl(START_URL), profile=profile)
+        view.burner = True
+        view.destroyed.connect(profile.deleteLater)
+        self._sync_tab_icon(view)
+        self._show_url(view)
+        self.status_bubble.show_message("Burner tab — nothing from it is kept", 3000)
+        return view
+
+    def _setup_profile(self, profile: QWebEngineProfile) -> None:
+        """Gives an extra profile the same protection as the main one."""
+        configure_profile(profile)
+        profile.setHttpUserAgent(self.profile.httpUserAgent())
+        profile.setUrlRequestInterceptor(self.blocker)
+        profile.installUrlSchemeHandler(START_SCHEME.encode(), self.start_handler)
+        profile.cookieStore().setCookieFilter(self.blocker.allow_cookie)
+        profile.downloadRequested.connect(self._on_download_requested)
+        apply_spellcheck(profile, self.spellcheck)
+        prefs = self.prefs
+        guard = self.guard
+        set_gpc_script(profile, guard.gpc)
+        set_youtube_script(profile, guard.adblock is not None and not guard.ads_allowed_on("youtube.com"))
+        set_cosmetic_script(profile, guard)
+        set_consent_script(profile, prefs["rejectCookieBanners"])
+        set_fingerprint_script(profile, prefs["fingerprintProtection"], self.fingerprint_secret)
+        set_style_script(profile, style_rules(self.site_styles()))
+        set_isolated_scripts(profile, self.passwords is not None and self.passwords.available(), self.tint_enabled)
+
+    # ---------------------------------------------------------------------------- welcome tour
+    def welcome_state(self) -> dict:
+        service = self.weather_service()
+        place = service.place() if service is not None else None
+        return {"realm": self.realm, "living": 1 if self.living else 0, "appearance": self.appearance,
+                "buttons": self.toolbar.button_style,
+                "ripple": 1 if self.start_handler.ripple else 0, "norse": 1 if self.start_handler.norse else 0,
+                "city": place_label(place) if place else "", "imported": 1 if self._welcome_imported else 0,
+                "isdefault": 1 if self.is_default_browser() is True else 0,
+                "building": 1 if self.engine is not None and self.engine.busy() else 0}
+
+    def first_run_welcome(self) -> bool:
+        """The tour opens by itself once, on the very first start (More Tools > Welcome Tour brings it back)."""
+        if self.settings.value("welcomeShown", False, type=bool):
+            return False
+        self.settings.setValue("welcomeShown", True)
+        self.show_welcome()
+        return True
+
+    def show_welcome(self, *_) -> "WebView":
+        """The welcome tour, in a new tab (first run, or More Tools > Welcome Tour)."""
+        for view in self.views():
+            if view.url().scheme() == START_SCHEME and view.url().path() == "welcome":
+                self.select_tab(self.tabs.indexOf(view))
+                return view
+        return self.add_tab(QUrl(WELCOME_URL))
+
+    def _sync_welcome(self) -> None:
+        """Brings open welcome tours up to date (colours and choices) without reloading them."""
+        for window in self.all_windows():
+            data = json.dumps({"vars": welcome_vars(window.theme), "state": window.welcome_state()})
+            for view in window.views():
+                if view.url().scheme() == START_SCHEME and view.url().path() == "welcome":
+                    view.page().runJavaScript(f"window.hw && hw.sync({data})")
+
+    def welcome_link(self, url: QUrl) -> None:
+        """A choice or button on the welcome tour."""
+        query = QUrlQuery(url)
+        if url.path() == "welcome-set":
+            for key, value in query.queryItems(QUrl.ComponentFormattingOption.FullyDecoded):
+                if key == "realm" and value in REALMS:
+                    self.set_realm(value)
+                    if self.living:
+                        self.set_living_theme(False)
+                elif key == "living":
+                    self.set_living_theme(value == "1")
+                elif key == "appearance" and value in ("light", "dark", "system"):
+                    self.set_appearance(value)
+                elif key == "buttons" and value in WINDOW_BUTTON_STYLES:
+                    self.set_window_buttons(value)
+                elif key == "ripple":
+                    self.set_aurora_ripple(value == "1")
+                elif key == "norse":
+                    self.set_norse_greeting(value == "1")
+        else:
+            what = query.queryItemValue("do")
+            if what == "weather":
+                self.show_weather_settings()
+            elif what == "import":
+                self.show_import_menu()
+            elif what == "default":
+                self.make_default_browser()
+            elif what == "finish":
+                self.settings.setValue("welcomeShown", True)
+                view = self.current_view()
+                if view is not None and view.url().path() == "welcome":
+                    view.setUrl(QUrl(START_URL))
+                return
+        self._sync_welcome()
+
+    def show_import_menu(self, *_) -> None:
+        """Other browsers found on this PC, as a menu at the mouse (from the welcome tour)."""
+        menu = prepare_menu(QMenu(self))
+        sources = self.find_import_sources()
+        for source in sources:
+            self._add_action(menu, f"{source['label']}…".replace("&", "&&"), partial(self._welcome_import, source))
+        if not sources:
+            self._add_action(menu, "No other browsers found on this PC", lambda: None, enabled=False)
+        menu.addSeparator()
+        self._add_action(menu, "Bookmarks File (HTML)…", partial(self._welcome_import, None))
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.popup(QCursor.pos())
+
+    def _welcome_import(self, source: dict | None, *_) -> None:
+        if self.import_from(source) is not None:
+            self._welcome_imported = True
+        self._sync_welcome()
+
+    # ---------------------------------------------------------------------------- weather
+    def weather_service(self) -> "WeatherService | None":
+        return next((w.weather for w in self.all_windows() if w.weather is not None), None)
+
+    def on_weather_changed(self) -> None:
+        service = self.weather_service()
+        if service is None:
+            return
+        snapshot = service.snapshot()
+        for window in self.all_windows():
+            window.start_handler.weather = snapshot
+            window._refresh_start_pages()
+
+    def set_weather_enabled(self, on: bool, *_) -> None:
+        service = self.weather_service()
+        if service is not None:
+            service.set_enabled(bool(on))
+
+    def show_weather_settings(self, *_) -> None:
+        service = self.weather_service()
+        if service is None:
+            return
+        sheet = WeatherSheet(self, service)
+        if self.run_dialog(sheet):
+            service.set_place(sheet.chosen, sheet.units())
+            if sheet.on.isChecked() != service.enabled():
+                service.set_enabled(sheet.on.isChecked())
+        sheet.deleteLater()
+
+    def weather_link(self, what: str) -> None:
+        """A link on the Start Page's weather card."""
+        service = self.weather_service()
+        if service is None:
+            return
+        if what == "weather":
+            self.show_weather_settings()
+        elif what == "weather-off":
+            service.set_enabled(False)
+            self.status_bubble.show_message("Weather removed - page menu > Settings > Start Page > Weather "
+                                            "brings it back", 4000)
+        elif what == "weather-refresh":
+            service.refresh(force=True)
+            self.on_weather_changed()
+
+    # ---------------------------------------------------------------------------- read aloud
+    def read_aloud(self, *_) -> None:
+        view = self.current_view()
+        if self.reader_voice.reading:
+            self.reader_voice.stop()
+            return
+        if view is None or view.url().scheme() not in ("http", "https", "file"):
+            return
+        if not self.reader_voice.available():
+            self.status_bubble.show_message("No voices are available for reading aloud", 3000)
+            return
+        view.page().runJavaScript(READ_TEXT_JS.replace("%SOURCE%", reader_source()), APPLICATION_WORLD,
+                                  lambda text: self.speak(text or ""))
+
+    def _reading_aloud_changed(self, reading: bool) -> None:
+        if reading:
+            return
+        for view in self.views():                    # the Reader's button goes back to "Listen"
+            if view.reader_on:
+                view.page().runJavaScript("window.__huginnReader && window.__huginnReader.stopped "
+                                          "&& window.__huginnReader.stopped()", APPLICATION_WORLD)
+
+    def speak(self, text: str) -> None:
+        if not text.strip():
+            self.reader_voice.stop()
+            return
+        if not self.reader_voice.read(text[:200000]):
+            self.status_bubble.show_message("No voices are available for reading aloud", 3000)
+
+    # ---------------------------------------------------------------------------- tab menu
+    def show_tab_menu(self, index: int, pos: QPoint) -> None:
+        view = self.tabs.widget(index)
+        if not isinstance(view, WebView):
+            return
+        menu = prepare_menu(QMenu(self))
+        self._add_action(menu, "New Tab", self.new_tab)
+        self._add_action(menu, "Duplicate Tab", lambda: self.add_tab(view.tab_url(), after_current=True,
+                                                                      profile=view.page().profile()))
+        menu.addSeparator()
+        self._add_action(menu, "Unpin Tab" if view.pinned else "Pin Tab", partial(self.toggle_pin, view))
+        muted = view.page().isAudioMuted()
+        self._add_action(menu, "Unmute Tab" if muted else "Mute Tab", partial(self.toggle_mute, view))
+        if not self.private:
+            move = prepare_menu(menu.addMenu("Move Tab to Group"))
+            for i in range(len(self.groups)):
+                if i != self.group_index:
+                    self._add_action(move, self.group_name(i).replace("&", "&&"), partial(self.move_tab_to_group, view, i))
+            if len(self.groups) > 1:
+                move.addSeparator()
+            self._add_action(move, "New Tab Group…", partial(self.new_tab_group, view))
+        self._add_action(menu, "Open in Split View", lambda: self.open_split_view(view.tab_url()))
+        menu.addSeparator()
+        self._add_action(menu, "Close Tab", lambda: self.close_tab(self.tabs.indexOf(view)))
+        self._add_action(menu, "Close Other Tabs", lambda: [self.close_tab(self.tabs.indexOf(v)) for v in self.views()
+                                                            if v is not view and not v.pinned], self.tabs.count() > 1)
+        menu.popup(pos)
+
+    # ---------------------------------------------------------------------------- navigation
+    def navigate(self, text: str) -> None:
+        url = url_from_user_input(text)
+        if url is None:
+            return
+        self._leave_overview()
+        view = self.current_view() or self.add_tab(None)
+        view.setUrl(url)
+        self.address.set_url(url)
+        view.setFocus()
+
+    def go_back(self) -> None:
+        self._leave_overview()
+        if view := self.current_view():
+            view.back()
+
+    def go_forward(self) -> None:
+        self._leave_overview()
+        if view := self.current_view():
+            view.forward()
+
+    def reload(self) -> None:
+        self._leave_overview()
+        if view := self.current_view():
+            view.reload()
+
+    def stop(self) -> None:
+        if view := self.current_view():
+            view.stop()
+
+    def go_home(self) -> None:
+        self._leave_overview()
+        if view := self.current_view():
+            view.setUrl(QUrl(HOME_URL))
+            view.setFocus()
+
+    def focus_address_bar(self) -> None:
+        self._leave_overview()
+        self.address.edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.address.edit.selectAll()
+
+    def _focus_current_view(self) -> None:
+        if view := self.current_view():
+            view.setFocus()
+
+    def _open_from_sidebar(self, url: QUrl, new_tab: bool) -> None:
+        self._leave_overview()
+        if new_tab or self.current_view() is None:
+            self.add_tab(url)
+        else:
+            self.current_view().setUrl(url)
+
+    # ---------------------------------------------------------------------------- tab overview
+    def toggle_overview(self) -> None:
+        self.hide_overview() if self.overview.isVisible() else self.show_overview()
+
+    def _populate_overview(self) -> None:
+        entries = []
+        current = self.tabs.currentIndex()
+        for i, view in enumerate(self.views()):
+            entries.append((view, self._tab_title(view), self._tab_icon(view), view.thumbnail, i == current))
+        self.overview.populate(entries, self.theme, self.icons)
+
+    def show_overview(self) -> None:
+        self._capture_thumbnail(self.current_view())
+        self._populate_overview()
+        self.overview.setGeometry(self.tabs.geometry())
+        self.overview.show()
+        self.overview.raise_()
+        self.overview.setFocus()
+        self.toolbar.overview_button.setChecked(True)
+        self._update_escape_shortcut()
+
+    def _leave_overview(self) -> None:
+        """Anything that shows a page (navigating, switching tabs...) closes the overview."""
+        if self.overview.isVisible():
+            self.hide_overview()
+
+    def hide_overview(self) -> None:
+        self.overview.hide()
+        self.toolbar.overview_button.setChecked(False)
+        self._update_escape_shortcut()
+        self._focus_current_view()
+
+    def _on_overview_activated(self, view: QWidget) -> None:
+        index = self.tabs.indexOf(view)
+        if index >= 0:
+            self.select_tab(index)
+        self.hide_overview()
+
+    def _on_overview_close(self, view: QWidget) -> None:
+        index = self.tabs.indexOf(view)
+        if index < 0:
+            QTimer.singleShot(0, self._populate_overview)
+            return
+        if self.tabs.count() <= 1:
+            self.hide_overview()
+        self._overview_closing = True         # closing a card keeps the overview open
+        try:
+            self.close_tab(index)
+        finally:
+            self._overview_closing = False
+        if self.overview.isVisible():
+            QTimer.singleShot(0, self._populate_overview)
+
+    def _on_escape(self) -> None:
+        if self.overview.isVisible():
+            self.hide_overview()
+        elif self._fullscreen_view is not None:
+            self._exit_page_fullscreen()
+
+    def _update_escape_shortcut(self) -> None:
+        self._escape_shortcut.setEnabled(self.overview.isVisible() or self._fullscreen_view is not None)
+
+    # ---------------------------------------------------------------------------- features
+    def toggle_sidebar(self) -> None:
+        if self._fullscreen_view is not None:
+            return                                 # no chrome while a page is fullscreen
+        self.set_sidebar_open(not self.sidebar.is_open())
+
+    def set_sidebar_open(self, opened: bool) -> None:
+        self.sidebar.set_open(opened)
+        self.toolbar.sidebar_button.setChecked(opened)
+        self.toolbar.sidebar_button.setToolTip(("Hide" if opened else "Show") + " Sidebar (Ctrl+Shift+L)")
+
+    def show_sidebar_section(self, index: int) -> None:
+        self.sidebar.show_page(index)
+        if not self.sidebar.is_open():
+            self.set_sidebar_open(True)
+
+    def add_bookmark_for_current(self) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        url = without_credentials(view.url())
+        if _is_blank(url) or url.scheme() not in ("http", "https", "file"):
+            self.status_bubble.show_message("This page can't be bookmarked")
+            return
+        title = view.title().strip() or display_text_for(url)
+        if self.store.add_bookmark(title, url.toString()):
+            self.status_bubble.show_message(f"Added “{title}” to Favorites")
+        else:
+            self.status_bubble.show_message("Already in Favorites")
+
+    # ---------------------------------------------------------------------------- privacy settings
+    def _title_suffix(self) -> str:
+        if self.private:
+            return f"Private Browsing — {BROWSER_NAME}"
+        groups = getattr(self, "groups", None)
+        if groups and self.group_index:
+            return f"{self.group_name()} — {BROWSER_NAME}"
+        return BROWSER_NAME
+
+    def set_privacy_pref(self, key: str, value, *_) -> None:
+        """Saves one Privacy & Security setting and applies it to every window."""
+        if key not in PRIVACY_DEFAULTS:
+            return
+        self.settings.setValue(key, value)
+        for window in self.all_windows():
+            window.prefs = load_privacy_prefs(self.settings)
+            window.apply_privacy_prefs()
+        if key == "secureDns":
+            apply_secure_dns(self.prefs["secureDns"])
+
+    def apply_privacy_prefs(self) -> None:
+        prefs, guard = self.prefs, self.guard
+        changed = guard.enabled != prefs["preventTracking"]
+        guard.enabled = prefs["preventTracking"]
+        guard.strip_links = prefs["stripTrackingParams"]
+        guard.gpc = prefs["globalPrivacyControl"]
+        guard.https_mode = prefs["httpsMode"]
+        guard.block_ads = prefs["blockAds"]
+        guard.ad_allowlist = load_ad_allowlist(self.settings)
+        set_search_engine(prefs["searchEngine"], prefs["searchCustomUrl"])
+        for profile in self.all_profiles():
+            set_gpc_script(profile, guard.gpc)
+            set_youtube_script(profile, guard.adblock is not None and not guard.ads_allowed_on("youtube.com"))
+            set_cosmetic_script(profile, guard)
+            set_consent_script(profile, prefs["rejectCookieBanners"])
+            set_fingerprint_script(profile, prefs["fingerprintProtection"], self.fingerprint_secret)
+            set_style_script(profile, style_rules(self.site_styles()))
+        self.start_handler.tracking_prevention = guard.enabled
+        if changed:
+            self._refresh_start_pages()
+
+    # ---------------------------------------------------------------------------- ad blocking
+    def _on_filters_changed(self) -> None:
+        """New filter lists: refresh the element-hiding script (pages pick it up as they load)."""
+        for profile in self.all_profiles():
+            set_cosmetic_script(profile, self.guard)
+
+    def on_youtube_event(self, view: WebView, kind: str) -> None:
+        if kind in ("pruned", "skipped", "wall"):
+            view.youtube_events[kind] += 1
+        if perf_probe_log() is not None:                  # testing aid: which defence path ran
+            write_perf_probe(view.page(), json.dumps({"kind": "yt", "event": kind, "url": view.url().toString()[:200]}))
+
+    # ---------------------------------------------------------------------------- H.264 engine
+    def attach_engine(self, engine: "EngineManager | None") -> None:
+        self.engine = engine
+        if engine is None:
+            return
+        engine.changed.connect(self._on_engine_changed)
+        self._on_engine_changed()
+
+    def start_requested_build(self) -> bool:
+        """First start after the installer, when its video switch was on."""
+        started = self.engine is not None and self.engine.take_build_request()
+        if started:
+            self._sync_welcome()
+        return started
+
+    def _on_engine_changed(self) -> None:
+        engine = self.engine
+        watch = engine is not None and engine.can_build() and not engine.has_codecs()
+        for profile in self.all_profiles():
+            set_codec_watch_script(profile, watch)
+        self._sync_engine_bar()
+
+    def on_codec_event(self, view: WebView, kind: str) -> None:
+        if kind != "needed" or self.engine is None:
+            return
+        view.codec_site = registrable_domain(view.url().host().lower()) or "this site"
+        self._sync_engine_bar()
+
+    def _engine_notice(self) -> tuple | None:
+        """(kind, text, glyph, main button, other button) for the bar, or None."""
+        engine = self.engine
+        if (engine is None or self._fullscreen_view is not None or self.permission_prompt.isVisible()
+                or self.password_bar.isVisible()):
+            return None
+        phase = engine.phase()
+        if phase == "waiting_browser" and not engine.restart_notice_dismissed:
+            return ("restart", f"<b>H.264 video is ready.</b> Restart {BROWSER_NAME} to switch to the new engine "
+                    "- your tabs come back.", "video", "Restart", "Later")
+        view = self.current_view()
+        if (view is not None and view.codec_site and phase == "standard" and engine.can_build()
+                and view.codec_site not in engine.declined_sites):
+            return ("offer", f"This video on “<b>{html.escape(view.codec_site)}</b>” needs H.264, which this "
+                    "engine can't play yet. Build it for this PC?", "video", "Build…", "Not Now")
+        return None
+
+    def _sync_engine_bar(self) -> None:
+        self._sync_password_bar()                        # 'Save password?' comes first
+        bar = getattr(self, "engine_bar", None)
+        if bar is None:
+            return
+        notice = self._engine_notice()
+        if notice is None:
+            bar.hide()
+            bar.setProperty("kind", None)
+            return
+        kind, text, glyph, accept, decline = notice
+        if bar.property("kind") != kind or bar.text_label.text() != text:
+            bar.set_notice(kind, text, glyph, self.icons, self.theme, accept, decline)
+        self._place_permission_prompt(bar)
+        bar.show()
+        bar.raise_()
+        if getattr(self, "default_bar", None) is not None:
+            self.default_bar.hide()                   # one notice at a time
+
+    def _answer_engine_bar(self, accepted: bool) -> None:
+        engine, kind = self.engine, self.engine_bar.property("kind")
+        if engine is None:
+            return
+        if kind == "restart":
+            if accepted:
+                self.restart_for_engine()
+            else:
+                engine.restart_notice_dismissed = True
+        elif kind == "offer":
+            view = self.current_view()
+            if accepted:
+                self.offer_engine_build()
+            elif view is not None:
+                engine.declined_sites.add(view.codec_site)
+        for window in self.all_windows():
+            window._sync_engine_bar()
+
+    def offer_engine_build(self, update: bool = False) -> bool:
+        """Explains what building involves and starts it if the user agrees."""
+        engine = self.engine
+        if engine is None or not engine.can_build():
+            return False
+        low, high = build_hours_estimate()
+        if update:
+            title = "Update the H.264 engine?"
+            body = (f"Qt has published newer security fixes for the engine. {BROWSER_NAME} rebuilds it on this PC "
+                    f"(about {low}–{high} hours, at low priority) and keeps using the current one until you restart "
+                    "at the end.")
+        else:
+            title = "Build H.264 video support for this PC?"
+            body = (f"{BROWSER_NAME} builds its own copy of its engine with H.264 and AAC switched on, from Qt's "
+                    "open-source code:\n\n"
+                    "•  downloads about 3 GB (Qt, Microsoft, GitHub) and installs Microsoft's free C++ Build "
+                    "Tools - Windows asks for permission once\n"
+                    f"•  needs about {ENGINE_BUILD_DISK_GB} GB free on one drive while building; most of it is "
+                    "deleted at the end\n"
+                    f"•  takes about {low}–{high} hours on this PC, at low priority so other programs come first\n\n"
+                    f"You can keep browsing. When it's ready, {BROWSER_NAME} asks you to restart.")
+        dialog = SheetDialog(self, title, body, ok="Update" if update else "Build", cancel="Not Now", width=480)
+        if not self.run_dialog(dialog):
+            return False
+        started = engine.start()
+        for window in self.all_windows():
+            window._sync_engine_bar()
+        return started
+
+    def restart_for_engine(self) -> None:
+        """'Restart to finish': remember the tabs, close every window; the builder puts the new
+        engine in and opens the browser again with those tabs."""
+        engine = self.engine
+        main = self.main_window or self
+        if engine is None:
+            return
+        tabs = []
+        for view in main.views():
+            url = without_credentials(view.url())
+            tabs.append(url.toString() if url.isValid() and not url.isEmpty() else START_URL)
+        engine.write_restart(tabs, max(0, main.tabs.currentIndex()))
+        main.quit_all()
+
+    def restore_after_engine_restart(self, data: dict) -> bool:
+        tabs = [t for t in data.get("tabs", []) if isinstance(t, str)]
+        if not tabs:
+            return False
+        for url in tabs:
+            self.add_tab(QUrl(url), background=True)
+        self.select_tab(min(max(0, int(data.get("current", 0))), self.tabs.count() - 1))
+        return True
+
+    # ---------------------------------------------------------------------------- passwords
+    def attach_passwords(self, manager: "PasswordManager | None") -> None:
+        self.passwords = manager
+        self._sync_isolated_scripts()
+        if manager is not None:
+            manager.changed.connect(self._on_passwords_changed)
+
+    def _on_passwords_changed(self) -> None:
+        if self.passwords is not None and self.passwords.vault.locked():
+            self.hide_password_suggestions()
+        self._sync_password_bar()
+
+    def ask_secret(self, title: str, message: str, *, confirm: bool = False, checkbox: tuple | None = None,
+                   check=None, ok: str = "OK") -> tuple[str, bool] | None:
+        """Asks for a password in a sheet: (password, checkbox ticked) or None if cancelled.
+        confirm: a new password, typed twice. check(password) returns an error to show, or ""."""
+        error = ""
+        for _ in range(5):
+            sheet = SheetDialog(self, title, message, ok=ok)
+            hints = (Qt.InputMethodHint.ImhHiddenText | Qt.InputMethodHint.ImhSensitiveData
+                     | Qt.InputMethodHint.ImhNoPredictiveText | Qt.InputMethodHint.ImhNoAutoUppercase)
+            fields = []
+            for placeholder in (("New password", "Type it again") if confirm else ("Password",)):
+                field = QLineEdit()
+                field.setEchoMode(QLineEdit.EchoMode.Password)
+                field.setInputMethodHints(hints)
+                field.setPlaceholderText(placeholder)
+                sheet.add_widget(field)
+                fields.append(field)
+            box = None
+            if checkbox:
+                box = QCheckBox(checkbox[0])
+                box.setChecked(bool(checkbox[1]))
+                sheet.add_widget(box)
+            note = QLabel(error)
+            note.setObjectName("SheetNote")
+            note.setWordWrap(True)
+            note.setStyleSheet(f"color: {self.theme['danger']};")
+            note.setVisible(bool(error))
+            sheet.add_widget(note)
+            sheet.secret_fields, sheet.secret_checkbox = fields, box      # for tests
+            fields[0].setFocus()
+            accepted = self.run_dialog(sheet)
+            texts = [f.text() for f in fields]
+            checked = box.isChecked() if box is not None else False
+            for field in fields:
+                field.clear()
+            sheet.deleteLater()
+            if not accepted:
+                return None
+            password = texts[0]
+            if not password:
+                error = "Enter the password."
+            elif confirm and len(password) < MIN_MASTER_LENGTH:
+                error = f"Use at least {MIN_MASTER_LENGTH} characters."
+            elif confirm and texts[1] != password:
+                error = "The two passwords don't match."
+            elif confirm and password_is_weak(password):
+                error = "That password is easy to guess. A few unrelated words make a strong one you can remember."
+            else:
+                error = check(password) if check is not None else ""
+            if not error:
+                return password, checked
+        return None
+
+    def setup_passwords(self) -> bool:
+        manager = self.passwords
+        if manager is None or not manager.available():
+            return False
+        if manager.vault.exists():
+            return self.ensure_passwords_unlocked()
+        answer = self.ask_secret(
+            "Set Up Passwords",
+            f"Choose a master password. It encrypts your saved passwords, and you'll enter it when {BROWSER_NAME} "
+            "starts and before showing or exporting them. If you forget it, the saved passwords can't be "
+            "recovered - there's no reset.",
+            confirm=True, ok="Set Up",
+            checkbox=("Unlock with my Windows sign-in on this PC", False) if IS_WINDOWS else None)
+        if answer is None:
+            return False
+        try:
+            manager.vault.create(answer[0], windows=answer[1])
+        except (VaultError, OSError) as e:
+            self.run_dialog(SheetDialog(self, "Passwords couldn't be set up", str(e), cancel=None))
+            return False
+        manager.notify()
+        return True
+
+    def ensure_passwords_unlocked(self, reason: str = "") -> bool:
+        manager = self.passwords
+        if manager is None or not manager.available():
+            return False
+        vault = manager.vault
+        if not vault.exists():
+            return self.setup_passwords()
+        if not vault.locked():
+            manager.touch()
+            return True
+        if manager.try_windows_unlock():
+            return True
+
+        def check(password: str) -> str:
+            try:
+                vault.unlock(password)
+            except WrongPassword:
+                return "That master password isn't right."
+            except (VaultError, OSError, ValueError) as e:
+                return str(e)
+            return ""
+        if self.ask_secret("Unlock Passwords", reason or "Enter your master password.", check=check,
+                           ok="Unlock") is None:
+            return False
+        manager.notify()
+        return True
+
+    def ensure_passwords_confirmed(self, reason: str) -> bool:
+        """Showing, copying or exporting passwords needs the master password again (it covers
+        the next few minutes), even when Windows unlocked them."""
+        if not self.ensure_passwords_unlocked(reason):
+            return False
+        vault = self.passwords.vault
+        if vault.recently_confirmed():
+            return True
+        return self.ask_secret("Confirm It's You", reason, ok="Continue",
+                               check=lambda pw: "" if vault.confirm(pw) else "That master password isn't right.") is not None
+
+    def show_passwords(self) -> "PasswordsDialog | None":
+        if self.passwords is None:
+            return None
+        self.hide_password_suggestions()
+        if self.passwords.vault.exists():
+            self.passwords.try_windows_unlock()
+        dialog = PasswordsDialog(self)
+        dialog.open()
+        return dialog
+
+    # -- suggestions under login fields ---------------------------------------------------------
+    def on_password_field(self, view: WebView, data: dict) -> None:
+        """A login field was clicked (or is being typed in): show what can fill it."""
+        manager = self.passwords
+        if manager is None or not manager.available() or view is not self.current_view() or view.warning is not None:
+            return
+        url = view.url().toString()
+        origin = login_origin(url)
+        if not origin or data.get("origin") != origin:
+            self.hide_password_suggestions()
+            return
+        vault = manager.vault
+        if vault.exists() and vault.locked():
+            manager.try_windows_unlock()
+        field = data.get("field")
+        typed = str(data.get("username") or "").lower() if field == "username" and data.get("typing") else ""
+        items: list[dict] = []
+        if vault.exists() and vault.locked():
+            items.append({"title": "Passwords are locked", "subtitle": "Unlock to fill your login",
+                          "glyph": "lock", "action": ("unlock", None)})
+        elif vault.exists() and data.get("kind") != "new":       # sign-up forms get a new password instead
+            for entry in vault.matches(url):
+                if typed and not entry["username"].lower().startswith(typed):
+                    continue
+                host = QUrl(entry["url"]).host()
+                items.append({"title": entry["username"] or "No username",
+                              "subtitle": host if entry["url"] == origin else f"{host} (same site)",
+                              "glyph": "key", "action": ("fill", entry["id"])})
+                if len(items) == 6:
+                    break
+        icloud = manager.icloud
+        if data.get("kind") != "new" and origin.startswith("https://") and icloud.enabled() and icloud.available():
+            host = QUrl(origin).host()
+            if icloud.ready():
+                logins = icloud.cached_logins(host)
+                if logins is None:
+                    self._icloud_pending = (view, origin, time.time())
+                    icloud.fetch_logins(host, partial(self._icloud_logins_arrived, view, origin))
+                local = {item["title"] for item in items if item["action"][0] == "fill"}
+                for login in logins or []:
+                    name = login["username"]
+                    if (typed and not name.lower().startswith(typed)) or (name or "No username") in local:
+                        continue
+                    items.append({"title": name or "No username", "subtitle": f"iCloud Keychain · {host}",
+                                  "glyph": "cloud", "action": ("icloud", (host, login))})
+            else:
+                items.append({"title": "iCloud Passwords", "subtitle": "Enter iCloud's code to fill from your Keychain",
+                              "glyph": "cloud", "action": ("icloud_connect", None)})
+        if data.get("kind") == "new" and field == "password":
+            password = generate_password()
+            items.append({"title": "Use Strong Password", "subtitle": password, "glyph": "lock",
+                          "action": ("strong", password)})
+        if not items:
+            view.last_password_field = data
+            self.hide_password_suggestions()
+            return
+        if any(item["action"][0] in ("fill", "icloud") for item in items):
+            items.append({"title": "Passwords…", "subtitle": "", "glyph": "key", "action": ("manager", None)})
+        try:
+            rect = data.get("rect") or {}
+            zoom = view.zoomFactor()
+            x, y, w, h = (float(rect.get(k, 0)) * zoom for k in ("x", "y", "w", "h"))
+        except (TypeError, ValueError, AttributeError):
+            return
+        if not (0 <= x < view.width() and 0 <= y + h and y < view.height()):
+            self.hide_password_suggestions()                 # the field isn't on screen
+            return
+        view.last_password_field = data
+        panel = self.suggestions
+        was_showing = panel.isVisible() and panel.context.get("view") is view
+        panel.set_items(items, self.icons, self.theme)
+        panel.context = {"view": view, "origin": origin, "data": data}
+        card = self.tabs.card_rect()
+        below = view.mapTo(self.tabs, QPoint(int(x), int(y + h)))
+        px = max(card.left(), min(below.x() - panel.MARGIN, card.right() - panel.width()))
+        py = below.y() - panel.MARGIN + 4
+        if py + panel.height() > card.bottom():                  # no room below: above the field
+            py = max(card.top(), view.mapTo(self.tabs, QPoint(int(x), int(y))).y() - panel.height() + panel.MARGIN - 4)
+        panel.move(px, py)
+        if not was_showing:
+            panel.shown_at = time.time()
+        panel.show()
+        panel.raise_()
+        view.page().runJavaScript("window.__safariqtMenu && window.__safariqtMenu(true)", APPLICATION_WORLD)
+
+    def hide_password_suggestions(self, view: WebView | None = None) -> None:
+        panel = getattr(self, "suggestions", None)
+        if panel is None or not panel.isVisible():
+            return
+        target = panel.context.get("view")
+        if view is not None and target is not view:
+            return
+        panel.hide()
+        panel.context = {}
+        try:
+            if isinstance(target, WebView) and self.tabs.indexOf(target) >= 0:
+                target.page().runJavaScript("window.__safariqtMenu && window.__safariqtMenu(false)", APPLICATION_WORLD)
+        except RuntimeError:                                     # the tab is already gone
+            pass
+
+    def on_password_key(self, view: WebView, name: str) -> None:
+        panel = self.suggestions
+        if not panel.isVisible() or panel.context.get("view") is not view:
+            return
+        if name in ("down", "up"):
+            panel.move_selection(1 if name == "down" else -1)
+        elif name == "enter" and panel.current >= 0:
+            self._choose_suggestion(panel.current, keyboard=True)
+
+    def _choose_suggestion(self, row: int, keyboard: bool = False) -> None:
+        panel = self.suggestions
+        if not keyboard and time.time() - getattr(panel, "shown_at", 0) < SUGGESTION_CLICK_DELAY:
+            return                                   # a click meant for the page, not the list
+        if not (0 <= row < len(panel.items)):
+            return
+        kind, value = panel.items[row]["action"]
+        context = dict(panel.context)
+        view = context.get("view")
+        self.hide_password_suggestions()
+        manager = self.passwords
+        if manager is None or not isinstance(view, WebView) or self.tabs.indexOf(view) < 0:
+            return
+        origin = context.get("origin", "")
+        if login_origin(view.url().toString()) != origin:
+            return                                   # the page moved on to another site meanwhile
+        if kind == "manager":
+            self.show_passwords()
+        elif kind == "unlock":
+            host = QUrl(origin).host()
+            if self.ensure_passwords_unlocked(f"Enter your master password to fill your login for {host}."):
+                logins = manager.vault.matches(view.url().toString())
+                view.setFocus()
+                if len(logins) == 1:
+                    self.fill_login(view, origin, logins[0])
+                elif logins:
+                    self.on_password_field(view, dict(context.get("data") or {}, typing=False))
+        elif kind == "fill":
+            entry = next((e for e in manager.vault.entries if e["id"] == value), None)
+            if entry is not None:
+                self.fill_login(view, origin, entry)
+        elif kind == "strong":
+            self.use_strong_password(view, origin, value, context.get("data") or {})
+        elif kind == "icloud_connect":
+            if self.connect_icloud():
+                view.setFocus()
+                self.on_password_field(view, dict(context.get("data") or {}, typing=False))
+        elif kind == "icloud":
+            host, login = value
+            self.status_bubble.show_message("Getting the password from iCloud…", 2000)
+            manager.icloud.fetch_password(host, login["username"], login.get("sites") or [],
+                                          partial(self._icloud_password_arrived, view, origin))
+
+    def _icloud_logins_arrived(self, view: WebView, origin: str, result, error) -> None:
+        pending, self._icloud_pending = getattr(self, "_icloud_pending", None), None
+        if error or not result or pending is None or pending[0] is not view or time.time() - pending[2] > 4:
+            return
+        panel = self.suggestions
+        data = panel.context.get("data") if panel.isVisible() and panel.context.get("view") is view else None
+        if data is None:
+            data = getattr(view, "last_password_field", None)
+        try:
+            alive = self.tabs.indexOf(view) >= 0 and view is self.current_view()
+        except RuntimeError:
+            return
+        if alive and data and login_origin(view.url().toString()) == origin:
+            self.on_password_field(view, dict(data, typing=False))
+
+    def _icloud_password_arrived(self, view: WebView, origin: str, result, error) -> None:
+        try:
+            if self.tabs.indexOf(view) < 0:
+                return
+        except RuntimeError:
+            return
+        if error or not result:
+            self.status_bubble.show_message(error or "iCloud didn't send that password.", 4000)
+            return
+        if login_origin(view.url().toString()) != origin:
+            return                                   # the page moved on meanwhile
+        self.fill_login(view, origin, {"id": "", "username": result["username"], "password": result["password"]})
+        view.icloud_filled = hashlib.sha256(result["password"].encode("utf-8")).hexdigest()
+
+    def connect_icloud(self) -> bool:
+        """Pairs with iCloud for Windows for this session: it shows a 6-digit code, typed here."""
+        icloud = self.passwords.icloud if self.passwords is not None else None
+        if icloud is None or not icloud.available():
+            return False
+        if icloud.ready():
+            return True
+        if not icloud.enabled():
+            icloud.set_enabled(True)
+        if not icloud.request_code():
+            self.run_dialog(SheetDialog(self, "iCloud Passwords isn't answering", icloud.error + "\n\nCheck that "
+                                        "iCloud for Windows is open, signed in, and has Passwords turned on.",
+                                        cancel=None))
+            return False
+        error = ""
+        for _ in range(4):
+            sheet = SheetDialog(self, "Enter the code from iCloud",
+                                f"iCloud for Windows is showing a 6-digit code. Type it here and {BROWSER_NAME} can fill "
+                                "your iCloud Keychain passwords until it closes.", ok="Connect")
+            field = QLineEdit()
+            field.setPlaceholderText("6-digit code")
+            field.setMaxLength(7)
+            field.setInputMethodHints(Qt.InputMethodHint.ImhDigitsOnly)
+            sheet.add_widget(field)
+            note = QLabel(error)
+            note.setObjectName("SheetNote")
+            note.setWordWrap(True)
+            note.setStyleSheet(f"color: {self.theme['danger']};")
+            note.setVisible(bool(error))
+            sheet.add_widget(note)
+            sheet.code_field = field                  # for tests
+            field.setFocus()
+            accepted = self.run_dialog(sheet)
+            code = field.text()
+            sheet.deleteLater()
+            if not accepted:
+                icloud.waiting_code = False
+                icloud.changed.emit()
+                return False
+            error = icloud.verify_code(code)
+            if not error:
+                self.status_bubble.show_message("Connected to iCloud Passwords", 2500)
+                return True
+            if "isn't right" not in error:
+                self.run_dialog(SheetDialog(self, f"{BROWSER_NAME} couldn't connect to iCloud", error, cancel=None))
+                return False
+        return False
+
+    def fill_login(self, view: WebView, origin: str, entry: dict) -> None:
+        payload = json.dumps({"origin": origin, "username": entry["username"], "password": entry["password"]})
+        view.page().runJavaScript(f"window.__safariqtFill && window.__safariqtFill({payload})", APPLICATION_WORLD)
+        try:
+            self.passwords.vault.mark_used(entry["id"])
+        except (VaultError, OSError):
+            pass
+        self.passwords.touch()
+
+    def use_strong_password(self, view: WebView, origin: str, password: str, data: dict) -> None:
+        """Fills the new password (and its confirmation) and saves it at once, so it can't be
+        lost if the site's form isn't recognised when it's sent."""
+        payload = json.dumps({"origin": origin, "password": password, "confirm": True})
+        view.page().runJavaScript(f"window.__safariqtFill && window.__safariqtFill({payload})", APPLICATION_WORLD)
+        view.generated_login = {"origin": origin, "password": password, "id": ""}
+        vault = self.passwords.vault
+        if vault.exists() and not vault.locked():
+            try:
+                _, entry = vault.add_or_update(origin, str(data.get("username") or ""), password,
+                                               note=f"Strong password suggested by {BROWSER_NAME}")
+            except (VaultError, OSError):
+                return
+            view.generated_login["id"] = entry["id"]
+            self.passwords.notify()
+            self.status_bubble.show_message("Strong password saved in Passwords", 3000)
+
+    # -- offering to save after you sign in --------------------------------------------------------
+    def on_password_submitted(self, view: WebView, data: dict) -> None:
+        manager = self.passwords
+        if manager is None or not manager.available() or not manager.offer_save():
+            return
+        origin = login_origin(str(data.get("origin") or ""))
+        password = str(data.get("newPassword") or data.get("password") or "")
+        username = str(data.get("username") or "").strip()
+        if not origin or not password or len(password) > 1024 or len(username) > 512:
+            return
+        site = login_site(QUrl(origin).host())
+        if site in manager.session_never:
+            return
+        if getattr(view, "icloud_filled", None) == hashlib.sha256(password.encode("utf-8")).hexdigest():
+            return                                   # it's in iCloud Keychain already
+        vault = manager.vault
+        if vault.exists() and vault.locked():
+            manager.try_windows_unlock()
+        kind = "save"
+        if not vault.locked():
+            if site in vault.never:
+                return
+            if not username:                        # a password-only step: the one login for the site
+                same = [e for e in vault.entries if e["url"] == origin]
+                if len(same) == 1:
+                    username = same[0]["username"]
+            generated = getattr(view, "generated_login", None)
+            if generated and generated.get("password") == password and generated.get("id"):
+                entry = next((e for e in vault.entries if e["id"] == generated["id"]), None)
+                if entry is not None and username and entry["username"] != username and vault.find(origin, username) is None:
+                    vault.update(entry["id"], username=username)
+                    manager.notify()
+                view.generated_login = None
+                return                               # already saved when it was suggested
+            existing = vault.find(origin, username)
+            if existing is not None and existing["password"] == password:
+                vault.mark_used(existing["id"])
+                return
+            kind = "update" if existing is not None else "save"
+        view.pending_login = {"origin": origin, "username": username, "password": password,
+                              "kind": kind, "at": time.time()}
+        if view is self.current_view():
+            self._sync_engine_bar()
+
+    def _password_notice(self) -> tuple | None:
+        view = self.current_view()
+        login = getattr(view, "pending_login", None) if view is not None else None
+        if not login or self._fullscreen_view is not None or self.permission_prompt.isVisible():
+            return None
+        if time.time() - login["at"] > 600:
+            view.pending_login = None
+            return None
+        host = html.escape(QUrl(login["origin"]).host())
+        user = html.escape(login["username"])
+        if login["kind"] == "update":
+            return ("password", f"Update the saved password for “<b>{user}</b>” on <b>{host}</b>?",
+                    "key", "Update", "Not Now", None)
+        text = (f"Save the password for “<b>{user}</b>” on <b>{host}</b>?" if user
+                else f"Save this password for <b>{host}</b>?")
+        return ("password", text, "key", "Save Password", "Not Now", "Never for This Website")
+
+    def _sync_password_bar(self) -> None:
+        bar = getattr(self, "password_bar", None)
+        if bar is None:
+            return
+        notice = self._password_notice()
+        if notice is None:
+            bar.hide()
+            bar.setProperty("kind", None)
+            self._sync_default_bar()
+            return
+        if getattr(self, "default_bar", None) is not None:
+            self.default_bar.hide()
+        kind, text, glyph, accept, decline, extra = notice
+        if bar.property("kind") != kind or bar.text_label.text() != text:
+            bar.set_notice(kind, text, glyph, self.icons, self.theme, accept, decline, extra)
+        self._place_permission_prompt(bar)
+        bar.show()
+        bar.raise_()
+
+    def _answer_password_bar(self, accepted: bool) -> None:
+        view = self.current_view()
+        login = getattr(view, "pending_login", None) if view is not None else None
+        if view is not None:
+            view.pending_login = None
+        self._sync_engine_bar()
+        if accepted and login:
+            self.save_login(login)
+
+    def _never_save_password(self) -> None:
+        view = self.current_view()
+        login = getattr(view, "pending_login", None) if view is not None else None
+        if view is not None:
+            view.pending_login = None
+        self._sync_engine_bar()
+        manager = self.passwords
+        if not login or manager is None:
+            return
+        site = login_site(QUrl(login["origin"]).host())
+        manager.session_never.add(site)
+        if not manager.vault.locked():                # remembered for good once passwords are open
+            try:
+                manager.vault.set_never(site)
+            except (VaultError, OSError):
+                pass
+        self.status_bubble.show_message(f"{BROWSER_NAME} won't offer to save passwords for {site}", 3000)
+
+    def save_login(self, login: dict) -> bool:
+        manager = self.passwords
+        host = QUrl(login["origin"]).host()
+        if manager is None or not self.ensure_passwords_unlocked(
+                f"Enter your master password to save your password for {host}."):
+            return False
+        try:
+            result, _ = manager.vault.add_or_update(login["origin"], login["username"], login["password"])
+        except (VaultError, OSError) as e:
+            self.status_bubble.show_message(f"The password wasn't saved: {e}", 4000)
+            return False
+        manager.notify()
+        self.status_bubble.show_message({"added": "Password saved", "updated": "Password updated"}.get(
+            result, "That password was already saved"), 2500)
+        return True
+
+    # ---------------------------------------------------------------------------- auto-play
+    def autoplay_allowed(self, host: str) -> bool:
+        site = registrable_domain(host.lower()) if host else ""
+        return bool(site) and site in load_site_list(self.settings, "autoplaySites") \
+            and site not in load_site_list(self.settings, "autoplayBlocked")
+
+    def apply_autoplay(self, page: QWebEnginePage, url: QUrl) -> None:
+        """Lets the page start media with sound by itself only on sites you play media on."""
+        try:
+            page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture,
+                                         not self.autoplay_allowed(url.host()))
+        except RuntimeError:
+            pass
+
+    def _watch_audible(self, view: WebView) -> None:
+        """Sound started (by you: without auto-play it can't start by itself). If it's still
+        playing a few seconds later, on the same site, the site may auto-play from now on."""
+        site = registrable_domain(view.url().host().lower()) if view.url().scheme() in ("http", "https") else ""
+        if (self.private or not site or site in load_site_list(self.settings, "autoplaySites")
+                or site in load_site_list(self.settings, "autoplayBlocked")):
+            return
+
+        def check() -> None:
+            try:
+                still = view.page().recentlyAudible() and not view.page().isAudioMuted()
+                same = registrable_domain(view.url().host().lower()) == site
+            except RuntimeError:
+                return
+            if still and same:
+                self.learn_autoplay_site(site)
+        QTimer.singleShot(AUTOPLAY_LEARN_SECONDS * 1000, self, check)
+
+    def learn_autoplay_site(self, site: str) -> None:
+        sites = load_site_list(self.settings, "autoplaySites")
+        if site not in sites:
+            sites.add(site)
+            if len(sites) > 200:                                   # keep it small; oldest order isn't kept
+                sites = set(sorted(sites)[:200])
+            self.settings.setValue("autoplaySites", json.dumps(sorted(sites)))
+
+    def set_site_autoplay(self, host: str, on: bool, *_) -> None:
+        """Page menu > site card > Auto-Play Videos on <site>."""
+        site = registrable_domain(host.lower())
+        allowed, blocked = load_site_list(self.settings, "autoplaySites"), load_site_list(self.settings, "autoplayBlocked")
+        if on:
+            allowed.add(site)
+            blocked.discard(site)
+        else:
+            allowed.discard(site)
+            blocked.add(site)                                      # and don't learn it again
+        self.settings.setValue("autoplaySites", json.dumps(sorted(allowed)))
+        self.settings.setValue("autoplayBlocked", json.dumps(sorted(blocked)))
+        for window in self.all_windows():
+            for view in window.views():
+                if registrable_domain(view.url().host().lower()) == site:
+                    window.apply_autoplay(view.page(), view.url())
+
+    def set_site_ad_blocking(self, host: str, on: bool, *_) -> None:
+        """Ad blocking on/off for one site (all windows); reloads the page to apply it."""
+        site = registrable_domain(host.lower())
+        allowlist = load_ad_allowlist(self.settings)
+        allowlist.discard(site) if on else allowlist.add(site)
+        self.settings.setValue("adBlockAllowlist", json.dumps(sorted(allowlist)))
+        for window in self.all_windows():
+            window.apply_privacy_prefs()
+        if view := self.current_view():
+            if registrable_domain(view.url().host().lower()) == site:
+                view.reload()
+
+    def choose_search_engine(self, key: str, *_) -> bool:
+        if key not in SEARCH_ENGINES:
+            return False
+        if key == "custom":
+            template = self.ask_custom_search()
+            if not template:
+                return False
+            self.set_privacy_pref("searchCustomUrl", template)
+        self.set_privacy_pref("searchEngine", key)
+        self.status_bubble.show_message(f"Searching with {search_engine_label(self.prefs)}", 2000)
+        return True
+
+    def ask_custom_search(self) -> str:
+        """A search address with %s where the words go, or '' if cancelled."""
+        error, text = "", self.prefs.get("searchCustomUrl", "")
+        for _ in range(4):
+            sheet = SheetDialog(self, "Custom Search Engine", "Enter the address of the engine's results page, "
+                                "with %s where the search words go - for example https://search.example.com/?q=%s",
+                                ok="Use", width=480)
+            field = QLineEdit(text)
+            field.setPlaceholderText("https://search.example.com/?q=%s")
+            sheet.add_widget(field)
+            note = QLabel(error)
+            note.setObjectName("SheetNote")
+            note.setStyleSheet(f"color: {self.theme['danger']};")
+            note.setVisible(bool(error))
+            sheet.add_widget(note)
+            sheet.url_field = field                     # for tests
+            field.setFocus()
+            accepted = self.run_dialog(sheet)
+            text = field.text().strip()
+            sheet.deleteLater()
+            if not accepted:
+                return ""
+            if custom_search_template(text):
+                return text
+            error = ("Include %s where the search words go." if "%s" not in text
+                     else "That isn't a web address (it should start with https://).")
+        return ""
+
+    # ---------------------------------------------------------------------------- page colour
+    def _sync_isolated_scripts(self) -> None:
+        for profile in self.all_profiles():
+            set_isolated_scripts(profile, self.passwords is not None and self.passwords.available(),
+                                 self.tint_enabled)
+
+    def on_page_colours(self, view: WebView, data: dict) -> None:
+        view.page_colours, view.colours_reported = data, True
+        if view is self.current_view():
+            self._apply_tint()
+
+    def _drop_stale_tint(self, view: WebView) -> None:
+        """A page that never said its colours (it blocks scripts, or it failed to load)
+        shouldn't keep the last site's."""
+        try:
+            if self.tabs.indexOf(view) < 0 or view.loading or view.colours_reported:
+                return
+        except RuntimeError:
+            return
+        view.page_colours = None
+        if view is self.current_view():
+            self._apply_tint()
+
+    def tint_off_sites(self) -> set[str]:
+        raw = self.settings.value("tintOffSites", [])
+        items = [raw] if isinstance(raw, str) else (raw or [])
+        return {str(site) for site in items if site}
+
+    def page_tint(self) -> QColor | None:
+        view = self.current_view()
+        if not self.tint_enabled or view is None or view.warning is not None:
+            return None
+        url = view.url()
+        if url.scheme() not in ("http", "https", "file"):
+            return None
+        if registrable_domain(url.host().lower()) in self.tint_off_sites():
+            return None
+        return choose_tint(view.page_colours, self.theme, self.tint_theme_colours)
+
+    def _apply_tint(self, animate: bool = True) -> None:
+        chrome = getattr(self, "chrome", None)
+        if chrome is None:
+            return
+        colour = self.page_tint()
+        chrome.set_tint(colour, animate)
+        if IS_WIN11 and self.isVisible() and self._fullscreen_view is None:
+            set_dwm_attribute(int(self.winId()), DWMWA_BORDER_COLOR,
+                              colorref(colour.name() if colour is not None else self.theme["frame"]))
+
+    def set_tint_enabled(self, on: bool, *_) -> None:
+        self.settings.setValue("tintWithPage", bool(on))
+        for window in self.all_windows():
+            window.tint_enabled = bool(on)
+            window._sync_isolated_scripts()
+            if on:                                       # pages already open start reporting now
+                source = _webchannel_js() + "\n;" + TINT_SCRIPT
+                for view in window.views():
+                    view.page().runJavaScript(source, APPLICATION_WORLD)
+            window._apply_tint()
+
+    def set_tint_theme_colours(self, on: bool, *_) -> None:
+        self.settings.setValue("tintUseThemeColour", bool(on))
+        for window in self.all_windows():
+            window.tint_theme_colours = bool(on)
+            window._apply_tint()
+
+    def set_site_tint(self, host: str, on: bool, *_) -> None:
+        site = registrable_domain(host.lower())
+        sites = self.tint_off_sites()
+        (sites.discard if on else sites.add)(site)
+        self.settings.setValue("tintOffSites", sorted(sites))
+        for window in self.all_windows():
+            window._apply_tint()
+
+    def set_tracking_prevention(self, on: bool, *_) -> None:
+        self.set_privacy_pref("preventTracking", bool(on))
+
+    def show_privacy_settings(self) -> PrivacySettingsDialog:
+        dialog = PrivacySettingsDialog(self)
+        dialog.open()
+        return dialog
+
+    # ---------------------------------------------------------------------------- private browsing
+    def open_private_window(self) -> "BrowserWindow":
+        main = self.main_window or self
+        window = create_private_window(main)
+        main._private_windows.append(window)
+        window.add_tab(QUrl(START_URL))
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        QTimer.singleShot(0, window.focus_address_bar)
+        return window
+
+    def quit_all(self) -> None:
+        for window in reversed(self.all_windows()):     # private windows first, then the main one
+            window.close()
+
+    # ---------------------------------------------------------------------------- history & website data
+    def show_clear_history_dialog(self) -> None:
+        if self.private:                                # history lives with the main window
+            self.main_window.show_clear_history_dialog()
+            return
+        dialog = SheetDialog(self, "Clear History",
+                             "Clearing history also removes cookies and other website data for the "
+                             "sites you visited in that time.", ok="Clear History")
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 4, 0, 0)
+        label = QLabel("Clear:")
+        label.setObjectName("RowTitle")
+        h.addWidget(label)
+        combo = QComboBox()
+        for text, key in (("the last hour", "hour"), ("today", "today"),
+                          ("today and yesterday", "yesterday"), ("all history", "all")):
+            combo.addItem(text, key)
+        combo.setCurrentIndex(3)
+        h.addWidget(combo, 1)
+        dialog.add_widget(row)
+        dialog.range_combo = combo
+        if self.run_dialog(dialog) == QDialog.DialogCode.Accepted:
+            self.clear_history(history_cutoff(combo.currentData()))
+        dialog.deleteLater()
+
+    def clear_history(self, since: float | None = None) -> None:
+        """History from `since` on (all of it when None) plus what reveals it: those sites'
+        cookies and icons, the tracker log's site names, visited-link colouring, the cache
+        and the reopen-closed-tab list. Clearing everything also erases local storage and
+        the like on the next launch (WebEngine keeps those files open while running)."""
+        if self.private:
+            self.main_window.clear_history(since)
+            return
+        removed = self.store.clear_history(since)
+        hosts = {QUrl(e["url"]).host() for e in removed}
+        if self.muninn is not None:
+            self.muninn.forget_since(since)
+        self.store.closed_tabs = [e for e in self.store.closed_tabs if since is not None and e["time"] < since]
+        favicons = self.start_handler.favicons
+        if since is None:
+            self.cookies.delete_all()
+            favicons.clear()
+            self.profile.clearAllVisitedLinks()
+            path = self.profile.persistentStoragePath()
+            if not self.profile.isOffTheRecord() and path:
+                self.settings.setValue("pendingSiteDataWipe", path)
+        else:
+            self.cookies.delete_for_sites({registrable_domain(h) for h in hosts if h})
+            for host in hosts:
+                favicons.remove(host[4:] if host.startswith("www.") else host)
+            self.profile.clearVisitedLinks([QUrl(e["url"]) for e in removed])
+        for name, keeper in self._container_cookies.items():
+            profile = self._containers[name]
+            if since is None:
+                keeper.delete_all()
+                profile.clearAllVisitedLinks()
+            else:
+                keeper.delete_for_sites({registrable_domain(h) for h in hosts if h})
+            profile.clearHttpCache()
+        self.store.clear_tracker_sites(since)
+        self.profile.clearHttpCache()
+        for window in self.all_windows():
+            window._closed_tabs.clear()
+            window._refresh_start_pages()
+        self.status_bubble.show_message("History cleared")
+
+    # ---------------------------------------------------------------------------- page dialogs
+    def page_dialog(self, view: WebView, kind: str, origin: QUrl, message: str,
+                    default: str = "") -> tuple[bool, str]:
+        """alert()/confirm()/prompt() as a sheet naming the site. Background tabs and pages
+        whose dialogs were blocked get an automatic 'Cancel', so dialogs can't pile up."""
+        page = view.page()
+        if page.dialogs_blocked or view is not self.current_view() or not self.isVisible():
+            return False, ""
+        if self._fullscreen_view is not None:
+            self._exit_page_fullscreen()
+        page.dialog_count += 1
+        site = origin_label(origin) if origin.scheme() in ("http", "https") else ""
+        title = f"{site} says" if site else "This page says"
+        text = message if len(message) <= 1500 else message[:1500] + "…"
+        dialog = SheetDialog(self, title, text, ok="OK", cancel=None if kind == "alert" else "Cancel")
+        field = None
+        if kind == "prompt":
+            field = QLineEdit(default)
+            field.setObjectName("SheetInput")
+            dialog.add_widget(field)
+            dialog.prompt_field = field
+            QTimer.singleShot(0, field.selectAll)
+        block = None
+        if page.dialog_count > 1:                         # repeat dialogs: offer a way out
+            block = QCheckBox("Don't let this page show more dialogs")
+            dialog.add_widget(block)
+            dialog.block_checkbox = block
+        accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+        if block is not None and block.isChecked():
+            page.dialogs_blocked = True
+        result = field.text() if (field is not None and accepted) else ""
+        dialog.deleteLater()
+        return accepted, result
+
+    # ---------------------------------------------------------------------------- site permissions
+    def _on_permission_requested(self, view: WebView, permission) -> None:
+        name = permission.permissionType().name
+        if name not in PERMISSION_INFO:
+            # Notifications (and anything unknown) are refused quietly; the refusal isn't
+            # stored, so turning this into a prompt later stays possible.
+            permission.deny()
+            permission.reset()
+            return
+        view.permission_queue.append(permission)
+        self._sync_permission_prompt()
+
+    def _pending_permission(self, view: WebView | None):
+        if view is None:
+            return None
+        while view.permission_queue and not view.permission_queue[0].isValid():
+            view.permission_queue.pop(0)                  # the page navigated away meanwhile
+        return view.permission_queue[0] if view.permission_queue else None
+
+    def _sync_permission_prompt(self) -> None:
+        permission = self._pending_permission(self.current_view())
+        prompt = self.permission_prompt
+        if permission is None or self._fullscreen_view is not None:
+            prompt.hide()
+            self._sync_engine_bar()
+            return
+        glyph, action, _label = PERMISSION_INFO[permission.permissionType().name]
+        prompt.set_request(origin_label(permission.origin()), action, glyph, self.icons, self.theme)
+        self._place_permission_prompt()
+        prompt.show()
+        prompt.raise_()
+        self._sync_engine_bar()
+
+    def _place_permission_prompt(self, prompt: QWidget | None = None) -> None:
+        prompt = prompt or self.permission_prompt
+        card = self.tabs.card_rect()
+        center = self.tabs.mapFrom(self, self.address.mapTo(self, QPoint(self.address.width() // 2, 0))).x()
+        x = max(card.left(), min(center - prompt.width() // 2, card.right() - prompt.width()))
+        prompt.move(x, card.top() + 2)
+
+    def _answer_permission(self, allow: bool) -> None:
+        view = self.current_view()
+        permission = self._pending_permission(view)
+        if permission is not None:
+            view.permission_queue.pop(0)
+            permission.grant() if allow else permission.deny()
+        self._sync_permission_prompt()
+
+    def stored_permissions(self) -> list:
+        """Remembered allow/deny decisions (location, clipboard, fonts...) in this profile."""
+        return [p for p in self.profile.listAllPermissions()
+                if p.state() in (QWebEnginePermission.State.Granted, QWebEnginePermission.State.Denied)]
+
+    def forget_permission(self, permission) -> None:
+        permission.reset()
+
+    def reset_site_permissions(self, url: QUrl) -> int:
+        origin = f"{url.scheme()}://{url.authority()}"
+        doomed = [p for p in self.stored_permissions() if p.origin().toString().rstrip("/") == origin]
+        for permission in doomed:
+            permission.reset()
+        return len(doomed)
+
+    # ---------------------------------------------------------------------------- certificates & https
+    def _on_certificate_error(self, view: WebView, error) -> None:
+        url = error.url()
+        key = (url.host().lower(), int(error.type().value))
+        if error.isOverridable() and key in self.guard.cert_exceptions:
+            error.acceptCertificate()                     # the user chose "visit anyway" this session
+            return
+        error.rejectCertificate()
+        if not error.isMainFrame() or self.guard.was_upgraded(url):
+            return                                        # an auto-upgrade: _on_loading_changed falls back
+        self.show_warning(view, {"kind": "certificate", "url": QUrl(url), "site": origin_label(url),
+                                 "detail": error.description(), "overridable": error.isOverridable(),
+                                 "key": key})
+
+    def _on_loading_changed(self, view: WebView, info) -> None:
+        status = info.status()
+        if status == QWebEngineLoadingInfo.LoadStatus.LoadStartedStatus:
+            if not info.isErrorPage():                    # a real navigation: fresh page state
+                page = view.page()
+                page.dialog_count, page.dialogs_blocked = 0, False
+                if view.warning is not None:
+                    self.clear_warning(view)
+                key = self.guard.upgrade_key_for(info.url())
+                if key is not None:                       # don't wait ~20 s on a port that never answers
+                    QTimer.singleShot(HTTPS_UPGRADE_TIMEOUT_MS, partial(self._upgrade_timed_out, view, key))
+            return
+        original = self.guard.take_upgrade(info.url())
+        if status != QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus or original is None:
+            return
+        domain = info.errorDomain()
+        if domain not in (QWebEngineLoadingInfo.ErrorDomain.ConnectionErrorDomain,
+                          QWebEngineLoadingInfo.ErrorDomain.CertificateErrorDomain):
+            return                                        # e.g. DNS failure: http wouldn't work either
+        if self.guard.https_mode == "strict":
+            self.show_warning(view, {"kind": "insecure", "url": QUrl(original),
+                                     "site": origin_label(original)})
+        else:
+            self._fall_back_to_http(view, original)
+
+    def _upgrade_timed_out(self, view: WebView, key: str) -> None:
+        """The https:// attempt got no response at all: treat it like a failure."""
+        try:
+            stalled = key in self.guard.upgraded and view.loading and view.progress < 20
+        except RuntimeError:                              # the tab was closed
+            return
+        if not stalled:
+            return
+        original = self.guard.upgraded.pop(key)
+        view.stop()
+        if self.guard.https_mode == "strict":
+            self.show_warning(view, {"kind": "insecure", "url": QUrl(original), "site": origin_label(original)})
+        else:
+            self.guard.allow_http(original.host())
+            view.setUrl(original)
+
+    def _fall_back_to_http(self, view: WebView, url: QUrl) -> None:
+        """The site has no working https: load it over http, replacing the error page in
+        history (so Back doesn't land on it)."""
+        self.guard.allow_http(url.host())
+        target = url.toString()
+        view.page().runJavaScript(f"location.replace({json.dumps(target)})")
+
+        def ensure() -> None:                              # if the error page ignored the script
+            try:
+                if view.url().scheme() == "https" and view.url().host() == url.host() and not view.loading:
+                    view.setUrl(url)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(1500, ensure)
+
+    def show_warning(self, view: WebView, warning: dict) -> None:
+        view.warning = warning
+        if view is self.current_view():
+            self._show_url(view)
+        self._sync_warning_panel()
+
+    def clear_warning(self, view: WebView) -> None:
+        view.warning = None
+        if view is self.current_view():
+            self._show_url(view)
+        self._sync_warning_panel()
+
+    def _sync_warning_panel(self) -> None:
+        self._apply_tint()                               # no page colour behind a warning
+        view = self.current_view()
+        panel = self.warning_panel
+        if view is None or view.warning is None or self.overview.isVisible():
+            panel.hide()
+            return
+        panel.set_warning(view.warning, self.icons, self.theme)
+        panel.setGeometry(self.tabs.card_rect())
+        panel.show()
+        panel.raise_()
+        self.permission_prompt.raise_()
+        self.status_bubble.raise_()
+
+    def _warning_go_back(self) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        self.clear_warning(view)
+        if view.history().canGoBack():
+            view.back()
+        else:
+            view.setUrl(QUrl(START_URL))
+
+    def _warning_proceed(self) -> None:
+        view = self.current_view()
+        if view is None or view.warning is None:
+            return
+        warning = view.warning
+        url = warning["url"]
+        if warning["kind"] == "certificate":
+            if not warning.get("overridable", True):
+                return
+            self.guard.accept_certificate(*warning["key"])
+            self.clear_warning(view)
+            view.reload() if view.url() == url else view.setUrl(url)
+        else:
+            self.clear_warning(view)
+            self._fall_back_to_http(view, url)
+
+    def _set_zoom(self, factor: float) -> None:
+        if view := self.current_view():
+            view.setZoomFactor(factor)
+            view.zoom_host = bare_host(view.url())
+            self._remember_zoom(view, factor)
+            self.status_bubble.show_message(f"Zoom {round(factor * 100)}%", 1500)
+
+    def zoom_in(self) -> None:
+        if view := self.current_view():
+            current = view.zoomFactor()
+            self._set_zoom(next((z for z in ZOOM_LEVELS if z > current + 0.001), ZOOM_LEVELS[-1]))
+
+    def zoom_out(self) -> None:
+        if view := self.current_view():
+            current = view.zoomFactor()
+            self._set_zoom(next((z for z in reversed(ZOOM_LEVELS) if z < current - 0.001), ZOOM_LEVELS[0]))
+
+    def zoom_reset(self) -> None:
+        self._set_zoom(1.0)
+
+    def open_inspector(self) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        if self._inspector is None:
+            self._inspector = QWebEngineView(self)
+            self._inspector.setWindowFlag(Qt.WindowType.Window)
+            self._inspector.setWindowTitle("Web Inspector")
+            self._inspector.resize(1000, 640)
+        view.page().setDevToolsPage(self._inspector.page())
+        self._inspector.show()
+        self._inspector.raise_()
+        self._inspector.activateWindow()
+
+    # ---------------------------------------------------------------------------- menus
+    @staticmethod
+    def _add_action(menu: QMenu, text: str, slot, enabled: bool = True):
+        action = menu.addAction(text)
+        action.triggered.connect(lambda *_: slot())
+        action.setEnabled(enabled)
+        return action
+
+    @staticmethod
+    def _add_toggle(menu: QMenu, text: str, checked: bool, slot):
+        action = menu.addAction(text)
+        action.setCheckable(True)
+        action.setChecked(checked)
+        action.toggled.connect(slot)
+        return action
+
+    def _popup_under(self, menu: QMenu, widget: QWidget) -> None:
+        menu.exec(widget.mapToGlobal(QPoint(0, widget.height() + 6)))
+        menu.deleteLater()
+
+    def show_page_menu(self) -> None:
+        """The menu behind the icon at the left of the address field (Safari 26's page menu):
+        a card for the site you're on (its submenu has the privacy details and switches),
+        quick actions, zoom, then the rest."""
+        view = self.current_view()
+        url = view.url() if view else QUrl()
+        sec = self.theme["text_secondary"]
+        menu = prepare_menu(QMenu(self))
+        self._add_site_card(menu, view, url)
+        menu.addSeparator()
+        # -- quick actions
+        tiles = MenuTiles(self.theme, menu)
+        strong, accent = self.theme["text"], self.theme["accent"]
+
+        def tile(glyph: str, label: str, text: str, slot, enabled: bool, active: bool = False) -> None:
+            action = QAction(text, tiles)
+            action.setEnabled(enabled)
+            tiles.add(self.icons.icon(glyph, accent if active else strong), label, action, slot, active)
+
+        reader_on = bool(view and view.reader_on)
+        reading = self.reader_voice.reading
+        tile("search", "Find", "Find on Page…\tCtrl+F", self.show_find_bar, view is not None)
+        tile("reader", "Reader", ("Hide Reader" if reader_on else "Show Reader") + "\tF9", self.toggle_reader,
+             bool(view and (view.readerable or view.reader_on)) and bool(reader_source()), reader_on)
+        tile("voice", "Stop" if reading else "Listen", "Stop Reading Aloud" if reading else "Read Aloud", self.read_aloud,
+             reading or (view is not None and url.scheme() in ("http", "https", "file")), reading)
+        tile("screenshot", "Screenshot", "Take Screenshot of Whole Page\tCtrl+Shift+S",
+             partial(self.take_screenshot, True), view is not None)
+        split_open = self.split.isVisible()
+        tile("split", "Split View", "Close Split View" if split_open else "Open Split View", self.toggle_split_view,
+             True, split_open)
+        holder = QWidgetAction(menu)
+        holder.setDefaultWidget(tiles)
+        menu.addAction(holder)
+        menu.addSeparator()
+        # -- this page
+        if view is not None:
+            def zoom_text() -> str:
+                return f"{round(view.zoomFactor() * 100)}%"
+            stepper = MenuStepper(self.icons.icon("zoom", sec), "Zoom", self.theme, zoom_text(),
+                                  lambda: (self.zoom_out(), zoom_text())[1], lambda: (self.zoom_reset(), zoom_text())[1],
+                                  lambda: (self.zoom_in(), zoom_text())[1],
+                                  (self.icons.icon("minus", strong), self.icons.icon("plus", strong)), menu)
+            for text, slot in (("Zoom In\tCtrl+=", self.zoom_in), ("Zoom Out\tCtrl+-", self.zoom_out),
+                               ("Actual Size\tCtrl+0", self.zoom_reset)):
+                action = QAction(text, stepper)
+                action.triggered.connect(lambda *_, s=slot: s())
+                stepper.addAction(action)
+            row = QWidgetAction(menu)
+            row.setDefaultWidget(stepper)
+            menu.addAction(row)
+        if url.scheme() in ("http", "https"):
+            self._add_action(menu, "Site Style…", self.show_site_style).setIcon(self.icons.icon("palette", sec))
+        video = prepare_menu(menu.addMenu("Video"))
+        video.setIcon(self.icons.icon("speed", sec))
+        video.setEnabled(view is not None)
+        self._add_action(video, "Pop Out Video", self.pop_out_video).setIcon(self.icons.icon("popout", sec))
+        video.addSeparator()
+        speed_group = QActionGroup(video)
+        for speed in VIDEO_SPEEDS:
+            action = video.addAction("Normal Speed" if speed == 1.0 else f"{speed:g}×")
+            action.setCheckable(True)
+            action.setChecked(bool(view) and abs(view.video_speed - speed) < 0.01)
+            speed_group.addAction(action)
+            action.triggered.connect(partial(self.set_video_speed, speed))
+        menu.addSeparator()
+        # -- this tab
+        self._add_action(menu, "Unpin Tab" if (view and view.pinned) else "Pin Tab", self.toggle_pin,
+                         view is not None).setIcon(self.icons.icon("pin", sec))
+        muted = bool(view and view.page().isAudioMuted())
+        if view is not None and (muted or view.page().recentlyAudible()):        # only when there's sound
+            self._add_action(menu, ("Unmute Tab" if muted else "Mute Tab") + "\tCtrl+M", self.toggle_mute).setIcon(
+                self.icons.icon("speaker_muted" if muted else "speaker", sec))
+        if not self.private and view is not None:
+            move = prepare_menu(menu.addMenu("Move Tab to Group"))
+            move.setIcon(self.icons.icon("group", sec))
+            for i, group in enumerate(self.groups):
+                if i != self.group_index:
+                    self._add_action(move, self.group_name(i).replace("&", "&&"), partial(self.move_tab_to_group, view, i))
+            if len(self.groups) > 1:
+                move.addSeparator()
+            self._add_action(move, "New Tab Group…", partial(self.new_tab_group, view))
+        menu.addSeparator()
+        # -- keep it
+        self._add_action(menu, "Add to Favorites\tCtrl+D", self.add_bookmark_for_current).setIcon(
+            self.icons.icon("star", sec))
+        self._add_action(menu, "Add to Reading List\tCtrl+Shift+D", self.add_to_reading_list,
+                         url.scheme() in ("http", "https")).setIcon(self.icons.icon("reading", sec))
+        self._add_action(menu, "Copy Link", lambda: QGuiApplication.clipboard().setText(self.shareable_link(url)),
+                         url.scheme() in ("http", "https", "file")).setIcon(self.icons.icon("link", sec))
+        menu.addSeparator()
+        # -- privacy
+        self._add_action(menu, "Privacy && Security…\tCtrl+,", self.show_privacy_settings).setIcon(  # && shows one &
+            self.icons.icon("shield", sec))
+        if self.passwords is not None:
+            self._add_action(menu, "Passwords…\tCtrl+Shift+P", self.show_passwords).setIcon(self.icons.icon("key", sec))
+        menu.addSeparator()
+        # -- settings
+        settings = prepare_menu(menu.addMenu("Settings"))
+        settings.setIcon(self.icons.icon("sliders", sec))
+        self._add_toggle(settings, "Check Spelling", self.spellcheck, self.set_spellcheck)
+        start_page = prepare_menu(settings.addMenu("Start Page"))
+        start_page.menuAction().setProperty("huginnNoAutoIcon", True)     # Settings' items go without icons
+        self._add_toggle(start_page, "Greet in Old Norse", self.start_handler.norse, self.set_norse_greeting)
+        self._add_toggle(start_page, "Rippling Aurora", self.start_handler.ripple, self.set_aurora_ripple)
+        self._add_toggle(start_page, "Weekly Recap", self.start_handler.recap, self.set_weekly_recap)
+        if self.weather_service() is not None:
+            start_page.addSeparator()
+            self._add_toggle(start_page, "Weather", self.weather_service().enabled(), self.set_weather_enabled)
+            self._add_action(start_page, "Weather Location…", self.show_weather_settings)
+        self._add_toggle(settings, "Change Theme With Time of Day", self.living, self.set_living_theme)
+        if not self.private:
+            self._add_toggle(settings, "Web Panels in Sidebar", self.sidebar.panels_enabled, self.set_web_panels_enabled)
+        self._add_toggle(settings, "Game Mode (when a game is full screen)",
+                         self.settings.value("gameMode", True, type=bool), self.set_game_mode)
+        self._add_action(settings, "Focus Hours…", self.show_focus_settings)
+        buttons = prepare_menu(settings.addMenu("Window Buttons"))
+        button_group = QActionGroup(buttons)
+        for key, label in WINDOW_BUTTON_STYLES.items():
+            action = buttons.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.toolbar.button_style == key)
+            button_group.addAction(action)
+            action.triggered.connect(partial(self.set_window_buttons, key))
+        tab_menu = prepare_menu(settings.addMenu("Tabs"))
+        self._add_toggle(tab_menu, "Always Show Tab Bar", self.always_show_tab_bar, self.set_always_show_tab_bar)
+        self._add_toggle(tab_menu, "Sleep Inactive Tabs", self.sleep_tabs, self.set_sleep_tabs)
+        if not self.private:
+            self._add_toggle(tab_menu, "Reopen Tabs at Startup", self.restore_tabs, self.set_restore_tabs)
+        settings.addSeparator()
+        realms = prepare_menu(settings.addMenu("Theme"))
+        realm_group = QActionGroup(realms)
+        for key, spec in REALMS.items():
+            action = realms.addAction(realm_swatch(key), spec["label"])
+            action.setCheckable(True)
+            action.setChecked(self.realm == key)
+            realm_group.addAction(action)
+            action.triggered.connect(partial(self.set_realm, key))
+        realms.addSeparator()
+        self._add_toggle(realms, "Tint With Page Colour", self.tint_enabled, self.set_tint_enabled)
+        self._add_toggle(realms, "Use Websites' Theme Colours", self.tint_theme_colours,
+                         self.set_tint_theme_colours).setEnabled(self.tint_enabled)
+        if self.tint_enabled and url.scheme() in ("http", "https") and url.host():
+            self._add_toggle(realms, f"Tint on {bare_display_host(url)}",
+                             registrable_domain(url.host().lower()) not in self.tint_off_sites(),
+                             partial(self.set_site_tint, url.host()))
+        appearance = prepare_menu(settings.addMenu("Appearance"))
+        group = QActionGroup(appearance)
+        for mode, label in (("system", "Use System Setting"), ("light", "Light"), ("dark", "Dark")):
+            action = appearance.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.appearance == mode)
+            group.addAction(action)
+            action.triggered.connect(partial(self.set_appearance, mode))
+        appearance.addSection("Websites")
+        sites_group = QActionGroup(appearance)
+        for mode, label in DARK_WEBSITE_MODES.items():
+            action = appearance.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.dark_websites == mode)
+            sites_group.addAction(action)
+            action.triggered.connect(partial(self.set_dark_websites, mode))
+        if self.dark_websites != "off" and url.scheme() in ("http", "https") and url.host():
+            appearance.addSeparator()
+            self._add_toggle(appearance, f"Dark on {bare_display_host(url)}",
+                             registrable_domain(url.host().lower()) not in self.dark_off_sites(),
+                             partial(self.set_site_dark, url.host()))
+        engines = prepare_menu(settings.addMenu("Search Engine"))
+        engine_group = QActionGroup(engines)
+        for key, (label, _url) in SEARCH_ENGINES.items():
+            if key == "custom":
+                engines.addSeparator()
+                label = (f"Custom ({search_engine_label(self.prefs)})…" if self.prefs["searchEngine"] == "custom"
+                         else "Custom…")
+            action = engines.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.prefs["searchEngine"] == key)
+            engine_group.addAction(action)
+            action.triggered.connect(partial(self.choose_search_engine, key))
+        sounds = self.typing_sounds
+        if sounds is not None:
+            typing = prepare_menu(settings.addMenu("Typing Sounds"))
+            sound_group = QActionGroup(typing)
+            for key, label in TYPING_SOUNDS.items():
+                action = typing.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(sounds.pack == key)
+                action.setEnabled(key == "off" or sounds.supported())
+                sound_group.addAction(action)
+                action.triggered.connect(partial(sounds.set_pack, key))
+            typing.addSeparator()
+            volume_group = QActionGroup(typing)
+            for key, (label, _level) in TYPING_VOLUMES.items():
+                action = typing.addAction(f"Volume: {label}")
+                action.setCheckable(True)
+                action.setChecked(sounds.volume == key)
+                action.setEnabled(sounds.pack != "off")
+                volume_group.addAction(action)
+                action.triggered.connect(partial(sounds.set_volume, key))
+        # -- tools
+        tools = prepare_menu(menu.addMenu("More Tools"))
+        tools.setIcon(self.icons.icon("grid", sec))
+        self._add_action(tools, "Downloads\tCtrl+J", self.show_downloads).setIcon(self.icons.icon("download", sec))
+        self._add_action(tools, "Tab Manager\tShift+Esc", self.show_tab_manager).setIcon(self.icons.icon("gauge", sec))
+        self._add_action(tools, "Command Bar\tCtrl+K", self.show_command_bar).setIcon(self.icons.icon("command", sec))
+        self._add_action(tools, "New Burner Tab\tCtrl+Alt+N", self.new_burner_tab).setIcon(self.icons.icon("flame", sec))
+        self._add_action(tools, "Welcome Tour", self.show_welcome).setIcon(self.icons.icon("sparkle", sec))
+        if not self.private:
+            self._add_action(tools, "Valhalla — Closed Tabs", self.show_valhalla).setIcon(self.icons.icon("valhalla", sec))
+            if self.sidebar.panels_enabled:
+                self._add_action(tools, "Add Page as Web Panel", self.add_web_panel,
+                                 url.scheme() in ("http", "https")).setIcon(self.icons.icon("panel", sec))
+        self._add_action(tools, "Screenshot of Visible Part", partial(self.take_screenshot, False),
+                         view is not None).setIcon(self.icons.icon("screenshot", sec))
+        tools.addSeparator()
+        imports = prepare_menu(tools.addMenu("Import From Another Browser"))
+        sources = self.find_import_sources()
+        for source in sources:
+            self._add_action(imports, f"{source['label']}…".replace("&", "&&"), partial(self.import_from, source))
+        if not sources:
+            self._add_action(imports, "No other browsers found on this PC", lambda: None, enabled=False)
+        imports.addSeparator()
+        self._add_action(imports, "Bookmarks File (HTML)…", partial(self.import_from, None))
+        if not self.private:
+            tools.addSeparator()
+            if self.updater is not None:
+                self._add_action(tools, "Check for Updates", self.check_for_updates)
+            elif load_update_config() is None:
+                self._add_action(tools, f"Share {BROWSER_NAME} With Friends…", self.share_with_friends).setIcon(
+                    self.icons.icon("gift", sec))
+                if self.settings.value("updateUrl", ""):
+                    self._add_action(tools, "Publish Update for Friends…", self.publish_update)
+        tools.addSeparator()
+        self._add_action(tools, "Web Inspector\tF12", self.open_inspector, view is not None)
+        if not self.private and self.is_default_browser() is False:
+            self._add_action(menu, f"Make {BROWSER_NAME} Your Default Browser…", self.make_default_browser).setIcon(
+                self.icons.icon("globe", sec))
+        menu.addSeparator()
+        self._add_action(menu, "Quit\tCtrl+Q", self.quit_all).setIcon(self.icons.icon("power", sec))
+        self._popup_under(menu, self.address)
+
+    def _add_site_card(self, menu: QMenu, view: "WebView | None", url: QUrl) -> QMenu:
+        """The top of the page menu: the site's privacy grade, its name, and one line on the
+        connection, trackers and ads. Hovering it opens the details and the per-site switches."""
+        sec = self.theme["text_secondary"]
+        web = url.scheme() in ("http", "https") and bool(url.host())
+        details = prepare_menu(QMenu(menu))
+        if web:
+            site = bare_display_host(url)
+            if view is not None and self._not_secure(view):
+                connection = "Certificate not trusted"
+            elif url.scheme() == "https":
+                connection = "Secure"
+            elif _is_local_host(url.host()):
+                connection = "Local"
+            else:
+                connection = "Not secure"
+            facts = [connection]
+            if self.blocker.enabled:
+                n = self.store.site_tracker_count(registrable_domain(url.host()))
+                facts.append(f"{n} tracker{'s' if n != 1 else ''} stopped" if n else "No trackers")
+            else:
+                facts.append("Tracking prevention off")
+            ads = None
+            if self.guard.adblock is not None and self.guard.block_ads:
+                if self.guard.ads_allowed_on(url.host()):
+                    ads = f"Ad blocking is off for {site}"
+                    facts.append("Ads allowed")
+                else:
+                    n = self.guard.ads_blocked.get(registrable_domain(url.host().lower()), 0)
+                    ads = f"Blocked {n} ad{'s' if n != 1 else ''} and trackers on {site}"
+                    removed = (view.youtube_events["pruned"] + view.youtube_events["skipped"]) if view else 0
+                    if removed:
+                        ads += f" · {removed} YouTube ad{'s' if removed != 1 else ''} removed"
+                    if n:
+                        facts.append(f"{n} ad{'s' if n != 1 else ''} blocked")
+            if self.private:
+                facts.insert(0, "Private")
+            grade = self.page_grade(view) if view is not None else None
+            letter = grade[0] if grade else "?"
+            details.setTitle(f"{site}{HEADER_MARK}{' · '.join(facts)}")
+            details.setIcon(grade_badge(letter))
+            if grade is not None:
+                details.setSeparatorsCollapsible(False)          # so the title row shows at the top
+                details.addSection(f"Privacy Grade: {letter}")
+                for line in grade[1]:
+                    if line == "Secure connection" and _is_local_host(url.host()):
+                        line = "Local connection (on this PC)"
+                    self._add_action(details, line, lambda: None, enabled=False)
+            if ads:
+                self._add_action(details, ads, lambda: None, enabled=False).setIcon(self.icons.icon("noads", sec))
+            details.addSeparator()
+            if self.guard.adblock is not None and self.guard.block_ads:
+                self._add_toggle(details, f"Block Ads on {site}", not self.guard.ads_allowed_on(url.host()),
+                                 partial(self.set_site_ad_blocking, url.host()))
+            self._add_toggle(details, "Prevent Cross-Site Tracking", self.blocker.enabled, self.set_tracking_prevention)
+            if not self.private:
+                self._add_toggle(details, f"Auto-Play Videos on {site}", self.autoplay_allowed(url.host()),
+                                 partial(self.set_site_autoplay, url.host()))
+            if self.prefs.get("clearCookiesOnQuit") and not self.private:
+                self._add_toggle(details, f"Keep Me Signed In to {site}",
+                                 registrable_domain(url.host().lower()) in self.keep_cookie_sites(),
+                                 partial(self.set_keep_cookies, url.host()))
+            remembered = [p for p in self.stored_permissions()
+                          if p.origin().toString().rstrip("/") == f"{url.scheme()}://{url.authority()}"]
+            if remembered:
+                self._add_action(details, f"Reset Permissions for {site}",
+                                 lambda: (self.reset_site_permissions(url),
+                                          self.status_bubble.show_message(f"Permissions reset for {site}")))
+        else:
+            if self.private:
+                detail = "Private Browsing · nothing is kept"
+            elif not self.blocker.enabled:
+                detail = "Cross-site tracking prevention is off"
+            else:
+                n = self.store.tracker_report()["trackers"]
+                detail = f"{n} tracker{'s' if n != 1 else ''} stopped this week" if n else "No trackers this week"
+            title = "Start Page" if is_start_page(url) or url.isEmpty() else (display_text_for(url) or BROWSER_NAME)
+            details.setTitle(f"{title}{HEADER_MARK}{detail}")
+            details.setIcon(self.app_icon)
+            self._add_toggle(details, "Prevent Cross-Site Tracking", self.blocker.enabled, self.set_tracking_prevention)
+        menu.addMenu(details)
+        return details
+
+    def shareable_link(self, url: QUrl) -> str:
+        """A link to hand to others: no user:password@, and no click-tracking parameters."""
+        clean = without_credentials(url)
+        if self.prefs["stripTrackingParams"]:
+            clean = strip_tracking_params(clean) or clean
+        return clean.toString()
+
+    def show_sidebar_menu(self) -> None:
+        menu = prepare_menu(QMenu(self))
+        self._add_action(menu, ("Hide" if self.sidebar.is_open() else "Show") + " Sidebar\tCtrl+Shift+L",
+                         self.toggle_sidebar)
+        self._add_action(menu, "Bookmarks", partial(self.show_sidebar_section, 0))
+        self._add_action(menu, "History", partial(self.show_sidebar_section, 1))
+        menu.addSeparator()
+        if not self.private:
+            choice = QActionGroup(menu)                       # one group at a time: ticked, not switched
+            for i in range(len(self.groups)):
+                count = len(self.views()) if i == self.group_index else len(self.groups[i]["views"])
+                label = f"{self.group_name(i)}  ·  {count} tab{'s' if count != 1 else ''}"
+                action = menu.addAction(self.icons.icon("group", self.theme["text_secondary"]), label.replace("&", "&&"))
+                action.setCheckable(True)
+                action.setChecked(i == self.group_index)
+                choice.addAction(action)
+                action.triggered.connect(lambda _on=False, i=i: self.switch_group(i))
+            self._add_action(menu, "New Tab Group…", self.new_tab_group)
+            self._add_action(menu, "Valhalla — Closed Tabs", self.show_valhalla).setIcon(
+                self.icons.icon("valhalla", self.theme["text_secondary"]))
+            if self.group_index:
+                name = self.group_name().replace("&", "&&")
+                self._add_toggle(menu, f"Separate Logins for “{name}”", bool(self.groups[self.group_index].get("container")),
+                                 partial(self.set_group_separate, self.group_index)).setIcon(
+                    self.icons.icon("person", self.theme["text_secondary"]))
+                self._add_action(menu, f"Rename “{name}”…", partial(self.rename_tab_group, self.group_index))
+                self._add_action(menu, f"Delete “{name}”…", partial(self.delete_tab_group, self.group_index))
+            menu.addSeparator()
+        self._add_action(menu, "Start Page\tCtrl+Shift+H", self.go_home)
+        self._add_action(menu, "New Tab\tCtrl+T", self.new_tab)
+        self._add_action(menu, "New Private Window\tCtrl+Shift+N", self.open_private_window).setIcon(
+            self.icons.icon("private", self.theme["text_secondary"]))
+        self._add_action(menu, "Reopen Closed Tab\tCtrl+Shift+T", self.reopen_closed_tab, bool(self._closed_tabs))
+        self._add_action(menu, "Show All Tabs\tCtrl+Shift+\\", self.toggle_overview)
+        menu.addSeparator()
+        self._add_action(menu, "Clear History…\tCtrl+Shift+Del", self.show_clear_history_dialog)
+        self._popup_under(menu, self.toolbar.capsules[0])
+
+    def show_share_menu(self) -> None:
+        view = self.current_view()
+        url = view.url() if view else QUrl()
+        title = (view.title() if view else "") or display_text_for(url)
+        shareable = url.scheme() in ("http", "https", "file")
+        link = self.shareable_link(url)
+
+        def copy_link() -> None:
+            QGuiApplication.clipboard().setText(link)
+            self.status_bubble.show_message("Link copied")
+
+        menu = prepare_menu(QMenu(self))
+        self._add_action(menu, "Copy Link", copy_link, shareable)
+        self._add_action(menu, "Add to Reading List", self.add_to_reading_list, url.scheme() in ("http", "https"))
+        self._add_action(menu, "Email This Page", lambda: QDesktopServices.openUrl(
+            QUrl(f"mailto:?subject={quote(title)}&body={quote(link, safe='')}")), shareable)
+        self._add_action(menu, "Open in Default Browser", lambda: QDesktopServices.openUrl(url),
+                         url.scheme() in ("http", "https"))
+        menu.addSeparator()
+        self._add_action(menu, "Add to Favorites\tCtrl+D", self.add_bookmark_for_current, shareable)
+        self._popup_under(menu, self.toolbar.share_button)
+
+    # ---------------------------------------------------------------------------- downloads
+    def _ask_save_path(self, suggested: str) -> str:
+        path, _ = QFileDialog.getSaveFileName(self, "Save Download", suggested)
+        return path
+
+    def _on_download_requested(self, download: QWebEngineDownloadRequest) -> None:
+        target = os.path.normpath(os.path.join(download.downloadDirectory(), download.downloadFileName()))
+        offline = {os.path.normpath(k): k for k in self._offline_saves}
+        if download.isSavePageDownload() and target in offline:
+            url = self._offline_saves.pop(offline[target])
+            download.stateChanged.connect(partial(self._offline_saved, url, target, download))
+            download.accept()
+            return
+        name = download.downloadFileName()
+        source = download.url()
+        page = download.page()
+        referrer = QUrl(page.url()) if page is not None else QUrl()
+        if self.prefs["warnDownloads"] and not download.isSavePageDownload() and is_dangerous_download(name):
+            site = origin_label(source) if source.scheme() in ("http", "https") else "this page"
+            text = (f"“{name}” is an app or script. Files like this can harm your computer, so only "
+                    f"download it if you trust {site}.")
+            if source.scheme() == "http" and not _is_local_host(source.host()):
+                text += " It's also being sent over an insecure connection, so it could have been altered."
+            dialog = SheetDialog(self, "Download this app or script?", text, ok="Download Anyway", danger=True)
+            accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+            dialog.deleteLater()
+            if not accepted:
+                download.cancel()
+                self.status_bubble.show_message(f"Download of {name} cancelled", 3000)
+                return
+        folder = download.downloadDirectory() or QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation)
+        path = self.ask_save_path(os.path.join(folder, name))
+        if not path:
+            download.cancel()
+            return
+        download.setDownloadDirectory(os.path.dirname(path))
+        download.setDownloadFileName(os.path.basename(path))
+        # Private Browsing leaves the addresses out of the file's internet mark.
+        origin = (None, None) if self.private else (QUrl(source), referrer)
+        download.stateChanged.connect(partial(self._on_download_state, download, origin))
+        download.accept()
+        self.downloads.track(download, path, "" if self.private else source.toString())
+        self.status_bubble.show_message(f"Downloading {os.path.basename(path)}…", 3000)
+
+    def _on_download_state(self, download: QWebEngineDownloadRequest, origin: tuple, state) -> None:
+        name = download.downloadFileName()
+        if state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
+            # Mark it as downloaded from the internet, so Windows SmartScreen and Office's
+            # Protected View check it before it runs.
+            write_mark_of_the_web(os.path.join(download.downloadDirectory(), name), *origin)
+            self.status_bubble.show_message(f"Downloaded {name}", 4000)
+        elif state == QWebEngineDownloadRequest.DownloadState.DownloadInterrupted:
+            self.status_bubble.show_message(f"Download failed: {name}", 4000)
+
+    # ---------------------------------------------------------------------------- page fullscreen
+    def _on_fullscreen_requested(self, view: WebView, request) -> None:
+        """Page fullscreen (e.g. a video). We remember which tab asked, so closing or leaving
+        that tab always restores the window instead of stranding it fullscreen."""
+        if request.toggleOn():
+            if view is not self.current_view() or (self._fullscreen_view not in (None, view)):
+                request.reject()                       # only the visible tab may go fullscreen
+                return
+            request.accept()
+            if self._fullscreen_view is view:
+                return
+            self._fullscreen_view = view
+            self._restore_maximized = self.isMaximized()
+            self._sidebar_before_fullscreen = self.sidebar.is_open()
+            self._leave_overview()
+            self.toolbar.hide()
+            self.tabs.tabBar().hide()
+            self.sidebar.hide()
+            self.tab_style.inset = False           # video edge to edge, no card
+            self.tabs.relayout()
+            self.showFullScreen()
+            self._apply_native_effects()
+            self._sync_permission_prompt()
+            self._show_fullscreen_notice(view)
+        else:
+            request.accept()
+            self._leave_fullscreen_ui()
+        QTimer.singleShot(0, self._update_escape_shortcut)
+
+    def _leave_fullscreen_ui(self) -> None:
+        if self._fullscreen_view is None:
+            return
+        self._fullscreen_view = None
+        self.fullscreen_notice.hide()
+        self.toolbar.show()
+        if self.tabs.count() > 1 or self.always_show_tab_bar:
+            self.tabs.tabBar().show()
+        self.sidebar.setVisible(self._sidebar_before_fullscreen)
+        self.tab_style.inset = True
+        self.tabs.relayout()
+        self.showMaximized() if self._restore_maximized else self.showNormal()
+        self._apply_native_effects()
+        self._sync_permission_prompt()
+        QTimer.singleShot(0, self._update_escape_shortcut)
+
+    def _exit_page_fullscreen(self) -> None:
+        """Ask the page to leave fullscreen, and restore the window even if it can't."""
+        view = self._fullscreen_view
+        if view is not None:
+            try:
+                view.triggerPageAction(QWebEnginePage.WebAction.ExitFullScreen)
+            except RuntimeError:
+                pass                                   # the tab is already gone
+        self._leave_fullscreen_ui()
+
+    def _place_fullscreen_notice(self) -> None:
+        notice = self.fullscreen_notice
+        notice.move((self.tabs.width() - notice.width()) // 2, 28)
+
+    def _show_fullscreen_notice(self, view: WebView) -> None:
+        """Like other browsers: say who went fullscreen and how to leave (anti-spoofing)."""
+        site = bare_host(view.url()) or "This page"
+        self.fullscreen_notice.setText(f"{site} is now full screen  ·  Press Esc to exit")
+        self.fullscreen_notice.adjustSize()
+        self._place_fullscreen_notice()
+        self.fullscreen_notice.show()
+        self.fullscreen_notice.raise_()
+        self._notice_timer.start()
+
+    # ---------------------------------------------------------------------------- window management
+    def toggle_maximize(self) -> None:
+        self.showNormal() if self.isMaximized() else self.showMaximized()
+
+    def is_drag_area(self, pos: QPoint) -> bool:
+        """True where a press should move the window (empty parts of the toolbar)."""
+        child = self.childAt(pos)
+        return child is not None and (child is self.toolbar or bool(child.property("dragArea")))
+
+    def begin_system_move(self, global_pos: QPoint) -> bool:
+        """Start a native (OS-driven) window move. When maximized, first restore the
+        window under the cursor at the same relative position, like a real title bar."""
+        if self.isFullScreen():
+            return True
+        if self.isMaximized():
+            geometry = self.geometry()
+            ratio = (global_pos.x() - geometry.x()) / max(1, geometry.width())
+            offset_y = global_pos.y() - geometry.y()
+            normal_width = self.normalGeometry().width()
+            self.showNormal()
+            self.move(int(global_pos.x() - normal_width * ratio), int(global_pos.y() - offset_y))
+        handle = self.windowHandle()
+        return bool(handle is not None and handle.startSystemMove())
+
+    def nativeEvent(self, event_type, message):
+        if self._native_frame is not None:
+            result = self._native_frame.handle(event_type, message)
+            if result is not None:
+                return result
+        return super().nativeEvent(event_type, message)
+
+    def _edges_at(self, pos: QPointF) -> Qt.Edge:
+        edges = Qt.Edge(0)
+        if self.isMaximized() or self.isFullScreen():
+            return edges
+        x, y, m = pos.x(), pos.y(), RESIZE_MARGIN
+        if x <= m:
+            edges |= Qt.Edge.LeftEdge
+        elif x >= self.width() - m:
+            edges |= Qt.Edge.RightEdge
+        if y <= m:
+            edges |= Qt.Edge.TopEdge
+        elif y >= self.height() - m:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def _update_edge_cursor(self, edges: Qt.Edge) -> None:
+        if not edges:
+            if self._edge_cursor_active:
+                QApplication.restoreOverrideCursor()
+                self._edge_cursor_active = False
+            return
+        if edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge):
+            shape = Qt.CursorShape.SizeFDiagCursor
+        elif edges in (Qt.Edge.RightEdge | Qt.Edge.TopEdge, Qt.Edge.LeftEdge | Qt.Edge.BottomEdge):
+            shape = Qt.CursorShape.SizeBDiagCursor
+        elif edges in (Qt.Edge.LeftEdge, Qt.Edge.RightEdge):
+            shape = Qt.CursorShape.SizeHorCursor
+        else:
+            shape = Qt.CursorShape.SizeVerCursor
+        if self._edge_cursor_active:
+            QApplication.changeOverrideCursor(QCursor(shape))
+        else:
+            QApplication.setOverrideCursor(QCursor(shape))
+            self._edge_cursor_active = True
+
+    def eventFilter(self, obj, event) -> bool:
+        # Edge resizing when Windows' native frame isn't in use (other platforms). The filter
+        # sits on the QWindow, which sees mouse events before any child widget does.
+        if isinstance(obj, QWindow):
+            kind = event.type()
+            if kind == QEvent.Type.MouseMove and event.buttons() == Qt.MouseButton.NoButton:
+                self._update_edge_cursor(self._edges_at(event.position()))
+            elif kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                edges = self._edges_at(event.position())
+                if edges:
+                    obj.startSystemResize(edges)
+                    return True
+            elif kind == QEvent.Type.Leave:
+                self._update_edge_cursor(Qt.Edge(0))
+        elif obj is (self.tabs.stack or self.tabs) and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            self.status_bubble.reposition()
+            self._place_fullscreen_notice()          # the window grows into fullscreen after showing it
+            if self.overview.isVisible():
+                self.overview.setGeometry(self.tabs.geometry())
+            if self.warning_panel.isVisible():
+                self.warning_panel.setGeometry(self.tabs.card_rect())
+            if self.permission_prompt.isVisible():
+                self._place_permission_prompt()
+            if self.engine_bar.isVisible():
+                self._place_permission_prompt(self.engine_bar)
+            if self.password_bar.isVisible():
+                self._place_permission_prompt(self.password_bar)
+            if self.find_bar.isVisible():
+                self._place_find_bar()
+            if self.default_bar.isVisible():
+                self._place_permission_prompt(self.default_bar)
+            if self.update_bar.isVisible():
+                self._place_permission_prompt(self.update_bar)
+            self.hide_password_suggestions()
+        return super().eventFilter(obj, event)
+
+    def _update_frame_margins(self) -> None:
+        # Windows draws the edge itself (shadow / Win11 border); elsewhere draw a 1px frame.
+        native_edge = self._native_frame is not None or IS_WIN11
+        edge = 0 if (native_edge or self.isMaximized() or self.isFullScreen()) else 1
+        self.layout().setContentsMargins(edge, edge, edge, edge)
+
+    def _install_window_hooks(self) -> None:
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        if self._native_frame is not None:
+            self._native_frame.install()
+        elif handle is not self._qwindow:
+            handle.installEventFilter(self)
+        self._qwindow = handle
+        self._apply_native_effects()
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.WinIdChange and self.isVisible():
+            QTimer.singleShot(0, self._install_window_hooks)   # native window was recreated
+        return super().event(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._qwindow is None or self._qwindow is not self.windowHandle():
+            self._install_window_hooks()
+        self._update_frame_margins()
+
+    def changeEvent(self, event) -> None:
+        if hasattr(self, "toolbar"):
+            if event.type() == QEvent.Type.WindowStateChange:
+                self._update_frame_margins()
+                self.toolbar.lights.set_maximized(self.isMaximized())
+                self.toolbar.window_buttons.set_maximized(self.isMaximized())
+                self._update_edge_cursor(Qt.Edge(0))
+            elif event.type() == QEvent.Type.ActivationChange:
+                self.toolbar.lights.set_window_active(self.isActiveWindow())
+                self.toolbar.window_buttons.set_window_active(self.isActiveWindow())
+                if self.isActiveWindow() and self._default_waiting:
+                    QTimer.singleShot(400, self._check_default_after_settings)
+        super().changeEvent(event)
+
+    def _restore_state(self) -> None:
+        if self.private:                       # cascade from the main window; remember nothing
+            main = self.main_window
+            source = main.normalGeometry() if main.isMaximized() or main.isFullScreen() else main.geometry()
+            self.resize(source.size())
+            self.move(source.topLeft() + QPoint(32, 32))
+            return
+        geometry = self.settings.value("geometry")
+        if isinstance(geometry, bytes):
+            geometry = QByteArray(geometry)
+        if not (isinstance(geometry, QByteArray) and not geometry.isEmpty() and self.restoreGeometry(geometry)):
+            screen = QGuiApplication.primaryScreen().availableGeometry()
+            w, h = min(1280, int(screen.width() * 0.85)), min(840, int(screen.height() * 0.88))
+            self.resize(w, h)
+            self.move(screen.center() - QPoint(w // 2, h // 2))
+        if self.settings.value("sidebarOpen", False, type=bool):
+            self.sidebar.set_open(True, animate=False)
+            self.toolbar.sidebar_button.setChecked(True)
+
+    def closeEvent(self, event) -> None:
+        if not self.private:
+            if not self.isFullScreen():
+                self.settings.setValue("geometry", self.saveGeometry())
+            self.settings.setValue("sidebarOpen", self.sidebar.is_open())
+            self.save_session()
+            self._closing = True
+            self.downloads.save()
+            if self.prefs.get("clearCookiesOnQuit"):
+                self.clear_cookies_now()
+            self.store.flush()
+        if self._inspector is not None:
+            self._inspector.close()
+        if self.pop_out is not None:
+            self.pop_out.finish(False)
+        if self.tab_manager is not None:
+            self.tab_manager.close()
+        super().closeEvent(event)
+
+
+# --------------------------------------------------------------------------------------
+# Application setup
+# --------------------------------------------------------------------------------------
+def configure_profile(profile: QWebEngineProfile) -> None:
+    # Drop the "QtWebEngine/x.y" token: some sites serve degraded pages to unknown engines.
+    profile.setHttpUserAgent(re.sub(r"\s*QtWebEngine/\S+", "", profile.httpUserAgent()))
+    settings = profile.settings()
+    attrs = QWebEngineSettings.WebAttribute
+    for name in ("FullScreenSupportEnabled", "ScrollAnimatorEnabled", "PluginsEnabled", "PdfViewerEnabled"):
+        attribute = getattr(attrs, name, None)
+        if attribute is not None:
+            settings.setAttribute(attribute, True)
+    # Privacy & security hardening:
+    #  * popups only in response to a click        * no mixed (http-in-https) scripts
+    #  * WebRTC can't reveal your local IP address   * no <a ping> click-tracking beacons
+    #  * no DNS prefetching of every link on a page  * pages can't read the clipboard unasked
+    for name, on in (("JavascriptCanOpenWindows", False), ("AllowRunningInsecureContent", False),
+                     ("WebRTCPublicInterfacesOnly", True), ("HyperlinkAuditingEnabled", False),
+                     ("DnsPrefetchEnabled", False), ("JavascriptCanAccessClipboard", False),
+                     ("JavascriptCanPaste", False), ("AllowGeolocationOnInsecureOrigins", False),
+                     ("LocalContentCanAccessRemoteUrls", False)):
+        attribute = getattr(attrs, name, None)
+        if attribute is not None:
+            settings.setAttribute(attribute, on)
+
+
+def create_application(argv: list[str]) -> QApplication:
+    if IS_WINDOWS:
+        try:  # own taskbar identity, so Windows shows our icon rather than python.exe's
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{ORG_NAME}.{APP_NAME}")
+        except Exception:
+            pass
+    register_start_scheme()
+    dictionaries = os.path.join(APP_DIR, DICTIONARIES_DIR)
+    if os.path.isdir(dictionaries):                     # read by WebEngine when it starts
+        os.environ.setdefault("QTWEBENGINE_DICTIONARIES_PATH", dictionaries)
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication(argv)
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(ORG_NAME)
+    app.setApplicationDisplayName(BROWSER_NAME)  # Windows adds it to dialog titles ("Passwords - Huginn")
+    app.setStyle(HuginnStyle())                 # Fusion (a predictable base for the style sheet) + Huginn's menus
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateMenu, False)     # menus are see-through cards: no Win32 fade
+    app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, False)
+    font = QFont()
+    font.setFamilies(["Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Helvetica Neue", "Arial"])
+    font.setPointSizeF(9.0)
+    app.setFont(font)
+    app.setWindowIcon(make_app_icon())
+    return app
+
+
+def create_browser(app: QApplication, *, persistent: bool = True,
+                   settings_name: str = APP_NAME) -> BrowserWindow:
+    if persistent:
+        data_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+        data_dir = data_dir or os.path.join(os.path.expanduser("~"), f".{APP_NAME.lower()}")
+    else:                                      # throwaway profile (tests): nothing kept on disk
+        data_dir = os.path.join(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation),
+                                f"{settings_name}-data")
+    store = BrowserStore(app, settings_name, data_dir if persistent else None, persist=persistent)
+    # "Clear History: all history" asked for the website data to go; its files were open
+    # then, so they are removed now, before the profile opens them again.
+    pending = store.settings.value("pendingSiteDataWipe")
+    if persistent and isinstance(pending, str) and pending and os.path.isdir(pending):
+        wipe_site_data(pending)
+    store.settings.remove("pendingSiteDataWipe")
+    prefs = load_privacy_prefs(store.settings)
+    apply_secure_dns(prefs["secureDns"])                                   # before any request
+    cookie_dir = str(store.settings.value("cookieDbPath", "") or "")
+    if persistent and prefs["clearCookiesOnQuit"] and cookie_dir and os.path.isdir(cookie_dir):
+        try:
+            keep = set(json.loads(str(store.settings.value("keepCookies", "[]") or "[]")))
+        except (ValueError, TypeError):
+            keep = set()
+        purge_cookie_db(cookie_dir, {str(k) for k in keep})
+    # A named profile keeps cookies, cache and logins; an unnamed one is off-the-record.
+    profile = QWebEngineProfile(APP_NAME, app) if persistent else QWebEngineProfile(app)
+    if persistent:
+        store.settings.setValue("cookieDbPath", profile.persistentStoragePath())
+    configure_profile(profile)
+    blocker = PrivacyGuard(store, app)
+    # Ad blocking: EasyList + EasyPrivacy kept in the data folder (built-in rules only for
+    # throwaway profiles, which never download anything).
+    blocker.adblock = AdBlocker(os.path.join(data_dir, "filters") if persistent else None, app)
+    profile.setUrlRequestInterceptor(blocker)
+    favicons = FaviconCache(os.path.join(data_dir, "favicons"))
+    fetcher = TouchIconFetcher(favicons, profile.httpUserAgent(), app)
+    start_handler = StartPageSchemeHandler(store, favicons, fetcher, app)
+    profile.installUrlSchemeHandler(START_SCHEME.encode(), start_handler)
+    window = BrowserWindow(profile, store, start_handler, blocker)
+    window.data_dir = data_dir
+    window.muninn = Muninn(os.path.join(data_dir, MUNINN_FILE) if (persistent and data_dir) else None)
+    window.game_mode = GameMode(window)
+    window.game_mode.enabled = store.settings.value("gameMode", True, type=bool)
+    window.game_mode.changed.connect(window.on_game_mode)
+    window.weather = WeatherService(store.settings, window)
+    window.weather.changed.connect(window.on_weather_changed)
+    start_handler.weather = window.weather.snapshot()          # the last forecast shows straight away
+    QTimer.singleShot(2500, window, window.weather.refresh)    # then a fresh one, after start-up
+    fetcher.fetched.connect(window.schedule_start_page_refresh)
+    set_perf_probe_script(profile)                             # a testing aid; normally off
+    blocker.adblock.start()
+    if persistent:
+        window.attach_engine(EngineManager(store.settings, app))
+        QTimer.singleShot(60_000, window.engine.check_for_update)   # an H.264 engine checks for fixes daily
+    window.attach_passwords(PasswordManager(os.path.join(data_dir, VAULT_FILE), store.settings, app))
+    app.aboutToQuit.connect(window.passwords.icloud.disconnect)
+    app.aboutToQuit.connect(window.muninn.close)
+    window.typing_sounds = TypingSounds(store.settings, os.path.join(data_dir, "sounds"), app)
+    update_config = load_update_config() if persistent else None
+    if update_config is not None:                       # a copy a friend shared: keep it up to date
+        window.updater = Updater(store.settings, update_config, profile.httpUserAgent(), app)
+        window.updater.ready.connect(window.on_update_ready)
+        window.updater.failed.connect(lambda text: window.status_bubble.show_message(text, 6000))
+        QTimer.singleShot(90_000, window.updater.check_if_due)
+    if persistent:
+        QTimer.singleShot(3000, partial(refresh_shell_icons, store.settings))
+        QTimer.singleShot(4000, partial(refresh_windows_registration, store.settings))
+        QTimer.singleShot(12_000, window.offer_default_browser)
+    return window
+
+
+def create_private_window(main: BrowserWindow) -> BrowserWindow:
+    """A Private Browsing window: an off-the-record profile (cookies, cache and storage
+    live in memory and vanish with the window), no history, no saved icons, no tracker
+    log. It shares Favorites and settings with the main window."""
+    profile = QWebEngineProfile(QApplication.instance())       # unnamed = off-the-record
+    configure_profile(profile)
+    guard = PrivacyGuard(main.store, profile, record=False)
+    guard.adblock = main.guard.adblock                          # one engine for every window
+    profile.setUrlRequestInterceptor(guard)
+    handler = StartPageSchemeHandler(main.store, main.start_handler.favicons, None, profile, private=True)
+    handler.weather = main.start_handler.weather               # the same forecast; nothing new is fetched
+    profile.installUrlSchemeHandler(START_SCHEME.encode(), handler)
+    window = BrowserWindow(profile, main.store, handler, guard, main_window=main)
+    window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    window.attach_engine(main.engine)
+    window.attach_passwords(main.passwords)                    # fills and saves into the same vault
+    window.typing_sounds = main.typing_sounds
+    # Pages must go before their profile: delete the profile once the window is gone.
+    window.destroyed.connect(profile.deleteLater)
+    return window
+
+
+class SingleInstance(QObject):
+    """Keeps one browser process per user. Two processes sharing one WebEngine profile
+    directory can corrupt cookies and cache, so a second launch hands its URLs to the
+    first one and exits."""
+
+    received = Signal(list)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        user = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("USERNAME") or os.environ.get("USER") or "user")
+        self.key = f"{ORG_NAME}.{APP_NAME}.{user}"
+        self.server: QLocalServer | None = None
+
+    def send_to_running(self, args: list[str]) -> bool:
+        socket = QLocalSocket()
+        socket.connectToServer(self.key)
+        if not socket.waitForConnected(500):
+            return False
+        if IS_WINDOWS:                         # let the running instance come to the front
+            try:
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)    # ASFW_ANY
+            except Exception:
+                pass
+        # One JSON line; wait for the "ok" before hanging up. On Windows, a pipe closed
+        # right after writing can reach the server as "disconnected" before the data.
+        socket.write(QByteArray(json.dumps(args).encode("utf-8") + b"\n"))
+        socket.waitForBytesWritten(1000)
+        socket.waitForReadyRead(3000)          # the running browser answers "ok" once it has it
+        socket.disconnectFromServer()
+        return True                            # a browser is running: never start a second one
+
+    def listen(self) -> None:
+        QLocalServer.removeServer(self.key)    # clears a stale socket left by a crash (Unix)
+        self.server = QLocalServer(self)
+        self.server.newConnection.connect(self._on_connection)
+        self.server.listen(self.key)
+
+    def _on_connection(self) -> None:
+        while self.server is not None and self.server.hasPendingConnections():
+            socket = self.server.nextPendingConnection()
+            buffer = bytearray()
+            socket.readyRead.connect(lambda s=socket, b=buffer: self._read(s, b))
+            socket.disconnected.connect(socket.deleteLater)
+            if socket.bytesAvailable():
+                self._read(socket, buffer)
+
+    def _read(self, socket: QLocalSocket, buffer: bytearray) -> None:
+        try:
+            buffer.extend(socket.readAll().data())
+        except RuntimeError:
+            return                             # socket already gone
+        if b"\n" not in buffer:
+            return                             # wait for the rest of the line
+        line = bytes(buffer).split(b"\n", 1)[0]
+        buffer.clear()
+        socket.write(QByteArray(b"ok\n"))
+        socket.flush()
+        try:
+            args = json.loads(line.decode("utf-8") or "[]")
+        except ValueError:
+            return
+        if isinstance(args, list):
+            self.received.emit([a for a in args if isinstance(a, str)])
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args[:1] == ["--install-shortcuts"]:             # from the installer; no window
+        return install_shortcuts(args[1:])
+    if len(args) >= 2 and args[0] == "--after":         # restarted after an update: let the old one close
+        try:
+            wait_for_process(int(args[1]))
+        except ValueError:
+            pass
+        args = args[2:]
+    app = create_application(sys.argv[:1] + args)
+    targets = launch_targets(args)
+    instance = SingleInstance(app)
+    if instance.send_to_running(targets):
+        return 0                               # the running browser opened them
+    instance.listen()
+    window = create_browser(app)
+    instance.received.connect(window.open_from_another_launch)
+    restart = window.engine.take_restart() if window.engine is not None else None
+    restored = bool(window.restore_tabs or restart) and window.restore_session()
+    if not restored and restart:
+        restored = window.restore_after_engine_restart(restart)
+    for target in targets:
+        window.add_tab(url_from_user_input(target) or QUrl(START_URL))
+    if not targets and not restored:
+        window.add_tab(QUrl(START_URL))
+    window.first_run_welcome()
+    window.show()
+    QTimer.singleShot(3000, window, window.start_requested_build)
+
+    exit_code = app.exec()
+    # Destroy the web pages before the profiles they belong to (avoids shutdown warnings).
+    try:
+        import shiboken6
+        for private in window.all_windows()[1:]:
+            shiboken6.delete(private)
+        shiboken6.delete(window)
+    except Exception:
+        del window
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,25 @@
+# Made on your PC by setup and by Huginn itself - never part of the source
+python/
+__pycache__/
+*.pyc
+*.log
+setup.log
+test_out/
+version.txt
+update.json
+python-embed.zip
+get-pip.py
+# The H.264 engine builder's state and backups
+engine/standard-engine/
+engine/installed.json
+engine/state.json
+engine/status.json
+engine/status.txt
+engine/build-log.txt
+engine/builder.pid
+engine/update-check.json
+engine/restart.json
+engine/last-error.txt
+engine/build-requested.json
+# Fetched by the builder from conda-forge (pinned checksums) when it isn't here
+engine/gnu_tools.zip
