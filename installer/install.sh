@@ -91,7 +91,8 @@ desktop_folder() {
 # ------------------------------------------------------------------------------------- remove
 if [ "$UNINSTALL" = 1 ]; then
   banner "Remove Huginn" "Huginn and its own Python go; your bookmarks, history and passwords stay unless you say otherwise."
-  pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true
+  pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true            # started as a script (older launchers)
+  pkill -f "safari_browser\.main\(\)\) $TARGET" 2>/dev/null || true      # started by this installer's launcher
   if [ "$OS" = Darwin ]; then
     rm -rf "$BUNDLE" && done_ "Removed $BUNDLE"
     say "  ${D}If Huginn was in your Dock, drag it out (it shows a question mark now).${N}"
@@ -201,7 +202,41 @@ else
 fi
 "$VENV/bin/python" -c "import PySide6.QtWebEngineWidgets, cryptography" 2>/dev/null \
   || fail "The browser engine didn't start. On Linux it may need your desktop's graphics libraries (libnss3, libxkbcommon)."
+"$VENV/bin/python" -m compileall -q "$TARGET/safari_browser.py" >/dev/null 2>&1 || true   # starts ~0.2 s sooner
 done_ "Browser engine ready"
+
+# Linux: the engine imports fine without them, but Qt can't open a window on an X11 desktop
+# when a system library its X11 plugin uses is missing (since Qt 6.5 that's usually
+# libxcb-cursor0, which some distributions leave out). Say which, and how to add them.
+MISSING_LIBS=""
+if [ "$OS" = Linux ] && command -v ldd >/dev/null 2>&1; then
+  QTDIR="$("$VENV/bin/python" -c 'import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), "Qt"))' 2>/dev/null || true)"
+  for lib in "$QTDIR/plugins/platforms/libqxcb.so" "$QTDIR/lib/libQt6XcbQpa.so.6" "$QTDIR/lib/libQt6WebEngineCore.so.6"; do
+    [ -f "$lib" ] && MISSING_LIBS="$MISSING_LIBS $(ldd "$lib" 2>/dev/null | awk '/not found/ {print $1}')"
+  done
+  MISSING_LIBS="$(printf '%s\n' $MISSING_LIBS | sort -u | tr '\n' ' ' | sed 's/^ *//; s/ *$//')"
+fi
+if [ -n "$MISSING_LIBS" ]; then
+  FIX=""
+  if command -v apt-get >/dev/null 2>&1; then       # libxcb-cursor.so.0 -> libxcb-cursor0, libxkbcommon-x11.so.0 -> libxkbcommon-x11-0
+    PKGS="$(printf '%s\n' $MISSING_LIBS | sed -E 's/\.so(\.([0-9]+))?.*$/ \2/; s/([0-9]) ([0-9]+)$/\1-\2/; s/ //' | tr '\n' ' ')"
+    FIX="sudo apt-get install -y $PKGS"
+  elif command -v dnf >/dev/null 2>&1; then FIX="sudo dnf install -y xcb-util-cursor xcb-util-wm xcb-util-image xcb-util-keysyms xcb-util-renderutil libxkbcommon-x11"
+  elif command -v pacman >/dev/null 2>&1; then FIX="sudo pacman -S --needed xcb-util-cursor xcb-util-wm xcb-util-image xcb-util-keysyms xcb-util-renderutil libxkbcommon-x11"
+  elif command -v zypper >/dev/null 2>&1; then FIX="sudo zypper install libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxkbcommon-x11-0"
+  fi
+  say ""
+  say "  ${B}One more thing:${N} on an X11 desktop Huginn's window needs system libraries that aren't installed:"
+  say "  ${D}$MISSING_LIBS${N}"
+  if [ -n "$FIX" ] && [ "$ASK" = 1 ] && [ -t 0 ] && ask "Install them now? (runs: $FIX - asks for your password)" y; then
+    # shellcheck disable=SC2086
+    if $FIX; then MISSING_LIBS=""; done_ "System libraries installed"; else say "  ${D}That didn't work; you can run it yourself later.${N}"; fi
+  elif [ -n "$FIX" ]; then
+    say "  ${D}Add them with:  $FIX${N}"
+  fi
+  [ -n "$MISSING_LIBS" ] && say "  ${D}(On a Wayland desktop Huginn opens without them.)${N}"
+  say ""
+fi
 
 # 4. Into the system: an app bundle on macOS, a launcher and menu entry on Linux
 step "Adding Huginn to your apps"
@@ -218,7 +253,9 @@ HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
 export CFProcessPath="$(cd "$(dirname "$0")" && pwd)/Huginn"
 LOGS="$HOME/Library/Logs/Huginn"
 mkdir -p "$LOGS" 2>/dev/null || LOGS=/dev
-exec "$HERE/python/bin/python" "$HERE/huginn/safari_browser.py" "$@" >"$LOGS/huginn.log" 2>&1
+# Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
+exec "$HERE/python/bin/python" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); import safari_browser; sys.exit(safari_browser.main())' \
+  "$HERE/huginn" "$@" >"$LOGS/huginn.log" 2>&1
 LAUNCH
   chmod +x "$BUNDLE/Contents/MacOS/Huginn"
   cat > "$BUNDLE/Contents/Info.plist" <<PLIST
@@ -281,7 +318,9 @@ else
   cat > "$LAUNCHER" <<LAUNCH
 #!/bin/sh
 # Starts Huginn (installed in $TARGET).
-exec "$VENV/bin/python" "$TARGET/safari_browser.py" "\$@"
+# Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
+exec "$VENV/bin/python" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); import safari_browser; sys.exit(safari_browser.main())' \
+  "$TARGET" "\$@"
 LAUNCH
   chmod +x "$LAUNCHER"
   for s in 16 32 48 64 128 256 512; do

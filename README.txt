@@ -33,7 +33,10 @@ Install it (Linux): in a terminal, bash "Install Huginn (Linux).sh". It puts Hug
             your apps menu, and can add it to the desktop and (GNOME) pin it to the dock.
             To remove it: ~/.local/share/huginn/installer/install.sh --uninstall
             It asks a couple of questions in the terminal, takes a few minutes, and gets its
-            own Python and engine; nothing is installed system-wide.
+            own Python and engine; nothing is installed system-wide. If your desktop is
+            missing a library Qt needs to open a window on X11 (usually libxcb-cursor0), it
+            says so and offers the command that adds it (Wayland desktops don't need it).
+            Read Aloud uses your desktop's voices (speech-dispatcher).
             Video formats (the H.264 build) are Windows-only.
 Or run it:  double-click run.bat in this folder (Windows; no installing, sets itself up)
 
@@ -306,9 +309,11 @@ Rippling Aurora  (page menu > Settings > Start Page; off by default)
   Soft curtains of light drift very slowly across the top of the Start Page, behind the
   greeting, in your theme's colours (green to violet in Aurora, violet to pink in Bifröst,
   ember in Muspelheim, ice blue in Niflheim). Off, the Start Page keeps its plain soft glow
-  and nothing extra is drawn. Only the graphics card does the moving, and only while the
-  Start Page is on screen; if Windows' animation effects are off (Settings > Accessibility >
-  Visual effects), it holds still.
+  and nothing extra is drawn. The glow, the curtains and the weather icon move only while
+  you're using the page: a few seconds after the mouse stops they hold still, so a Start
+  Page left open costs no battery or CPU, and they carry on when the mouse moves. If your
+  system's animation effects are off (Windows: Settings > Accessibility > Visual effects;
+  Mac: Reduce motion), it holds still.
 
 Weather on the Start Page  (page menu > Settings > Start Page > Weather)
   A card beside the greeting: the temperature, the sky (drawn and gently animated - sun,

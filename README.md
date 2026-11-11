@@ -23,7 +23,8 @@ Each one installs for you only, with no admin password, and fetches its own Pyth
   on the taskbar, right-click its icon there and choose *Pin to taskbar*.
 - **macOS:** `Huginn.app` in Applications, so it's in Launchpad and Spotlight, and in the Dock. It has the
   usual Mac menu bar and ⌘ shortcuts, and can be your default browser.
-- **Linux:** your apps menu, optionally the desktop and the GNOME dock.
+- **Linux:** your apps menu, optionally the desktop and the GNOME dock. If an X11 desktop is missing a
+  library Qt needs to open windows (usually `libxcb-cursor0`), the installer names it and offers the command.
 
 The Windows installer has one optional switch, **Build H.264 video support**, off by default. Huginn's standard
 engine plays YouTube (VP9/AV1), but Twitch, Reddit, X and many news sites use H.264. With the switch on, Huginn

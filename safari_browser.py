@@ -65,6 +65,7 @@ import sys
 import tempfile
 import threading
 import time
+_STARTED = time.perf_counter()                  # for the performance probe's start-up timings
 import unicodedata
 from array import array
 from collections import Counter
@@ -173,6 +174,7 @@ IS_MAC = sys.platform == "darwin"
 DEVICE = "Mac" if IS_MAC else ("PC" if IS_WINDOWS else "computer")       # "kept on this Mac"
 SYSTEM_NAME = "macOS" if IS_MAC else ("Windows" if IS_WINDOWS else "System")
 MAC_BUNDLE_ID = "io.github.valkyrii070.huginn"      # Huginn.app, as installer/install.sh makes it
+GAME_MODE_SUPPORTED = IS_WINDOWS                  # it watches for Windows' full-screen games
 READER_KEY = "Ctrl+Shift+R" if IS_MAC else "F9"     # Safari's Reader key on a Mac (F-keys need fn there)
 # On a Mac the window is a real macOS window (it resizes, snaps, goes full screen and has rounded
 # corners the Mac's way) whose content runs up under a see-through title bar (Qt 6.9+).
@@ -221,7 +223,13 @@ DANGEROUS_EXTENSIONS = frozenset({
     "cpl", "scr", "pif", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "lnk",
     "reg", "dll", "sys", "application", "appref-ms", "gadget", "msc", "msp", "mst", "inf", "chm",
     "iso", "img", "vhd", "vhdx", "url", "scf", "xll", "py", "pyw",
+    # macOS: installers, disk images, scripts and apps that run when opened
+    "pkg", "mpkg", "dmg", "command", "tool", "app", "scpt", "terminal", "workflow", "action", "osax", "kext",
+    # Linux
+    "sh", "run", "bin", "appimage", "deb", "rpm", "desktop", "flatpakref", "snap",
 })
+RISKY_EXAMPLES = (".dmg, .pkg and .command" if sys.platform == "darwin" else
+                  ".exe, .msi and .ps1" if sys.platform == "win32" else ".sh, .AppImage and .deb")
 
 # Encrypted DNS providers (DNS over HTTPS). Quad9 also refuses to resolve known malware sites.
 SECURE_DNS_PROVIDERS = {
@@ -1573,6 +1581,35 @@ def write_mark_of_the_web(path: str, host_url: QUrl | None, referrer: QUrl | Non
         return False
 
 
+def mark_download(path: str, host_url: QUrl | None, referrer: QUrl | None) -> bool:
+    """Marks a finished download as coming from the internet, the way each system expects:
+    Windows' Zone.Identifier (SmartScreen, Office's Protected View), macOS's quarantine flag
+    (Gatekeeper checks a downloaded app before it first opens, as with Safari and Chrome), and
+    on Linux the origin address Chrome and Firefox record (file managers show it)."""
+    if IS_WINDOWS:
+        return write_mark_of_the_web(path, host_url, referrer)
+    if sys.platform == "darwin":
+        value = f"0081;{int(time.time()):08x};{BROWSER_NAME};".encode()
+        try:
+            libc = ctypes.CDLL("/usr/lib/libc.dylib")
+            libc.setxattr.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t,
+                                      ctypes.c_uint32, ctypes.c_int)
+            return libc.setxattr(os.fsencode(path), b"com.apple.quarantine", value, len(value), 0, 0) == 0
+        except (OSError, AttributeError):
+            return False
+    if hasattr(os, "setxattr"):
+        done = False
+        for key, url in (("user.xdg.origin.url", host_url), ("user.xdg.referrer.url", referrer)):
+            if url is not None and url.scheme() in ("http", "https"):
+                try:
+                    os.setxattr(path, key, bytes(without_credentials(url).toEncoded()))
+                    done = True
+                except OSError:                     # a file system without extended attributes
+                    pass
+        return done
+    return False
+
+
 def without_credentials(url: QUrl) -> QUrl:
     """Strips user:password@ so it never reaches history, bookmarks or shared links."""
     clean = QUrl(url)
@@ -2771,8 +2808,48 @@ def is_default_browser() -> bool | None:
         except (OSError, AttributeError):
             return None
     if not IS_WINDOWS:
-        return None
+        return linux_is_default_browser()
     return default_browser_progid() == BROWSER_PROGID_URL
+
+
+LINUX_DESKTOP_FILE = "huginn.desktop"               # what the Linux installer adds to the apps menu
+_XDG_DEFAULT: dict = {"at": -60.0, "value": None}
+
+
+def linux_desktop_entry() -> str | None:
+    """The installed menu entry (only an installed copy can be the default browser)."""
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    path = os.path.join(base, "applications", LINUX_DESKTOP_FILE)
+    return path if os.path.isfile(path) else None
+
+
+def linux_is_default_browser() -> bool | None:
+    """Asks the desktop (xdg-settings) which app opens web links; None when Huginn isn't
+    installed or there's no xdg-settings. Remembered for a few seconds (it runs a script)."""
+    if not sys.platform.startswith("linux") or linux_desktop_entry() is None or not shutil.which("xdg-settings"):
+        return None
+    if time.monotonic() - _XDG_DEFAULT["at"] < 5:
+        return _XDG_DEFAULT["value"]
+    try:
+        out = subprocess.run(["xdg-settings", "get", "default-web-browser"], capture_output=True, text=True,
+                             timeout=5)
+        value = out.stdout.strip() == LINUX_DESKTOP_FILE if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        value = None
+    _XDG_DEFAULT.update(at=time.monotonic(), value=value)
+    return value
+
+
+def linux_choose_default_browser() -> bool:
+    if linux_desktop_entry() is None or not shutil.which("xdg-settings"):
+        return False
+    try:
+        ok = subprocess.run(["xdg-settings", "set", "default-web-browser", LINUX_DESKTOP_FILE],
+                            capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _XDG_DEFAULT["at"] = -60.0                       # ask again next time
+    return ok
 
 
 def _mac_launch_services():
@@ -2835,6 +2912,23 @@ def mac_hide_window_buttons(view_id: int) -> bool:
                 set_bool(button, sel(b"setHidden:"), True)
         set_long(window, sel(b"setTitleVisibility:"), 1)               # NSWindowTitleHidden
         return True
+    except (OSError, AttributeError, ValueError, TypeError):
+        return False
+
+
+def mac_in_live_resize(view_id: int) -> bool:
+    """True while you're dragging the edge of the window that view_id (a winId()) is in."""
+    if not IS_MAC or not view_id:
+        return False
+    try:
+        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = (ctypes.c_char_p,)
+        address = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+        get = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(address)
+        flag = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(address)
+        window = get(view_id, objc.sel_registerName(b"window"))
+        return bool(window) and bool(flag(window, objc.sel_registerName(b"inLiveResize")))
     except (OSError, AttributeError, ValueError, TypeError):
         return False
 
@@ -3030,6 +3124,7 @@ def open_default_apps_settings() -> None:
         mac_choose_default_browser()
         return
     if not IS_WINDOWS:
+        linux_choose_default_browser()
         return
     if not QDesktopServices.openUrl(QUrl(f"ms-settings:defaultapps?registeredAppUser={BROWSER_REG_NAME}")):
         QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))
@@ -7211,14 +7306,110 @@ PERF_PROBE_SCRIPT = r"""(function () {
 })();"""
 
 
+def perf_probe_folders() -> list[str]:
+    """Where a perf-probe switch may be: test_out in Huginn's folder, or (Huginn.app's folder
+    being inside the app) ~/Library/Logs/Huginn on a Mac."""
+    folders = [os.path.join(APP_DIR, "test_out")]
+    if sys.platform == "darwin":
+        folders.append(os.path.join(os.path.expanduser("~"), "Library", "Logs", "Huginn"))
+    return folders
+
+
 def perf_probe_log() -> str | None:
-    """Where the probe writes, when test_out\\perf-probe says "on" (None: off, the normal case)."""
+    """Where the probe writes, when a perf-probe file says "on" (None: off, the normal case)."""
+    for folder in perf_probe_folders():
+        try:
+            with open(os.path.join(folder, "perf-probe"), encoding="utf-8", errors="replace") as f:
+                if f.read(16).strip().lower().startswith("on"):
+                    return os.path.join(folder, "perf-probe.log")
+        except OSError:
+            continue
+    return None
+
+
+def perf_note(kind: str, **data) -> None:
+    """Adds one line to the probe's log (start-up times, memory, CPU), when the probe is on."""
+    path = perf_probe_log()
+    if path is None:
+        return
+    data.update(kind=kind, time=time.strftime("%H:%M:%S"), epoch=round(time.time(), 3), platform=sys.platform)
     try:
-        with open(os.path.join(APP_DIR, "test_out", "perf-probe"), encoding="utf-8", errors="replace") as f:
-            on = f.read(16).strip().lower().startswith("on")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data) + "\n")
     except OSError:
-        return None
-    return os.path.join(APP_DIR, "test_out", "perf-probe.log") if on else None
+        pass
+
+
+def process_usage() -> dict:
+    """Huginn's memory (MB, its own process plus the page processes it started) and CPU time
+    (seconds), for the probe. Reads /proc on Linux and asks ps on a Mac."""
+    me = os.getpid()
+    rows: list[tuple[int, int, float, float]] = []          # pid, parent, rss MB, cpu seconds
+    try:
+        if sys.platform.startswith("linux"):
+            tick = os.sysconf("SC_CLK_TCK")
+            page = os.sysconf("SC_PAGE_SIZE")
+            for name in os.listdir("/proc"):
+                if not name.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{name}/stat") as f:
+                        fields = f.read().rsplit(")", 1)[1].split()
+                    with open(f"/proc/{name}/statm") as f:
+                        rss = int(f.read().split()[1]) * page / 1048576
+                except (OSError, IndexError, ValueError):
+                    continue
+                rows.append((int(name), int(fields[1]), rss, (int(fields[11]) + int(fields[12])) / tick))
+        elif sys.platform == "darwin":
+            rows = [(pid, parent, rss / 1048576, cpu) for pid, (parent, rss, cpu) in mac_process_table().items()]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    family = {me}
+    for _ in range(3):                                       # children, and theirs
+        family |= {pid for pid, parent, _, _ in rows if parent in family}
+    mine = [r for r in rows if r[0] in family]
+    main = next((r for r in mine if r[0] == me), None)
+    return {"rss_main_mb": round(main[2]) if main else None, "rss_total_mb": round(sum(r[2] for r in mine)),
+            "processes": len(mine), "cpu_main_s": round(main[3], 2) if main else None,
+            "cpu_total_s": round(sum(r[3] for r in mine), 2)}
+
+
+def watch_startup(window: QWidget, main_started: float, app_ready: float) -> None:
+    """For the probe: how long Huginn took to start - Python and Qt loading, the window
+    appearing, its first page, the filter lists - then its CPU and memory every 30 seconds."""
+    shown = time.perf_counter()
+    ms = lambda t: round((t - _STARTED) * 1000)               # noqa: E731 - from Huginn's first line
+    perf_note("startup", step="window", imports_ms=ms(main_started), app_ms=ms(app_ready), window_ms=ms(shown),
+              **process_usage())
+    view = window.current_view() if hasattr(window, "current_view") else None
+    if view is not None:
+        def first_page(ok: bool) -> None:
+            view.loadFinished.disconnect(first_page)
+            perf_note("startup", step="first page", ms=ms(time.perf_counter()), ok=bool(ok),
+                      url=view.url().toString()[:120])
+        view.loadFinished.connect(first_page)
+    adblock = getattr(getattr(window, "blocker", None), "adblock", None)
+    if adblock is not None:
+        def filters_ready() -> None:
+            adblock.changed.disconnect(filters_ready)
+            perf_note("startup", step="filter lists", ms=ms(time.perf_counter()),
+                      rules=getattr(adblock.engine, "network_rules", 0) + getattr(adblock.engine, "cosmetic_rules", 0))
+        adblock.changed.connect(filters_ready)
+    last = {"cpu": process_usage().get("cpu_total_s") or 0.0, "at": time.monotonic()}
+
+    def tick() -> None:
+        usage = process_usage()
+        now = time.monotonic()
+        cpu = usage.get("cpu_total_s") or 0.0
+        usage["cpu_pct"] = round(100 * (cpu - last["cpu"]) / max(0.001, now - last["at"]), 1)
+        last.update(cpu=cpu, at=now)
+        usage["tabs"] = window.tabs.count() if hasattr(window, "tabs") else None
+        perf_note("tick", **usage)
+
+    timer = QTimer(window)
+    timer.setInterval(30_000)
+    timer.timeout.connect(tick)
+    timer.start()
 
 
 def set_perf_probe_script(profile: QWebEngineProfile) -> None:
@@ -7249,6 +7440,8 @@ def write_perf_probe(page: "QWebEnginePage", text: str) -> None:
             host = QUrl(str(data.get("url", ""))).host()
             data["adblock"] = bool(guard.block_ads and not guard.ads_allowed_on(host)) if host else guard.block_ads
         data["time"] = time.strftime("%H:%M:%S")
+        if data.get("kind") == "page":
+            data.update(process_usage())
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(data) + "\n")
     except (OSError, ValueError, TypeError, RuntimeError):
@@ -7686,6 +7879,7 @@ def start_page_colours(theme: dict) -> dict:
             "ridge_a": f"rgba({rgb}, 0.16)", "ridge_b": f"rgba({rgb}, 0.085)"}
 
 
+START_PAGE_CALM_MS = 12000          # the Start Page holds still this long after the mouse stops
 START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7830,12 +8024,26 @@ START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
   @keyframes wx-mist { from { transform: translateX(-3px); } to { transform: translateX(3px); } }
   @media (prefers-reduced-motion: reduce) { .wx-icon * { animation: none !important; } }
   @media (max-width: 640px) { .wx { width: 100%; } }
+  /* Calm: a few seconds after the mouse stops, the aurora and weather hold still (paused, not
+     reset) until it moves again. Every moving frame makes the browser redraw the whole window -
+     about half a laptop core for a Start Page left open - so a still page costs nothing. */
+  html.calm .aurora, html.calm .sway, html.calm .curtain, html.calm .wx-icon * { animation-play-state: paused; }
 </style></head>
 <body><div class="aurora"></div><div class="sky"><div class="sway far"><div class="curtain far"></div></div>
 <div class="sway"><div class="curtain near"></div></div></div>$ridge
 <main><header><div class="hello"><div class="runes" title="$runes_title">$runes</div>
 <h1 title="$greeting_title">$greeting</h1><div class="date" title="$day_meaning">$date</div></div>$weather</header>
-$sections</main></body></html>
+$sections</main><script>
+(function () {
+  var root = document.documentElement, timer = 0;
+  function wake() {
+    if (timer) clearTimeout(timer); else root.classList.remove('calm');
+    timer = setTimeout(function () { timer = 0; root.classList.add('calm'); }, $calm_ms);
+  }
+  ['mousemove', 'wheel', 'scroll', 'keydown', 'focus'].forEach(function (e) { addEventListener(e, wake, { passive: true }); });
+  wake();
+})();
+</script></body></html>
 """)
 
 # A faint fjord/mountain silhouette along the bottom of the Start Page.
@@ -7993,7 +8201,7 @@ def render_start_page(theme: dict, store: BrowserStore, tracking_prevention: boo
         greeting_title=html.escape(f"In English: {english}" if norse else f"In Old Norse: {greeting}"),
         date=html.escape(date), day_meaning=html.escape(day_meaning),
         weather="" if private and not (weather or {}).get("forecast") else render_weather(weather, theme, norse),
-        sections="".join(sections))
+        sections="".join(sections), calm_ms=START_PAGE_CALM_MS)
 
 
 # --------------------------------------------------------------------------------------
@@ -8098,6 +8306,8 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
   .logo { width: 108px; height: 108px; border-radius: 26px; margin-bottom: 18px;
     box-shadow: 0 18px 50px rgba(0,0,0,.28); animation: float 6s ease-in-out infinite alternate; }
   @keyframes float { to { transform: translateY(-6px); } }
+  /* Calm, as on the Start Page: a tour left open holds still (and costs nothing) until the mouse moves. */
+  html.calm .aurora, html.calm .curtain, html.calm .logo { animation-play-state: paused; }
   .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 300px)); gap: 12px; text-align: left; }
   .grid.three { grid-template-columns: repeat(3, minmax(0, 220px)); }
   .card { background: var(--card); border-radius: 16px; padding: 16px 16px 15px; box-shadow: var(--card-shadow);
@@ -8308,6 +8518,15 @@ var hw = (function () {
     },
     at: function () { return at; }, state: function () { return state; }
   };
+})();
+(function () {
+  var root = document.documentElement, timer = 0;
+  function wake() {
+    if (timer) clearTimeout(timer); else root.classList.remove('calm');
+    timer = setTimeout(function () { timer = 0; root.classList.add('calm'); }, 12000);
+  }
+  ['mousemove', 'wheel', 'keydown', 'click', 'focus'].forEach(function (e) { addEventListener(e, wake, { passive: true }); });
+  wake();
 })();
 </script></body></html>""")
 
@@ -10284,10 +10503,38 @@ def history_ranked(history: list[dict]) -> list[dict]:
     return sorted(seen.values(), key=lambda i: i["score"], reverse=True)
 
 
+_PS_TABLE: dict = {"at": 0.0, "rows": {}}
+
+
+def mac_process_table() -> dict[int, tuple[int, int, float]]:
+    """{pid: (parent, memory in bytes, CPU seconds)} for every process, from one ps call (a
+    Mac has no /proc), reused for a second so the Tab Manager doesn't run ps per tab."""
+    if time.monotonic() - _PS_TABLE["at"] < 1.0:
+        return _PS_TABLE["rows"]
+    rows: dict[int, tuple[int, int, float]] = {}
+    try:
+        out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,rss=,time="], capture_output=True, text=True,
+                             timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            clock = [float(x) for x in parts[3].replace("-", ":").split(":")]
+            seconds = sum(v * 60 ** i for i, v in enumerate(reversed(clock)))
+            rows[int(parts[0])] = (int(parts[1]), int(parts[2]) * 1024, seconds)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    _PS_TABLE.update(at=time.monotonic(), rows=rows)
+    return rows
+
+
 def process_stats(pid: int) -> tuple[int, float] | None:
     """(memory in bytes, CPU seconds used) of a process, without extra libraries."""
     if not pid or pid <= 0:
         return None
+    if sys.platform == "darwin":
+        row = mac_process_table().get(pid)
+        return (row[1], row[2]) if row else None
     if IS_WINDOWS:
         try:
             class PMC(ctypes.Structure):
@@ -10330,6 +10577,8 @@ def process_stats(pid: int) -> tuple[int, float] | None:
 def child_processes(parent: int) -> list[int]:
     """Processes started by `parent` (WebEngine's GPU and helper processes)."""
     found: list[int] = []
+    if sys.platform == "darwin":
+        return [pid for pid, row in mac_process_table().items() if row[0] == parent]
     if IS_WINDOWS:
         try:
             class PE(ctypes.Structure):
@@ -10868,6 +11117,10 @@ READ_TEXT_JS = r"""(function () {
 })()"""
 
 
+NO_VOICES_MESSAGE = "No voices are available for reading aloud" + (
+    " - install speech-dispatcher to add them" if sys.platform.startswith("linux") else "")
+
+
 class ReadAloud(QObject):
     stateChanged = Signal(bool)                    # reading or not
 
@@ -10882,11 +11135,17 @@ class ReadAloud(QObject):
         return self._speech() is not None
 
     def _speech(self):
+        """The speech engine, or None when there's none that works (on Linux the voices come
+        from speech-dispatcher; without it Qt's engine loads but can't say anything)."""
         if self.speech is None:
             try:
                 from PySide6.QtTextToSpeech import QTextToSpeech
                 self.speech = QTextToSpeech(self.engine_name, self) if self.engine_name else QTextToSpeech(self)
-                self.speech.stateChanged.connect(self._state)
+                if self.speech.state() == QTextToSpeech.State.Error:
+                    self.speech.deleteLater()
+                    self.speech = False
+                else:
+                    self.speech.stateChanged.connect(self._state)
             except Exception:
                 self.speech = False
         return self.speech or None
@@ -10915,6 +11174,9 @@ class ReadAloud(QObject):
 
     def _state(self, state) -> None:
         from PySide6.QtTextToSpeech import QTextToSpeech
+        if state == QTextToSpeech.State.Error and self.reading:
+            self.stop()
+            return
         if state == QTextToSpeech.State.Ready and self.reading:
             if self._queue:
                 self.speech.say(self._queue.pop(0))
@@ -10948,14 +11210,31 @@ def format_size(n: float) -> str:
 
 
 def show_in_folder(path: str) -> None:
-    """Opens the file's folder with the file selected (Windows), else just the folder."""
-    if IS_WINDOWS and os.path.exists(path):
-        try:
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)],
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            return
-        except OSError:
-            pass
+    """Opens the file's folder with the file selected: Explorer, Finder, or a Linux file
+    manager that understands the freedesktop ShowItems call; otherwise just the folder."""
+    if os.path.exists(path):
+        if IS_WINDOWS:
+            try:
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)],
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                return
+            except OSError:
+                command = []
+        elif sys.platform == "darwin":
+            command = ["/usr/bin/open", "-R", path]
+        elif shutil.which("gdbus"):
+            command = ["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                       "--object-path", "/org/freedesktop/FileManager1",
+                       "--method", "org.freedesktop.FileManager1.ShowItems",
+                       f"['{QUrl.fromLocalFile(path).toString(QUrl.ComponentFormattingOption.FullyEncoded)}']", ""]
+        else:
+            command = []
+        if command:
+            try:
+                if subprocess.run(command, capture_output=True, timeout=5).returncode == 0:
+                    return
+            except (OSError, subprocess.SubprocessError):
+                pass
     QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
 
 
@@ -12648,7 +12927,7 @@ class PrivacySettingsDialog(QDialog):
                   self._combo("secureDns", SECURE_DNS_PROVIDERS))
 
         g = self._group(layout, "Downloads & websites")
-        self._row(g, "Warn before downloading apps and scripts", f"Files like .exe, .msi and .ps1 can harm your {DEVICE}.",
+        self._row(g, "Warn before downloading apps and scripts", f"Files like {RISKY_EXAMPLES} can harm your {DEVICE}.",
                   self._switch("warnDownloads"), first=True)
         self._row(g, "Website permissions", "Camera, microphone, location and more you've allowed or denied.",
                   self._button("Manage…", lambda: self.show_page(1)))
@@ -12855,11 +13134,15 @@ class PasswordsDialog(QDialog):
         self.icloud_switch.theme = window.theme
         self.icloud_switch.toggled.connect(self._toggle_icloud)
         self.icloud_text = None
-        for i, (text, sub, control) in enumerate((
-                ("Offer to save passwords", "Asks after you sign in somewhere new.", self.offer_switch),
-                ("Unlock with my Windows sign-in", "Skips the master password on this PC. Anyone signed in to "
-                 "your Windows account could then use your passwords.", self.windows_switch),
-                ("Use iCloud Passwords", self.manager.icloud.describe(), self.icloud_switch))):
+        rows = [("Offer to save passwords", "Asks after you sign in somewhere new.", self.offer_switch)]
+        # These two need Windows itself - its sign-in (DPAPI) and iCloud for Windows' password
+        # helper - so a Mac or Linux doesn't show them.
+        if self.manager.vault.dpapi is not None:
+            rows.append(("Unlock with my Windows sign-in", "Skips the master password on this PC. Anyone signed in "
+                         "to your Windows account could then use your passwords.", self.windows_switch))
+        if IS_WINDOWS or self.manager.icloud.command() is not None:
+            rows.append(("Use iCloud Passwords", self.manager.icloud.describe(), self.icloud_switch))
+        for i, (text, sub, control) in enumerate(rows):
             if i:
                 line = QFrame()
                 line.setObjectName("RowDivider")
@@ -14816,6 +15099,11 @@ class BrowserWindow(QWidget):
         self._qwindow: QWindow | None = None
         self._edge_cursor_active = False
         self._resize_drag: tuple | None = None            # (edges, start point, start geometry)
+        self._held_pages: list = []                        # pages kept still during a Mac live resize
+        self.in_live_resize = mac_in_live_resize           # (tests stand in for macOS)
+        self._live_resize_timer = QTimer(self)
+        self._live_resize_timer.setInterval(40)
+        self._live_resize_timer.timeout.connect(self._check_live_resize)
         self._restore_maximized = False
         self._sidebar_before_fullscreen = False
         self._native_frame = WindowsFrame(self) if (IS_WINDOWS and os.environ.get("SAFARIQT_QT_FRAME") != "1") else None
@@ -15739,7 +16027,7 @@ class BrowserWindow(QWidget):
         self._default_waiting = True
         self.open_default_apps()
         self._sync_default_bar()
-        if IS_MAC:                 # macOS's box doesn't bring the window back: look for the answer
+        if not IS_WINDOWS:         # macOS's box doesn't bring the window back: look for the answer
             for second in range(1, 61):
                 QTimer.singleShot(second * 1000, self, self._check_default_after_settings)
 
@@ -15749,6 +16037,9 @@ class BrowserWindow(QWidget):
         if self._default_waiting and IS_MAC:
             return ("waiting", f"In the box macOS shows, choose <b>Use “{BROWSER_NAME}”</b>.", "globe",
                     "Ask Again", "Done", None)
+        if self._default_waiting and not IS_WINDOWS:
+            return ("waiting", f"Your desktop didn't take the change. Choose {BROWSER_NAME} as the web browser in "
+                    "its settings (Default Applications).", "globe", "Try Again", "Done", None)
         if self._default_waiting:
             return ("waiting", f"In Settings, click <b>Set default</b> under {BROWSER_NAME} (or choose "
                     f"{BROWSER_NAME} for HTTP and HTTPS).", "globe", "Open Settings", "Done", None)
@@ -16721,7 +17012,6 @@ class BrowserWindow(QWidget):
                 ("New Burner Tab", "flame", self.new_burner_tab), ("Valhalla — Closed Tabs", "valhalla", self.show_valhalla),
                 ("Read Aloud", "voice", self.read_aloud), ("Site Style", "palette", self.show_site_style),
                 ("Focus Hours", "moon", self.show_focus_settings),
-                ("Game Mode On / Off", "game", self.toggle_game_mode_now),
                 ("Add Web Panel", "panel", self.add_web_panel),
                 ("Change Theme With Time of Day", "sidebar", partial(self.set_living_theme, not self.living)),
                 ("Weather Location", "weather", self.show_weather_settings),
@@ -16732,6 +17022,8 @@ class BrowserWindow(QWidget):
                  partial(self.set_window_buttons, "windows" if self.toolbar.button_style == "mac" else "mac"))]
         if self.passwords is not None:
             cmds.append(("Passwords", "key", self.show_passwords))
+        if GAME_MODE_SUPPORTED:
+            cmds.append(("Game Mode On / Off", "game", self.toggle_game_mode_now))
         for key, spec in REALMS.items():
             cmds.append((f"Theme: {spec['label']}", "sidebar", partial(self.set_realm, key)))
         for mode, label in (("light", "Light"), ("dark", "Dark"), ("system", f"Follow {SYSTEM_NAME}")):
@@ -17645,7 +17937,7 @@ class BrowserWindow(QWidget):
         if view is None or view.url().scheme() not in ("http", "https", "file"):
             return
         if not self.reader_voice.available():
-            self.status_bubble.show_message("No voices are available for reading aloud", 3000)
+            self.status_bubble.show_message(NO_VOICES_MESSAGE, 4000)
             return
         view.page().runJavaScript(READ_TEXT_JS.replace("%SOURCE%", reader_source()), APPLICATION_WORLD,
                                   lambda text: self.speak(text or ""))
@@ -17663,7 +17955,7 @@ class BrowserWindow(QWidget):
             self.reader_voice.stop()
             return
         if not self.reader_voice.read(text[:200000]):
-            self.status_bubble.show_message("No voices are available for reading aloud", 3000)
+            self.status_bubble.show_message(NO_VOICES_MESSAGE, 4000)
 
     # ---------------------------------------------------------------------------- tab menu
     def show_tab_menu(self, index: int, pos: QPoint) -> None:
@@ -19202,8 +19494,9 @@ class BrowserWindow(QWidget):
         self._add_toggle(settings, "Change Theme With Time of Day", self.living, self.set_living_theme)
         if not self.private:
             self._add_toggle(settings, "Web Panels in Sidebar", self.sidebar.panels_enabled, self.set_web_panels_enabled)
-        self._add_toggle(settings, "Game Mode (when a game is full screen)",
-                         self.settings.value("gameMode", True, type=bool), self.set_game_mode)
+        if GAME_MODE_SUPPORTED:
+            self._add_toggle(settings, "Game Mode (when a game is full screen)",
+                             self.settings.value("gameMode", True, type=bool), self.set_game_mode)
         self._add_action(settings, "Focus Hours…", self.show_focus_settings)
         buttons = prepare_menu(settings.addMenu("Window Buttons"))
         button_group = QActionGroup(buttons)
@@ -19475,7 +19768,7 @@ class BrowserWindow(QWidget):
         self._add_action(menu, "Email This Page", lambda: QDesktopServices.openUrl(
             QUrl(f"mailto:?subject={quote(title)}&body={quote(link, safe='')}")), shareable)
         self._add_action(menu, "Open in Default Browser", lambda: QDesktopServices.openUrl(url),
-                         url.scheme() in ("http", "https"))
+                         url.scheme() in ("http", "https") and self.is_default_browser() is not True)  # not back here
         menu.addSeparator()
         self._add_action(menu, "Add to Favorites\tCtrl+D", self.add_bookmark_for_current, shareable)
         self._popup_under(menu, self.toolbar.share_button)
@@ -19528,9 +19821,9 @@ class BrowserWindow(QWidget):
     def _on_download_state(self, download: QWebEngineDownloadRequest, origin: tuple, state) -> None:
         name = download.downloadFileName()
         if state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
-            # Mark it as downloaded from the internet, so Windows SmartScreen and Office's
-            # Protected View check it before it runs.
-            write_mark_of_the_web(os.path.join(download.downloadDirectory(), name), *origin)
+            # Mark it as downloaded from the internet, so Windows SmartScreen / macOS Gatekeeper
+            # (and Office's Protected View) check it before it runs.
+            mark_download(os.path.join(download.downloadDirectory(), name), *origin)
             self.status_bubble.show_message(f"Downloaded {name}", 4000)
         elif state == QWebEngineDownloadRequest.DownloadState.DownloadInterrupted:
             self.status_bubble.show_message(f"Download failed: {name}", 4000)
@@ -19607,6 +19900,32 @@ class BrowserWindow(QWidget):
     # ---------------------------------------------------------------------------- window management
     def toggle_maximize(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_mac_native_frame", False) and not self._held_pages and self.in_live_resize(int(self.winId())):
+            self._hold_pages()
+
+    def _hold_pages(self) -> None:
+        """While a Mac window's edge is being dragged, the pages keep their size (the engine
+        redraws a page a frame or two behind a live resize, so it stretched, flickered or went
+        blank); they take the new size once, when you let go."""
+        self._held_pages = [view for view in self.views() if view.isVisible()]
+        for view in self._held_pages:
+            view.setFixedSize(view.size())
+        self._live_resize_timer.start()
+
+    def _check_live_resize(self) -> None:
+        if self.in_live_resize(int(self.winId())):
+            return
+        self._live_resize_timer.stop()
+        held, self._held_pages = self._held_pages, []
+        for view in held:
+            try:
+                view.setMinimumSize(0, 0)
+                view.setMaximumSize(16777215, 16777215)
+            except RuntimeError:
+                pass                                   # the tab closed meanwhile
 
     def toggle_window_fullscreen(self, *_) -> None:
         """The whole window full screen (a Mac's Control-Command-F), not a page's video."""
@@ -20055,7 +20374,11 @@ def main() -> int:
         except ValueError:
             pass
         args = args[2:]
-    app = create_application(sys.argv[:1] + args)
+    main_started = time.perf_counter()
+    # On Linux the program name is the window's X11 class name, which the dock matches to
+    # huginn.desktop (StartupWMClass=huginn) - whether Huginn was run as a script or imported.
+    app = create_application((sys.argv[:1] if IS_WINDOWS else ["huginn"]) + args)
+    app_ready = time.perf_counter()
     pending: list[str] = []                            # links macOS hands over while starting
     app.file_opened.connect(pending.append)
     targets = launch_targets(args)
@@ -20075,6 +20398,8 @@ def main() -> int:
         window.add_tab(QUrl(START_URL))
     window.first_run_welcome()
     window.show()
+    if perf_probe_log() is not None:                   # a testing aid; normally off
+        watch_startup(window, main_started, app_ready)
     app.file_opened.disconnect()
     app.file_opened.connect(lambda target: window.open_from_another_launch([target]))
     for target in pending:
