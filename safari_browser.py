@@ -78,7 +78,7 @@ from urllib.parse import quote, quote_plus, unquote
 from PySide6.QtCore import (
     QBuffer, QByteArray, QEasingCurve, QEvent, QFileInfo, QIODevice, QMimeData, QObject, QPoint, QPointF, QRect,
     QLocale, QRectF, QSettings, QSize, QStandardPaths, Qt, QTime, QTimer, QUrl, QUrlQuery, QVariantAnimation, Signal,
-    Slot,
+    Slot, qVersion,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QFontMetricsF,
@@ -174,6 +174,8 @@ IS_WIN11 = IS_WINDOWS and sys.getwindowsversion().build >= 22000
 IS_MAC = sys.platform == "darwin"
 DEVICE = "Mac" if IS_MAC else ("PC" if IS_WINDOWS else "computer")       # "kept on this Mac"
 SYSTEM_NAME = "macOS" if IS_MAC else ("Windows" if IS_WINDOWS else "System")
+MATCH_SYSTEM = "Match Mac" if IS_MAC else ("Match Windows" if IS_WINDOWS else "Match System")   # appearance
+BACK_KEY, FORWARD_KEY = ("Ctrl+[", "Ctrl+]") if IS_MAC else ("Alt+Left", "Alt+Right")         # as Safari shows them
 MAC_BUNDLE_ID = "io.github.valkyrii070.huginn"      # Huginn.app, as installer/install.sh makes it
 GAME_MODE_SUPPORTED = IS_WINDOWS                  # it watches for Windows' full-screen games
 READER_KEY = "Ctrl+Shift+R" if IS_MAC else "F9"     # Safari's Reader key on a Mac (F-keys need fn there)
@@ -667,7 +669,7 @@ BASE_DARK = {
     "dark": True, "content": "#15181C",
     "capsule": "rgba(255, 255, 255, 20)", "capsule_border": "rgba(255, 255, 255, 26)",
     "capsule_shadow": "rgba(0, 0, 0, 70)", "divider": "rgba(255, 255, 255, 36)",
-    "text": "#ECEFF3", "text_secondary": "#9AA3AD", "text_tertiary": "#5C646D",
+    "text": "#ECEFF3", "text_secondary": "#9AA3AD", "text_tertiary": "#868E98",
     "icon": "#DCE1E6", "icon_disabled": "#4E555C",
     "hover": "rgba(255, 255, 255, 22)", "pressed": "rgba(255, 255, 255, 38)",
     "track": "rgba(0, 0, 0, 70)", "tab_active": "rgba(255, 255, 255, 34)",
@@ -776,6 +778,9 @@ QPushButton#Segment {
 }
 QPushButton#Segment:hover { color: $text; }
 QPushButton#Segment:checked { background: $segment_active; color: $text; }
+QPushButton#DayToggle { background: $segment_bg; border: none; border-radius: 7px; color: $text_secondary; font-weight: 600; }
+QPushButton#DayToggle:hover { color: $text; }
+QPushButton#DayToggle:checked { background: $accent; color: $accent_text; }
 QListWidget#SidebarList { background: transparent; border: none; outline: none; }
 QListWidget#SidebarList::item { color: $text; padding: 5px 6px; border-radius: 7px; }
 QListWidget#SidebarList::item:hover { background: $hover; }
@@ -863,6 +868,9 @@ QPushButton#LinkButton { background: transparent; border: none; color: $accent; 
 QProgressBar#EngineProgress { border: none; background: $switch_off; border-radius: 2px; max-height: 4px; min-height: 4px; }
 QProgressBar#EngineProgress::chunk { background: $accent; border-radius: 2px; }
 QPushButton#LinkButton:hover { color: $accent_hover; text-decoration: underline; }
+QPushButton#PrimaryButton:disabled { background: $switch_off; color: $text_secondary; }
+QPushButton#SecondaryButton:disabled { color: $text_secondary; }
+QPushButton#LinkButton:disabled { color: $text_secondary; text-decoration: none; }
 QLineEdit#SheetInput {
     background: $input_bg; color: $text; border: 1px solid $capsule_border; border-radius: 7px; padding: 5px 8px;
     selection-background-color: $selection; selection-color: $selection_text;
@@ -1648,6 +1656,9 @@ def shortcut_text(text: str, mac: bool = IS_MAC) -> str:
     return _SHORTCUT.sub(one, text)
 
 
+READING_EMPTY = shortcut_text("Save pages to read later - even offline - with Add to Reading List (Ctrl+Shift+D).")
+
+
 # Qt's own command-line options that take a value (their values aren't URLs to open).
 _QT_VALUE_OPTIONS = {"platform", "platformpluginpath", "platformtheme", "plugin", "qwindowgeometry",
                      "geometry", "qwindowtitle", "title", "qwindowicon", "style", "stylesheet",
@@ -2153,6 +2164,7 @@ class BrowserStore(QObject):
         self.stats: dict[str, dict] = {d: {k: int(v) for k, v in c.items() if isinstance(v, int)}
                                        for d, c in raw_stats.items() if isinstance(c, dict) and re.fullmatch(r"\d{4}-\d\d-\d\d", d)}
         self._recent_trackers: dict[tuple[str, str], float] = {}
+        self._web_hosts: dict[str, str] = {}             # frequently_visited's parsed hosts
         self._prune_trackers()
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -2222,7 +2234,7 @@ class BrowserStore(QObject):
             try:
                 os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
                 with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False)
+                    f.write(json.dumps(payload, ensure_ascii=False))   # dumps: Python's C encoder (dump streams in pure Python, 3x slower)
                 os.replace(tmp, self.data_path)          # atomic: never a half-written file
                 for key in ("bookmarks", "history", "trackers"):
                     self.settings.remove(key)            # drop pre-migration copies
@@ -2423,10 +2435,15 @@ class BrowserStore(QObject):
         exclude = exclude or set()
         counts: Counter[str] = Counter()
         latest: dict[str, dict] = {}
+        memo = self._web_hosts                         # url -> host ('' if not a web page): parsed once
+        if len(memo) > 4 * MAX_HISTORY:
+            memo.clear()
         for entry in self.history:
-            url = QUrl(entry["url"])
-            host = bare_host(url)
-            if not host or host in exclude or url.scheme() not in ("http", "https"):
+            host = memo.get(entry["url"])
+            if host is None:
+                url = QUrl(entry["url"])
+                host = memo[entry["url"]] = bare_host(url) if url.scheme() in ("http", "https") else ""
+            if not host or host in exclude:
                 continue
             counts[host] += 1
             latest.setdefault(host, entry)
@@ -6480,6 +6497,8 @@ READER_TOGGLE_JS = r"""(function (prefs, themes) {
     page.style.setProperty('--bg', t[0]); page.style.setProperty('--fg', t[1]);
     page.style.setProperty('--muted', t[2]); page.style.setProperty('--link', t[3]);
     page.style.setProperty('--size', sizes[prefs.size] + 'px');
+    page.style.colorScheme = prefs.theme === 'dark' ? 'dark' : 'light';    // a dark scrollbar at Night
+
     page.style.setProperty('--font', prefs.font === 'sans' ? '"Segoe UI Variable Text", "Segoe UI", sans-serif'
                                                          : 'Charter, "Iowan Old Style", Georgia, "Times New Roman", serif');
     root.querySelector('[data-a="font"]').textContent = prefs.font === 'sans' ? 'Serif' : 'Sans';
@@ -6969,6 +6988,23 @@ def wav_bytes(samples: list[float]) -> bytes:
 
 
 _SOUND_EFFECT: object = False                  # QSoundEffect, None if missing; False: not looked up yet
+# On Linux, Qt Multimedia can take the whole process down when there's no sound server to
+# talk to (seen with Qt 6.12: a crash on import). Typing sounds would then crash Huginn at
+# every start, so a throwaway Python tries it first; a "yes" is kept (per Qt version).
+SOUND_NEEDS_PROBE = not IS_WINDOWS and not IS_MAC
+SOUND_PROBE = ("import sys\nfrom PySide6.QtCore import QCoreApplication\napp = QCoreApplication(sys.argv[:1])\n"
+               "from PySide6.QtMultimedia import QMediaDevices, QSoundEffect\nQSoundEffect()\n"
+               "print('ok' if QMediaDevices.audioOutputs() else 'none')\n")
+_sound_probe_failed = False                    # this session: no working sound output
+
+
+def probe_sound_output(python: str = sys.executable) -> bool:
+    try:
+        out = subprocess.run([python, "-c", SOUND_PROBE], capture_output=True, text=True, timeout=20,
+                             env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip().endswith("ok")
 
 
 def sound_effect_class():
@@ -6991,6 +7027,7 @@ class TypingSounds(QObject):
     variants in turn; a sound that's still playing is never restarted (that pops)."""
 
     changed = Signal()
+    unavailable = Signal()                               # turned on, but there's no sound output to play on
     _written = Signal(int, str)                          # (generation, pack), from the writer thread
 
     def __init__(self, settings: QSettings, folder: str, parent: QObject | None = None, player=None) -> None:
@@ -7016,6 +7053,8 @@ class TypingSounds(QObject):
     def supported(self) -> bool:
         if self._player is not None:
             return True
+        if _sound_probe_failed:
+            return False
         if _SOUND_EFFECT is False:                   # don't load Qt Multimedia just to ask
             return importlib.util.find_spec("PySide6.QtMultimedia") is not None
         return _SOUND_EFFECT is not None
@@ -7032,7 +7071,9 @@ class TypingSounds(QObject):
         self.pack = pack
         self.settings.setValue("typingSounds", pack)
         self._apply()
-        if pack != "off":
+        if pack != "off" and self.pack == "off":
+            self.unavailable.emit()
+        elif pack != "off":
             self._sample()                               # a sample of the new sound
         self.changed.emit()
 
@@ -7111,7 +7152,7 @@ class TypingSounds(QObject):
             player.deleteLater()
         self.players = {}
         self._next.clear()
-        if self.pack == "off" or not self.supported():
+        if self.pack == "off" or not self.supported() or not self._sound_output_ok():
             self._watch(False)
             return
         self._watch(True)
@@ -7120,6 +7161,23 @@ class TypingSounds(QObject):
         else:
             threading.Thread(target=self._write, args=(self._generation, self.pack), daemon=True,
                              name="typing-sounds").start()
+
+    def _sound_output_ok(self) -> bool:
+        """Linux: True once a throwaway Python has played with Qt Multimedia without crashing.
+        Otherwise typing sounds turn themselves off (and the menu greys them out)."""
+        global _sound_probe_failed
+        if self._player is not None or not SOUND_NEEDS_PROBE:
+            return True
+        key = f"{qVersion()}:yes"
+        if self.settings.value("soundOutputChecked", "") == key:
+            return True
+        if probe_sound_output():
+            self.settings.setValue("soundOutputChecked", key)
+            return True
+        _sound_probe_failed = True
+        self.pack = "off"
+        self.settings.setValue("typingSounds", "off")
+        return False
 
     def _load(self, pack: str) -> None:
         for kind, n in SOUND_KINDS.items():
@@ -8161,8 +8219,8 @@ def render_start_page(theme: dict, store: BrowserStore, tracking_prevention: boo
         tiles = "".join(_tile_html(b["url"], b.get("title", ""), favicons) for b in favorites)
         sections.append(f'<section><h2>Favorites</h2><div class="grid">{tiles}</div></section>')
     else:
-        sections.append('<section><h2>Favorites</h2><p class="empty">Bookmark pages with Ctrl+D '
-                        'and they will appear here.</p></section>')
+        sections.append('<section><h2>Favorites</h2><p class="empty">'
+                        + shortcut_text('Bookmark pages with Ctrl+D and they will appear here.') + '</p></section>')
 
     if frequent:
         tiles = "".join(_tile_html(s["url"], s["title"], favicons) for s in frequent)
@@ -9248,6 +9306,12 @@ class AddressField(QWidget):
 # --------------------------------------------------------------------------------------
 # Tabs
 # --------------------------------------------------------------------------------------
+_SE_TAB_LEFT = QStyle.SubElement.SE_TabBarTabLeftButton
+_SE_TAB_RIGHT = QStyle.SubElement.SE_TabBarTabRightButton
+_SE_TAB_WIDGET = frozenset((QStyle.SubElement.SE_TabWidgetTabBar, QStyle.SubElement.SE_TabWidgetTabPane,
+                            QStyle.SubElement.SE_TabWidgetTabContents))
+
+
 class SafariTabStyle(QProxyStyle):
     """Paints the Safari tab strip and positions QTabWidget's parts. Painting tabs in the
     style (not in paintEvent) means the tab picked up while dragging looks the same too."""
@@ -9263,13 +9327,13 @@ class SafariTabStyle(QProxyStyle):
     # -- geometry ---------------------------------------------------------------------------
     def subElementRect(self, element, option, widget=None) -> QRect:
         SE = QStyle.SubElement
-        if element == SE.SE_TabBarTabLeftButton:
+        if element is _SE_TAB_LEFT:                      # asked for every tab, many times a layout
             r = option.rect
             return QRect(r.left() + 6, r.top() + (r.height() - 18) // 2, 18, 18)
-        if element == SE.SE_TabBarTabRightButton:
+        if element is _SE_TAB_RIGHT:
             r = option.rect
             return QRect(r.right() - 6 - 18, r.top() + (r.height() - 18) // 2, 18, 18)
-        if element in (SE.SE_TabWidgetTabBar, SE.SE_TabWidgetTabPane, SE.SE_TabWidgetTabContents):
+        if element in _SE_TAB_WIDGET:
             r = option.rect
             bar_size = getattr(option, "tabBarSize", QSize())
             has_bar = bar_size.isValid() and bar_size.height() > 0
@@ -9396,8 +9460,17 @@ class SafariTabBar(QTabBar):
         view = tabs.widget(index) if isinstance(tabs, QTabWidget) and 0 <= index < self.count() else None
         return bool(getattr(view, "pinned", False))
 
+    def pinned_count(self) -> int:
+        """How many tabs are pinned, worked out once per layout: Qt asks every tab's size
+        many times per layout, and counting each time made a 40-tab bar cost O(n²)."""
+        key = (self.count(), self._layout_generation)
+        if self._pinned_memo[0] != key:
+            self._pinned_memo = (key, sum(1 for i in range(self.count()) if self.is_pinned(i)))
+        return self._pinned_memo[1]
+
     def refresh_layout(self) -> None:
         """Pinned state changed: re-measure the tabs."""
+        self._layout_generation += 1
         self.setIconSize(self.iconSize())                # makes QTabBar recompute tab sizes
         self._refresh_close_buttons()
 
@@ -9421,19 +9494,26 @@ class SafariTabBar(QTabBar):
         self.setIconSize(QSize(16, 16))
         self.hover_index = -1
         self._close_icon = QIcon()
+        self._layout_generation = 0
+        self._pinned_memo: tuple = (None, 0)
 
     def tabSizeHint(self, index: int) -> QSize:
         if self.is_pinned(index):
             return QSize(self.PINNED_WIDTH, TAB_TRACK_HEIGHT)
         width = self.width() if self.width() > 0 else 800   # re-asked on every resize
-        pinned = sum(1 for i in range(self.count()) if self.is_pinned(i))
+        pinned = self.pinned_count()
         rest = max(1, self.count() - pinned)
         return QSize(max(TAB_MIN_WIDTH, (width - pinned * self.PINNED_WIDTH) // rest), TAB_TRACK_HEIGHT)
 
     def minimumTabSizeHint(self, index: int) -> QSize:
         return QSize(self.PINNED_WIDTH if self.is_pinned(index) else TAB_MIN_WIDTH, TAB_TRACK_HEIGHT)
 
+    def tabRemoved(self, index: int) -> None:
+        self._layout_generation += 1
+        super().tabRemoved(index)
+
     def tabInserted(self, index: int) -> None:
+        self._layout_generation += 1
         super().tabInserted(index)
         close = QToolButton(self)
         close.setObjectName("TabClose")
@@ -9900,8 +9980,7 @@ class Sidebar(QWidget):
         self.reading_list = self._make_list(is_bookmarks=False, reading=True)
         self.bookmark_empty = self._empty_label("No bookmarks yet.")
         self.history_empty = self._empty_label("Pages you visit will appear here.")
-        self.reading_empty = self._empty_label("Save pages to read later - even offline - with "
-                                               "Add to Reading List (Ctrl+Shift+D).")
+        self.reading_empty = self._empty_label(READING_EMPTY)
         self.stack.addWidget(self._make_page(self.bookmark_list, self.bookmark_empty, "Add Current Page",
                                              lambda: self.addBookmarkRequested.emit()))
         self.stack.addWidget(self._make_page(self.history_list, self.history_empty, "Clear History",
@@ -10272,8 +10351,7 @@ class Sidebar(QWidget):
                 item.setFont(bold)
             lst.addItem(item)
             shown += 1
-        self.reading_empty.setText("No matches." if query else "Save pages to read later - even offline - with "
-                                   "Add to Reading List (Ctrl+Shift+D).")
+        self.reading_empty.setText("No matches." if query else READING_EMPTY)
         self.reading_empty.setVisible(not shown)
 
     # -- slide animation ----------------------------------------------------------------------
@@ -10738,6 +10816,11 @@ class Muninn:
 
     def __init__(self, path: str | None) -> None:
         self.con = sqlite3.connect(path or ":memory:", timeout=2, check_same_thread=False)
+        try:                                                    # fewer disk syncs per page remembered
+            self.con.execute("PRAGMA journal_mode=WAL")
+            self.con.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
         try:
             self.con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS pages USING fts5("
                              "url UNINDEXED, title, body, time UNINDEXED, tokenize='porter unicode61')")
@@ -10745,6 +10828,18 @@ class Muninn:
         except sqlite3.Error:                                   # an SQLite without full-text search
             self.con.execute("CREATE TABLE IF NOT EXISTS pages (url TEXT, title TEXT, body TEXT, time REAL)")
             self.fts = False
+        # Finding a page's old copy by address scanned every page (40+ ms with a full memory);
+        # an index on the address column of the table FTS5 keeps the text in makes it direct.
+        self._by_url = "DELETE FROM pages WHERE url = ?"
+        try:
+            if self.fts:
+                self.con.execute("CREATE INDEX IF NOT EXISTS pages_url ON pages_content(c0)")
+                self.con.execute("CREATE INDEX IF NOT EXISTS pages_time ON pages_content(c3)")
+                self._by_url = "DELETE FROM pages WHERE rowid IN (SELECT id FROM pages_content WHERE c0 = ?)"
+            else:
+                self.con.execute("CREATE INDEX IF NOT EXISTS pages_url ON pages(url)")
+        except sqlite3.Error:
+            pass
         self.con.commit()
         self._writes = 0
 
@@ -10752,7 +10847,7 @@ class Muninn:
         if not text.strip():
             return
         with self.con:
-            self.con.execute("DELETE FROM pages WHERE url = ?", (url,))
+            self.con.execute(self._by_url, (url,))
             self.con.execute("INSERT INTO pages (url, title, body, time) VALUES (?, ?, ?, ?)",
                              (url, title[:300], text[:60000], time.time()))
         self._writes += 1
@@ -10760,14 +10855,21 @@ class Muninn:
             self.prune()
 
     def prune(self) -> None:
+        cutoff = time.time() - self.KEEP_DAYS * 86400
         with self.con:
-            self.con.execute("DELETE FROM pages WHERE time < ?", (time.time() - self.KEEP_DAYS * 86400,))
+            if self.fts:                                        # by the time index, not a scan of every page
+                self.con.execute("DELETE FROM pages WHERE rowid IN (SELECT id FROM pages_content WHERE c3 < ?)", (cutoff,))
+            else:
+                self.con.execute("DELETE FROM pages WHERE time < ?", (cutoff,))
             extra = self.count() - self.MAX_PAGES
             if extra > 0:
-                self.con.execute("DELETE FROM pages WHERE rowid IN (SELECT rowid FROM pages ORDER BY time LIMIT ?)", (extra,))
+                oldest = ("SELECT id FROM pages_content ORDER BY c3 LIMIT ?" if self.fts
+                          else "SELECT rowid FROM pages ORDER BY time LIMIT ?")
+                self.con.execute(f"DELETE FROM pages WHERE rowid IN ({oldest})", (extra,))
 
     def count(self) -> int:
-        return int(self.con.execute("SELECT count(*) FROM pages").fetchone()[0])
+        table = "pages_content" if self.fts else "pages"        # FTS5's own table counts from an index
+        return int(self.con.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
 
     def search(self, query: str, limit: int = 8) -> list[dict]:
         words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 1][:8]
@@ -10826,7 +10928,7 @@ SEASON_GLOW = {12: "#BFE6FF", 1: "#CFEAFF", 10: "#FFA24C", 3: "#8EE59B", 4: "#8E
 
 
 # Appearance: light, dark, light by day and dark at night, or the system's choice.
-APPEARANCE_MODES = {"system": "Use System Setting", "light": "Light", "dark": "Dark", "sun": "Sunrise to Sunset"}
+APPEARANCE_MODES = {"system": MATCH_SYSTEM, "light": "Light", "dark": "Dark", "sun": "Sunrise to Sunset"}
 SUN_FALLBACK = ("07:00", "19:00")       # "Sunrise to Sunset" before you've added a weather city
 
 
@@ -10936,7 +11038,8 @@ class GameMode(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(self.CHECK_MS)
         self._timer.timeout.connect(self.check)
-        self._timer.start()
+        if GAME_MODE_SUPPORTED or detector is not None:   # nothing to look for on a Mac or Linux
+            self._timer.start()
 
     def check(self) -> None:
         on = self.forced or (self.enabled and bool(self.detector()))
@@ -11519,6 +11622,7 @@ class DownloadsPanel(QFrame):
 
     openRequested = Signal(str)                   # path
     retryRequested = Signal(str)                  # url
+    closed = Signal()
 
     def __init__(self, manager: DownloadManager, icons: "IconFactory", parent: QWidget) -> None:
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
@@ -11554,6 +11658,7 @@ class DownloadsPanel(QFrame):
         self.empty = QLabel("No downloads")
         self.empty.setObjectName("RowSubtitle")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty.setMinimumHeight(48)
         outer.addWidget(self.empty)
         self.rows: dict[int, DownloadRow] = {}
         manager.changed.connect(self.refresh)
@@ -11582,7 +11687,7 @@ class DownloadsPanel(QFrame):
             self.rows_layout.insertWidget(position, row)
         self.empty.setVisible(not ids)
         self.scroll.setVisible(bool(ids))
-        self.clear_button.setEnabled(any(e["state"] != "active" for e in self.manager.entries))
+        self.clear_button.setVisible(any(e["state"] != "active" for e in self.manager.entries))   # nothing to clear: no button
         rows = min(len(ids), 6)
         self.scroll.setFixedHeight(max(1, rows) * 58)
         self.adjustSize()
@@ -11601,6 +11706,10 @@ class DownloadsPanel(QFrame):
     def open_file(self, entry: dict) -> None:
         self.hide()
         self.openRequested.emit(entry["path"])
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.closed.emit()
 
     def show_under(self, anchor: QWidget) -> None:
         self.refresh()
@@ -11662,8 +11771,8 @@ class Toolbar(QWidget):
         self.sidebar_button = capsule_button("sidebar", "Show Sidebar (Ctrl+Shift+L)", 36)
         self.sidebar_button.setCheckable(True)
         self.sidebar_menu_button = capsule_button("chevron_down", "Sidebar and tab options", 22, 11)
-        self.back_button = capsule_button("back", "Go back (Alt+Left)")
-        self.forward_button = capsule_button("forward", "Go forward (Alt+Right)")
+        self.back_button = capsule_button("back", f"Go back ({BACK_KEY})")
+        self.forward_button = capsule_button("forward", f"Go forward ({FORWARD_KEY})")
         self.address = AddressField()
         self.share_button = capsule_button("share", "Share")
         self.new_tab_button = capsule_button("plus", "New Tab (Ctrl+T)")
@@ -12971,9 +13080,10 @@ class PrivacySettingsDialog(QDialog):
                   self._button("Manage…", lambda: self.show_page(1)))
         self._row(g, "History and website data", "Clear what sites remember about you.",
                   self._button("Clear…", self._clear_history))
-        self._row(g, "Remember what pages say (Muninn)", f"Keeps the words of pages you visit on this {DEVICE}, so the "
-                  "address field, Ctrl+K and the sidebar can find a page by what was on it. Never from private "
-                  "windows or burner tabs, or pages with a password or card field.", self._switch("rememberPages"))
+        self._row(g, "Remember what pages say (Muninn)", shortcut_text(
+                  f"Keeps the words of pages you visit on this {DEVICE}, so the address field, Ctrl+K and the "
+                  "sidebar can find a page by what was on it. Never from private windows or burner tabs, or pages "
+                  "with a password or card field."), self._switch("rememberPages"))
         if not self.window_.private:
             self._row(g, "Delete cookies when Huginn closes", "Signs you out of sites you haven't chosen "
                       "“Keep Me Signed In” for (page menu).", self._switch("clearCookiesOnQuit"))
@@ -13320,9 +13430,12 @@ class PasswordsDialog(QDialog):
         self.message_button = QPushButton()
         self.message_button.setObjectName("PrimaryButton")
         self.message_button.clicked.connect(lambda *_: self._message_action())
+        v.addStretch(1)                                  # title, words and button together, centred
         v.addWidget(self.message_title)
         v.addWidget(self.message_body)
+        v.addSpacing(6)
         v.addWidget(self.message_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        v.addStretch(1)
         return page
 
     # -- state ------------------------------------------------------------------------------------
@@ -13343,9 +13456,9 @@ class PasswordsDialog(QDialog):
         elif self.editing is None:
             self.stack.setCurrentIndex(self.LIST)
             self.reload_list()
-        for widget in (self.search, self.add_button):
-            widget.setEnabled(ready)
-        self.more_button.setEnabled(self.manager.available() and vault.exists())
+        for widget in (self.search, self.add_button):    # nothing to search or add to until it's open
+            widget.setVisible(ready)
+        self.more_button.setVisible(self.manager.available() and vault.exists())
         self.settings_group.setVisible(self.manager.available())
         self.windows_switch.blockSignals(True)
         try:
@@ -13829,6 +13942,13 @@ class _Sheet(QDialog):
             row.addWidget(o)
         self.outer.addLayout(row)
 
+    def showEvent(self, event) -> None:
+        theme = getattr(self.parent(), "theme", None)
+        if theme is not None:                         # switches paint themselves: give them the window's colours
+            for switch in self.findChildren(Switch):
+                switch.theme = theme
+        super().showEvent(event)
+
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
             self.reject()
@@ -14005,7 +14125,7 @@ class FocusSheet(_Sheet):
         self.day_buttons = []
         for i, letter in enumerate(self.DAYS):
             b = QPushButton(letter)
-            b.setObjectName("Segment")
+            b.setObjectName("DayToggle")                  # several can be on: accent when on, grey when off
             b.setCheckable(True)
             b.setChecked(i in config.get("days", []))
             b.setFixedSize(34, 28)
@@ -14498,15 +14618,20 @@ class WeatherSheet(_Sheet):
         units.addWidget(units_label, 1)
         self.unit_buttons = {}
         group = QButtonGroup(self)
+        track = styled(QWidget(), "Segmented")             # the grey track, so the picked one shows
+        track_layout = QHBoxLayout(track)
+        track_layout.setContentsMargins(2, 2, 2, 2)
+        track_layout.setSpacing(2)
         for key, text in (("f", "°F"), ("c", "°C")):
             b = QPushButton(text)
             b.setObjectName("Segment")
             b.setCheckable(True)
-            b.setFixedSize(52, 28)
+            b.setFixedSize(48, 24)
             b.setChecked(service.units() == key)
             group.addButton(b)
-            units.addWidget(b)
+            track_layout.addWidget(b)
             self.unit_buttons[key] = b
+        units.addWidget(track)
         self.body.addLayout(units)
         credit = QLabel(WEATHER_CREDIT)
         credit.setObjectName("RowSubtitle")
@@ -15264,6 +15389,7 @@ class BrowserWindow(QWidget):
         self.downloads_panel = DownloadsPanel(self.downloads, self.icons, self)
         self.downloads_panel.openRequested.connect(lambda path: self.open_path(path))
         self.downloads_panel.retryRequested.connect(self.retry_download)
+        self.downloads_panel.closed.connect(self._sync_downloads_button)   # opened with none: the button goes again
         self.downloads.changed.connect(self._sync_downloads_button)
         # Bars over the page follow the page card. Watched on the card itself: when the
         # tab widget hears about a resize, the card hasn't been laid out yet.
@@ -15539,12 +15665,14 @@ class BrowserWindow(QWidget):
 
     def apply_theme(self) -> None:
         # Note: web pages' prefers-color-scheme always follows Windows (Qt WebEngine offers
-        # no per-app override), so "Use System Setting" keeps chrome and pages matched.
+        # no per-app override), so "Match Windows" keeps chrome and pages matched.
         theme = self._resolve_theme()
         self.theme = theme
         app = QApplication.instance()
-        app.setPalette(build_palette(theme))
-        app.setStyleSheet(QSS_TEMPLATE.substitute(theme))
+        qss = QSS_TEMPLATE.substitute(theme)
+        if app.styleSheet() != qss:                     # app-wide: every window after the first has nothing to do
+            app.setPalette(build_palette(theme))
+            app.setStyleSheet(qss)
         self.icons.set_colors(theme["icon"], theme["icon_disabled"])
         self.tab_style.theme = theme
         HuginnStyle.theme = theme                       # menus
@@ -15777,9 +15905,10 @@ class BrowserWindow(QWidget):
             self._capture_thumbnail(self.current_view())
 
     def set_always_show_tab_bar(self, on: bool, *_) -> None:
-        self.always_show_tab_bar = bool(on)
-        self.settings.setValue("alwaysShowTabBar", self.always_show_tab_bar)
-        self.tabs.setTabBarAutoHide(not self.always_show_tab_bar)
+        self.settings.setValue("alwaysShowTabBar", bool(on))
+        for window in self.all_windows():               # private windows too
+            window.always_show_tab_bar = bool(on)
+            window.tabs.setTabBarAutoHide(not bool(on))
 
     def _wire_view(self, view: WebView) -> None:
         view.titleChanged.connect(partial(self._sync_tab_title, view))
@@ -15823,8 +15952,9 @@ class BrowserWindow(QWidget):
         if index < 0:
             return
         title = self._tab_title(view)
-        self.tabs.setTabText(index, title)
-        self.tabs.setTabToolTip(index, plain_tooltip(title))
+        if self.tabs.tabText(index) != title:            # setTabText re-lays out the whole strip
+            self.tabs.setTabText(index, title)
+            self.tabs.setTabToolTip(index, plain_tooltip(title))
         if view is self.current_view():
             self.setWindowTitle(f"{title} — {self._title_suffix()}")
         self.schedule_session_save()
@@ -15986,11 +16116,17 @@ class BrowserWindow(QWidget):
             if view is None or view is not self.current_view() or not view.isVisible() or self.overview.isVisible():
                 return
             pixmap = view.grab()
-            if not pixmap.isNull():
-                view.thumbnail = pixmap.scaledToWidth(min(pixmap.width(), 560),
-                                                      Qt.TransformationMode.SmoothTransformation)
+            if not pixmap.isNull():                    # shrunk just after the switch, not during it
+                QTimer.singleShot(80, self, partial(self._shrink_thumbnail, view, pixmap))
         except RuntimeError:
             pass                                       # the tab was closed meanwhile
+
+    @staticmethod
+    def _shrink_thumbnail(view: "WebView", pixmap: QPixmap) -> None:
+        try:
+            view.thumbnail = pixmap.scaledToWidth(min(pixmap.width(), 560), Qt.TransformationMode.SmoothTransformation)
+        except RuntimeError:
+            pass
 
     # ---------------------------------------------------------------------------- find on page
     def show_find_bar(self) -> None:
@@ -16180,7 +16316,7 @@ class BrowserWindow(QWidget):
             title = f"Imported from {name}"
             body = f"Added {' and '.join(parts)}."
             if added_b:
-                body += " They're in the sidebar (Ctrl+Shift+L); the first ones are on the Start Page too."
+                body += shortcut_text(" They're in the sidebar (Ctrl+Shift+L); the first ones are on the Start Page too.")
         elif bookmarks or history:
             title, body = f"Nothing new to import from {name}", f"Everything there is already in {BROWSER_NAME}."
         else:
@@ -17056,7 +17192,7 @@ class BrowserWindow(QWidget):
                 ("Read Aloud", "voice", self.read_aloud), ("Site Style", "palette", self.show_site_style),
                 ("Focus Hours", "moon", self.show_focus_settings),
                 ("Add Web Panel", "panel", self.add_web_panel),
-                ("Change Theme With Time of Day", "sidebar", partial(self.set_living_theme, not self.living)),
+                ("Shift Colours With Time of Day", "sidebar", partial(self.set_living_theme, not self.living)),
                 ("Weather Location", "weather", self.show_weather_settings),
                 ("Welcome Tour", "sparkle", self.show_welcome),
                 ("Rippling Aurora On / Off", "sidebar", partial(self.set_aurora_ripple, not self.start_handler.ripple)),
@@ -17070,7 +17206,7 @@ class BrowserWindow(QWidget):
         for key, spec in REALMS.items():
             cmds.append((f"Theme: {spec['label']}", "sidebar", partial(self.set_realm, key)))
         for mode, label in (("light", "Light"), ("dark", "Dark"), ("sun", APPEARANCE_MODES["sun"]),
-                            ("system", f"Follow {SYSTEM_NAME}")):
+                            ("system", MATCH_SYSTEM)):
             cmds.append((f"Appearance: {label}", "moon", partial(self.set_appearance, mode)))
         for mode, label in DARK_WEBSITE_MODES.items():
             cmds.append((f"Websites: {label}", "moon", partial(self.set_dark_websites, mode)))
@@ -17324,9 +17460,10 @@ class BrowserWindow(QWidget):
         self.tab_manager.raise_()
 
     def set_ram_limit(self, mb: int, *_) -> None:
-        self.ram_limit_mb = int(mb or 0)
-        self.settings.setValue("ramLimitMB", self.ram_limit_mb)
-        self.enforce_ram_limit()
+        self.settings.setValue("ramLimitMB", int(mb or 0))
+        for window in self.all_windows():               # every window's background tabs count
+            window.ram_limit_mb = int(mb or 0)
+            window.enforce_ram_limit()
 
     def sleep_tab_now(self, view: "WebView") -> bool:
         """Puts a background tab to sleep at once (unloads it unless something is typed in it)."""
@@ -19537,7 +19674,7 @@ class BrowserWindow(QWidget):
             start_page.addSeparator()
             self._add_toggle(start_page, "Weather", self.weather_service().enabled(), self.set_weather_enabled)
             self._add_action(start_page, "Weather Location…", self.show_weather_settings)
-        self._add_toggle(settings, "Change Theme With Time of Day", self.living, self.set_living_theme)
+        self._add_toggle(settings, "Shift Colours With Time of Day", self.living, self.set_living_theme)
         if not self.private:
             self._add_toggle(settings, "Web Panels in Sidebar", self.sidebar.panels_enabled, self.set_web_panels_enabled)
         if GAME_MODE_SUPPORTED:
@@ -19661,7 +19798,8 @@ class BrowserWindow(QWidget):
                 if self.settings.value("updateUrl", ""):
                     self._add_action(tools, "Publish Update for Friends…", self.publish_update)
         tools.addSeparator()
-        self._add_action(tools, "Web Inspector\tF12", self.open_inspector, view is not None)
+        self._add_action(tools, "Web Inspector\t" + ("Ctrl+Alt+I" if IS_MAC else "F12"), self.open_inspector,
+                         view is not None)
         if not self.private and self.is_default_browser() is False:
             self._add_action(menu, f"Make {BROWSER_NAME} Your Default Browser…", self.make_default_browser).setIcon(
                 self.icons.icon("globe", sec))
@@ -20314,6 +20452,8 @@ def create_browser(app: QApplication, *, persistent: bool = True,
     app.aboutToQuit.connect(window.passwords.icloud.disconnect)
     app.aboutToQuit.connect(window.muninn.close)
     window.typing_sounds = TypingSounds(store.settings, os.path.join(data_dir, "sounds"), app)
+    window.typing_sounds.unavailable.connect(lambda: window.status_bubble.show_message(
+        "Typing sounds need a sound output, and this computer doesn't have one working.", 4000))
     update_config = load_update_config() if persistent else None
     if update_config is not None:                       # a copy a friend shared: keep it up to date
         window.updater = Updater(store.settings, update_config, profile.httpUserAgent(), app)
