@@ -26,6 +26,13 @@ Each one installs for you only, with no admin password, and fetches its own Pyth
 - **Linux:** your apps menu, optionally the desktop and the GNOME dock. If an X11 desktop is missing a
   library Qt needs to open windows (usually `libxcb-cursor0`), the installer names it and offers the command.
 
+**Linux, for every user** (a distribution's image, such as Huginn OS): `sudo installer/install.sh --system
+--default` installs to `/opt/huginn` and makes Huginn the system's browser, and `installer/build-deb.sh` makes a
+`.deb`. With `--system-engine` (Ubuntu 25.04+ / Debian 13+), Huginn runs on the distribution's own PySide6
+instead of bringing its own, so the package is under 1 MB, plays H.264, and gets engine fixes with system
+updates. On Linux, Huginn's menus appear in a global menu bar where the desktop has one, and settings sheets
+open inside the window (Wayland included). See *Huginn on Linux* in [README.txt](README.txt).
+
 The Windows installer has one optional switch, **Build H.264 video support**, off by default. Huginn's standard
 engine plays YouTube (VP9/AV1), but Twitch, Reddit, X and many news sites use H.264. With the switch on, Huginn
 compiles its own engine with H.264 and AAC in the background after install. That takes a few hours at low

@@ -76,7 +76,8 @@ from string import Template
 from urllib.parse import quote, quote_plus, unquote
 
 from PySide6.QtCore import (
-    QBuffer, QByteArray, QEasingCurve, QEvent, QFileInfo, QIODevice, QMimeData, QObject, QPoint, QPointF, QRect,
+    QBuffer, QByteArray, QEasingCurve, QEvent, QFileInfo, QIODevice, QLibraryInfo, QMimeData, QObject, QPoint, QPointF,
+    QRect,
     QLocale, QRectF, QSettings, QSize, QStandardPaths, Qt, QTime, QTimer, QUrl, QUrlQuery, QVariantAnimation, Signal,
     Slot, qVersion,
 )
@@ -172,6 +173,12 @@ WEEK = 7 * 24 * 3600
 IS_WINDOWS = sys.platform == "win32"
 IS_WIN11 = IS_WINDOWS and sys.getwindowsversion().build >= 22000
 IS_MAC = sys.platform == "darwin"
+IS_LINUX = not IS_WINDOWS and not IS_MAC
+# Linux: sheets are drawn inside the browser window rather than as windows of their own.
+# Wayland doesn't let an app place its windows (a sheet landed wherever the compositor
+# chose), and inside the window they get round corners and a dimmed backdrop on X11 too.
+IN_WINDOW_SHEETS = IS_LINUX
+LINUX_UI_FONTS = ("Inter Variable", "Inter")      # the pages name these too, after Segoe UI and SF
 DEVICE = "Mac" if IS_MAC else ("PC" if IS_WINDOWS else "computer")       # "kept on this Mac"
 SYSTEM_NAME = "macOS" if IS_MAC else ("Windows" if IS_WINDOWS else "System")
 MATCH_SYSTEM = "Match Mac" if IS_MAC else ("Match Windows" if IS_WINDOWS else "Match System")   # appearance
@@ -843,6 +850,7 @@ QLineEdit#AddressEdit[private="true"] {
 
 /* ---------- sheets, settings, prompts ---------- */
 QDialog#Sheet { background: $menu_bg; border: $menu_border_css; }
+QDialog#Sheet[inWindow="true"] { border-radius: 12px; }
 QLabel#SheetTitle { color: $text; font-size: 11pt; font-weight: 600; }
 QLabel#SheetBody, QLabel#RowSubtitle, QLabel#SheetNote { color: $text_secondary; }
 QLabel#RowSubtitle, QLabel#SheetNote { font-size: 8.5pt; }
@@ -1663,6 +1671,54 @@ READING_EMPTY = shortcut_text("Save pages to read later - even offline - with Ad
 _QT_VALUE_OPTIONS = {"platform", "platformpluginpath", "platformtheme", "plugin", "qwindowgeometry",
                      "geometry", "qwindowtitle", "title", "qwindowicon", "style", "stylesheet",
                      "session", "display", "name", "dialogs", "fontengine", "darkmode"}
+
+
+APPARMOR_PROFILE = "/etc/apparmor.d/huginn"       # written by the Linux installer / package
+# How to put a missing part back: setup.bat on Windows, the installer on a Mac or Linux.
+REPAIR_HINT = ("Run setup.bat in the browser's folder once" if IS_WINDOWS
+               else f"Run {BROWSER_NAME}'s installer again")
+
+
+USERNS_SWITCH = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+SYSTEM_ENGINE_PROFILE = "/etc/apparmor.d/QtWebEngineProcess"   # Ubuntu's own, for its Qt WebEngine
+
+
+def engine_process_path() -> str:
+    """The engine's page process: the one in Huginn's own engine, or the system's (/usr/lib/...)
+    when Huginn runs on the distribution's PySide6 (install.sh --system-engine)."""
+    return os.environ.get("QTWEBENGINE_PROCESS_PATH") or os.path.join(
+        QLibraryInfo.path(QLibraryInfo.LibraryPath.LibraryExecutablesPath), "QtWebEngineProcess")
+
+
+def page_sandbox_blocked(switch: str = USERNS_SWITCH, profiles: tuple[str, ...] | None = None) -> bool:
+    """Ubuntu 23.10 and later let a program make the user namespaces Chromium's page sandbox
+    is built from only when an AppArmor profile allows it. Huginn's engine gets one when it's
+    installed for everyone (or the installer added it), and Ubuntu's own covers its Qt WebEngine;
+    without one every page would fail to open, so Huginn then starts with the page sandbox off
+    (it says so in Privacy & Security)."""
+    if not IS_LINUX or os.environ.get("QTWEBENGINE_DISABLE_SANDBOX"):
+        return False
+    try:
+        with open(switch, encoding="ascii") as f:
+            restricted = f.read().strip() == "1"
+    except OSError:
+        return False
+    if profiles is None:
+        system = re.fullmatch(r"/usr/lib/[^/]+/qt6/libexec/QtWebEngineProcess", engine_process_path())
+        profiles = (APPARMOR_PROFILE,) + ((SYSTEM_ENGINE_PROFILE,) if system else ())
+    return restricted and not any(os.path.exists(p) for p in profiles)
+
+
+SANDBOX_OFF = False                                   # set by main() when page_sandbox_blocked()
+
+
+PRIVATE_LAUNCH = "\u2063huginn:private-window"     # in a second launch's message: open a private window
+PRIVATE_OPTIONS = ("--private-window", "--private", "--incognito")
+
+
+def wants_private_window(argv: list[str]) -> bool:
+    """`huginn --private-window [url]` (the app menu's and dock's New Private Window)."""
+    return any(arg.split("=", 1)[0].lower() in PRIVATE_OPTIONS for arg in argv)
 
 
 def launch_targets(argv: list[str]) -> list[str]:
@@ -2834,17 +2890,61 @@ LINUX_DESKTOP_FILE = "huginn.desktop"               # what the Linux installer a
 _XDG_DEFAULT: dict = {"at": -60.0, "value": None}
 
 
-def linux_desktop_entry() -> str | None:
-    """The installed menu entry (only an installed copy can be the default browser)."""
-    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    path = os.path.join(base, "applications", LINUX_DESKTOP_FILE)
-    return path if os.path.isfile(path) else None
+def linux_data_dirs() -> list[str]:
+    """Where apps' menu entries live: the user's own folder, then everyone's (XDG)."""
+    home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return [home] + [d for d in (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":") if d]
+
+
+def linux_desktop_entry(name: str = LINUX_DESKTOP_FILE) -> str | None:
+    """The installed menu entry (only an installed copy can be the default browser): the
+    user's own (install.sh) or everyone's (the package, in /usr/share/applications)."""
+    for base in linux_data_dirs():
+        path = os.path.join(base, "applications", name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def linux_default_handler(scheme: str = "https") -> str | None:
+    """The app the desktop opens web links with, from the mimeapps.list files every
+    desktop keeps that choice in (freedesktop.org's standard), read in the order they
+    count: the user's, the desktop's, then the system's (a distribution's default, as
+    Huginn OS sets it). None when none of them says."""
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    config_dirs = [d for d in (os.environ.get("XDG_CONFIG_DIRS") or "/etc/xdg").split(":") if d]
+    desktops = [d.lower() for d in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":") if d]
+    folders = [config_home] + config_dirs + [os.path.join(d, "applications") for d in linux_data_dirs()]
+    key = f"x-scheme-handler/{scheme}"
+    for folder in folders:
+        for name in [f"{d}-mimeapps.list" for d in desktops] + ["mimeapps.list"]:
+            try:
+                with open(os.path.join(folder, name), encoding="utf-8", errors="replace") as f:
+                    lines = f.read().splitlines()
+            except OSError:
+                continue
+            section = ""
+            for line in lines:
+                line = line.strip()
+                if line.startswith("["):
+                    section = line
+                elif section == "[Default Applications]" and line.partition("=")[0].strip() == key:
+                    for app in line.partition("=")[2].split(";"):    # the first one that's installed
+                        if app.strip() and linux_desktop_entry(app.strip()):
+                            return app.strip()
+    return None
 
 
 def linux_is_default_browser() -> bool | None:
-    """Asks the desktop (xdg-settings) which app opens web links; None when Huginn isn't
-    installed or there's no xdg-settings. Remembered for a few seconds (it runs a script)."""
-    if not sys.platform.startswith("linux") or linux_desktop_entry() is None or not shutil.which("xdg-settings"):
+    """Which app opens web links: read from the desktop's mimeapps.list files, else asked
+    of xdg-settings (remembered a few seconds: it runs a script). None when Huginn isn't
+    installed or neither can say."""
+    if not sys.platform.startswith("linux") or linux_desktop_entry() is None:
+        return None
+    handler = linux_default_handler()
+    if handler is not None:
+        return handler == LINUX_DESKTOP_FILE
+    if not shutil.which("xdg-settings"):
         return None
     if time.monotonic() - _XDG_DEFAULT["at"] < 5:
         return _XDG_DEFAULT["value"]
@@ -3181,6 +3281,12 @@ PACKAGE_FILES = ("Install Huginn.bat", "installer/install.ps1",
                  "dictionaries/en-US.bdic", "build-engine.bat", "restore-engine.bat", "engine/build_engine.py",
                  "engine/codec_check.py", "engine/codec_test.mp4", "engine/gnu_tools.zip",
                  "adblock_test.py", "security_test.py", VERSION_FILE)
+
+
+def app_dir_writable(folder: str = APP_DIR) -> bool:
+    """False for a system-wide install (e.g. /opt/huginn from a distribution's package): the
+    system's package manager updates it, and it can't make share packages or updates."""
+    return os.access(folder, os.W_OK)
 
 
 def app_version(folder: str = APP_DIR) -> str:
@@ -6459,7 +6565,7 @@ READER_TOGGLE_JS = r"""(function (prefs, themes) {
     '.hr-page { position: fixed; inset: 0; overflow-y: auto; background: var(--bg); color: var(--fg); transition: background .2s, color .2s; }' +
     '.hr-bar { position: sticky; top: 0; display: flex; justify-content: center; gap: 6px; padding: 10px; ' +
     '  background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(12px); z-index: 1; ' +
-    '  font: 13px "Segoe UI Variable Text", "Segoe UI", sans-serif; }' +
+    '  font: 13px "Segoe UI Variable Text", "Segoe UI", -apple-system, "Inter Variable", Inter, "Noto Sans", sans-serif; }' +
     '.hr-bar button { border: 1px solid color-mix(in srgb, var(--fg) 16%, transparent); background: transparent; color: var(--fg); ' +
     '  border-radius: 8px; padding: 4px 11px; font: inherit; cursor: pointer; min-width: 34px; }' +
     '.hr-bar button:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }' +
@@ -6469,7 +6575,7 @@ READER_TOGGLE_JS = r"""(function (prefs, themes) {
     '.hr-article { max-width: 38em; margin: 0 auto; padding: 18px 28px 90px; font-size: var(--size); line-height: 1.6; ' +
     '  font-family: var(--font); -webkit-font-smoothing: antialiased; }' +
     'h1.hr-title { font-size: 1.75em; line-height: 1.2; margin: .4em 0 .2em; font-weight: 700; }' +
-    '.hr-meta { color: var(--muted); font-size: .8em; margin-bottom: 1.6em; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; }' +
+    '.hr-meta { color: var(--muted); font-size: .8em; margin-bottom: 1.6em; font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "Inter Variable", Inter, "Noto Sans", sans-serif; }' +
     '.hr-body article, .hr-body section { all: unset; display: block; }' +
     '.hr-article a { color: var(--link); }' +
     '.hr-article img, .hr-article video, .hr-article figure, .hr-article picture { max-width: 100%; height: auto; }' +
@@ -6499,7 +6605,7 @@ READER_TOGGLE_JS = r"""(function (prefs, themes) {
     page.style.setProperty('--size', sizes[prefs.size] + 'px');
     page.style.colorScheme = prefs.theme === 'dark' ? 'dark' : 'light';    // a dark scrollbar at Night
 
-    page.style.setProperty('--font', prefs.font === 'sans' ? '"Segoe UI Variable Text", "Segoe UI", sans-serif'
+    page.style.setProperty('--font', prefs.font === 'sans' ? '"Segoe UI Variable Text", "Segoe UI", -apple-system, "Inter Variable", Inter, "Noto Sans", sans-serif'
                                                          : 'Charter, "Iowan Old Style", Georgia, "Times New Roman", serif');
     root.querySelector('[data-a="font"]').textContent = prefs.font === 'sans' ? 'Serif' : 'Sans';
     ['light', 'sepia', 'dark'].forEach(function (k) {
@@ -7379,10 +7485,13 @@ PERF_PROBE_SCRIPT = r"""(function () {
 
 def perf_probe_folders() -> list[str]:
     """Where a perf-probe switch may be: test_out in Huginn's folder, or (Huginn.app's folder
-    being inside the app) ~/Library/Logs/Huginn on a Mac."""
+    being inside the app) ~/Library/Logs/Huginn on a Mac, ~/.local/state/huginn on Linux."""
     folders = [os.path.join(APP_DIR, "test_out")]
     if sys.platform == "darwin":
         folders.append(os.path.join(os.path.expanduser("~"), "Library", "Logs", "Huginn"))
+    elif IS_LINUX:                                       # a system install's folder is read-only
+        state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        folders.append(os.path.join(state, "huginn"))
     return folders
 
 
@@ -7728,7 +7837,9 @@ class EngineManager(QObject):
         snapshot = (phase, self.status.get("title"), self.status.get("detail"), round(self.status.get("progress") or 0, 3),
                     self.status.get("error"), self.update_available(), self.checking())
         interval = 2000 if phase in ("running", "waiting_permission", "waiting_browser") or self.checking() else 15000
-        if self._timer.interval() != interval or not self._timer.isActive():
+        if not self.platform_ok:                         # nothing builds here (Windows only): nothing to watch
+            self._timer.stop()
+        elif self._timer.interval() != interval or not self._timer.isActive():
             self._timer.start(interval)
         if snapshot != self._snapshot:
             self._snapshot = snapshot
@@ -7968,13 +8079,19 @@ START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
   html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent; }
   html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); overflow-x: hidden;
     font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
-                 "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+                 "Inter Variable", Inter, "Noto Sans", "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
   body { background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 55%) fixed; }
   /* Aurora: two soft glows drifting slowly across the top of the page. */
   .aurora { position: fixed; left: -15%; right: -15%; top: -42vh; height: 92vh; pointer-events: none;
+    opacity: var(--glow-opacity); will-change: transform;
+    animation: drift 34s steps(136) infinite alternate; }   /* 4 moves a second: ~1px on a 48px blur */
+  /* The blur is on a still child: it's drawn once and each step slides a finished picture.
+     (Blurred as it moved, every frame redid the blur, stepped or not: a whole core on a
+     computer that draws pages without a graphics card - a virtual machine, say.) */
+  .aurora > i { position: absolute; inset: 0;
     background: radial-gradient(42% 52% at 28% 58%, var(--glow-a), transparent 70%),
                 radial-gradient(38% 48% at 70% 48%, var(--glow-b), transparent 72%);
-    opacity: var(--glow-opacity); filter: blur(48px); animation: drift 34s ease-in-out infinite alternate; }
+    filter: blur(48px); }
   @keyframes drift { from { transform: translate3d(-4%, 0, 0) scale(1); }
                      to   { transform: translate3d(4%, 3vh, 0) scale(1.1); } }
   /* Curtains: rays of light along a wavy edge, sliding sideways (two of them, opposite ways,
@@ -8005,11 +8122,11 @@ START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
   header { margin: 0 0 40px 4px; }
   .runes { font-family: "Segoe UI Historic", "Noto Sans Runic", serif; font-size: 14px;
     letter-spacing: .45em; color: var(--accent); opacity: .8; }
-  h1 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif; font-weight: 300;
+  h1 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, "Inter Display", "Inter Variable", Inter, "Noto Sans", sans-serif; font-weight: 300;
     font-size: 40px; letter-spacing: -.6px; margin: 4px 0 2px; }
   .date { font-size: 13px; color: var(--muted); letter-spacing: .02em; }
   section + section { margin-top: 34px; }
-  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif;
+  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, "Inter Display", "Inter Variable", Inter, "Noto Sans", sans-serif;
        font-size: 17px; font-weight: 700; letter-spacing: -0.1px; margin: 0 0 12px 4px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 14px 4px; }
   a.fav { display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 8px 4px;
@@ -8052,7 +8169,7 @@ START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
   .wx-icon { flex: none; overflow: visible; }
   .wx-top > .wx-icon { margin: -6px -2px -6px -6px; }
   .wx-now { flex: 1; min-width: 0; }
-  .wx-temp { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif; font-weight: 300;
+  .wx-temp { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, "Inter Display", "Inter Variable", Inter, "Noto Sans", sans-serif; font-weight: 300;
     font-size: 36px; line-height: 1; letter-spacing: -1px; color: var(--text); }
   .wx-cond { font-size: 13px; color: var(--text); margin-top: 3px; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; }
@@ -8101,7 +8218,7 @@ START_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
      about half a laptop core for a Start Page left open - so a still page costs nothing. */
   html.calm .aurora, html.calm .sway, html.calm .curtain, html.calm .wx-icon * { animation-play-state: paused; }
 </style></head>
-<body><div class="aurora"></div><div class="sky"><div class="sway far"><div class="curtain far"></div></div>
+<body><div class="aurora"><i></i></div><div class="sky"><div class="sway far"><div class="curtain far"></div></div>
 <div class="sway"><div class="curtain near"></div></div></div>$ridge
 <main><header><div class="hello"><div class="runes" title="$runes_title">$runes</div>
 <h1 title="$greeting_title">$greeting</h1><div class="date" title="$day_meaning">$date</div></div>$weather</header>
@@ -8341,12 +8458,15 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; color: var(--text);
     background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 60%);
-    font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+    font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "Inter Variable", Inter, "Noto Sans", sans-serif; -webkit-font-smoothing: antialiased; }
   button { font: inherit; color: inherit; }
   .aurora { position: fixed; left: -15%; right: -15%; top: -40vh; height: 95vh; pointer-events: none;
+    opacity: var(--glow-opacity); will-change: transform;
+    animation: drift 34s steps(136) infinite alternate; }   /* 4 moves a second: ~1px on a 48px blur */
+  .aurora > i { position: absolute; inset: 0;                 /* blurred once; only the frame moves */
     background: radial-gradient(42% 52% at 28% 58%, var(--glow-a), transparent 70%),
                 radial-gradient(38% 48% at 70% 48%, var(--glow-b), transparent 72%);
-    opacity: var(--glow-opacity); filter: blur(48px); animation: drift 34s ease-in-out infinite alternate; }
+    filter: blur(48px); }
   @keyframes drift { from { transform: translate3d(-4%, 0, 0); } to { transform: translate3d(4%, 3vh, 0) scale(1.08); } }
   .sky { display: none; position: fixed; left: 0; right: 0; top: 0; height: 50vh; pointer-events: none; overflow: hidden;
     opacity: var(--curtain-opacity); mix-blend-mode: var(--curtain-blend);
@@ -8370,14 +8490,16 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
   .slide.past { transform: translateX(-40px); }
   .runes { font-family: "Segoe UI Historic", "Noto Sans Runic", serif; letter-spacing: .45em; color: var(--accent);
     opacity: .85; font-size: 14px; }
-  h1 { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; font-weight: 300; font-size: 46px;
+  h1 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, "Inter Display", "Inter Variable", Inter, "Noto Sans", sans-serif; font-weight: 300; font-size: 46px;
     letter-spacing: -.8px; margin: 6px 0 8px; }
-  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; font-weight: 600; font-size: 30px;
+  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, "Inter Display", "Inter Variable", Inter, "Noto Sans", sans-serif; font-weight: 600; font-size: 30px;
     letter-spacing: -.4px; margin: 0 0 6px; }
   .lead { color: var(--muted); font-size: 15.5px; max-width: 520px; line-height: 1.5; margin: 0 0 28px; }
   .logo { width: 108px; height: 108px; border-radius: 26px; margin-bottom: 18px;
-    box-shadow: 0 18px 50px rgba(0,0,0,.28); animation: float 6s ease-in-out infinite alternate; }
-  @keyframes float { to { transform: translateY(-6px); } }
+    box-shadow: 0 18px 50px rgba(0,0,0,.28); animation: float 6s steps(6) infinite alternate; }
+  /* eased by its keyframes, moved 4 times a second (each frame redraws the whole window) */
+  @keyframes float { 25% { transform: translateY(-.9px); } 50% { transform: translateY(-3px); }
+                     75% { transform: translateY(-5.1px); } to { transform: translateY(-6px); } }
   /* Calm, as on the Start Page: a tour left open holds still (and costs nothing) until the mouse moves. */
   html.calm .aurora, html.calm .curtain, html.calm .logo { animation-play-state: paused; }
   .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 300px)); gap: 12px; text-align: left; }
@@ -8386,7 +8508,7 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
     backdrop-filter: blur(18px); }
   .card b { display: block; font-size: 14.5px; margin: 10px 0 4px; }
   .card span { color: var(--muted); font-size: 13px; line-height: 1.45; }
-  .card kbd, .tips kbd { font: 600 11.5px "Segoe UI", sans-serif; padding: 2px 6px; border-radius: 6px;
+  .card kbd, .tips kbd { font: 600 11.5px "Segoe UI", -apple-system, "Inter Variable", Inter, "Noto Sans", sans-serif; padding: 2px 6px; border-radius: 6px;
     background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
   .ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -8454,7 +8576,7 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
   @media (max-height: 700px) { .lead { margin-bottom: 16px; } .group { margin-bottom: 12px; } .logo { width: 84px; height: 84px; } }
 </style></head>
 <body class="$body_class">
-<div class="aurora"></div><div class="sky"><div class="curtain far"></div><div class="curtain near"></div></div>
+<div class="aurora"><i></i></div><div class="sky"><div class="curtain far"></div><div class="curtain near"></div></div>
 <button class="skip" onclick="hw.go('finish')">Skip tour</button>
 <div class="stage">
 <section class="slide on">
@@ -11147,7 +11269,7 @@ def focus_until(config: dict, now: time.struct_time) -> float | None:
 FOCUS_PAGE = Template("""<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="$scheme">
 <title>Not now</title><style>
   html, body { margin: 0; height: 100%; background: $bg; color: $text;
-    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; }
+    font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, "Inter Display", "Inter Variable", Inter, "Noto Sans", system-ui, sans-serif; }
   .aurora { position: fixed; inset: -20%; background: radial-gradient(40% 35% at 30% 30%, $glow_a, transparent 70%),
     radial-gradient(35% 35% at 70% 40%, $glow_b, transparent 70%); opacity: $glow_opacity; filter: blur(40px); }
   main { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -12032,7 +12154,7 @@ class SheetDialog(QDialog):
 
     def __init__(self, window: QWidget, title: str, message: str = "", *, ok: str = "OK",
                  cancel: str | None = "Cancel", danger: bool = False, width: int = 440) -> None:
-        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        super().__init__(window, sheet_flags())
         self.setObjectName("Sheet")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowModality(Qt.WindowModality.WindowModal)
@@ -12082,10 +12204,111 @@ class SheetDialog(QDialog):
         super().setVisible(visible)
 
 
+def sheet_flags() -> Qt.WindowType:
+    """A sheet's window flags: its own frameless window. (On Linux place_sheet makes it part
+    of the browser window instead; QDialog turns a plain widget type back into a dialog.)"""
+    return Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
+
+
+class SheetScrim(QWidget):
+    """Behind an in-window sheet: dims the window and takes its clicks, as a modal sheet's
+    window would. Follows the window's size, re-centres the sheet, goes with the sheet."""
+
+    def __init__(self, window: QWidget, sheet: QWidget) -> None:
+        super().__init__(window)
+        self.sheet = sheet
+        self._held: list = []                            # the window's keys and menus, off while it's up
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        window.installEventFilter(self)
+        sheet.installEventFilter(self)
+        sheet.destroyed.connect(self.release)
+        sheet.destroyed.connect(self.deleteLater)
+
+    def cover(self) -> None:
+        self.setGeometry(self.parentWidget().rect())
+
+    def hold(self) -> None:
+        """A sheet is modal: while it's up the window's own shortcuts (Ctrl+W, Ctrl+T, Ctrl+Q...)
+        and its global menu don't act behind it - as a sheet that's a window of its own does."""
+        if self._held:
+            return
+        window = self.parentWidget()
+        for shortcut in window.findChildren(QShortcut):
+            owner = shortcut.parent()
+            if shortcut.isEnabled() and owner is not self.sheet and not (
+                    isinstance(owner, QWidget) and self.sheet.isAncestorOf(owner)):
+                shortcut.setEnabled(False)
+                self._held.append(shortcut)
+        bar = getattr(window, "global_menu_bar", None)
+        if bar is not None:
+            for action in bar.actions():
+                if action.isEnabled():
+                    action.setEnabled(False)
+                    self._held.append(action)
+
+    def release(self, *_) -> None:
+        for item in self._held:
+            try:
+                item.setEnabled(True)
+            except RuntimeError:                         # gone with its window
+                pass
+        self._held = []
+
+    def paintEvent(self, event) -> None:
+        dark = bool(getattr(self.parentWidget(), "theme", LIGHT_THEME).get("dark"))
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 92 if dark else 46))
+
+    def mousePressEvent(self, event) -> None:
+        event.accept()                                   # the window behind a sheet is out of reach
+
+    def wheelEvent(self, event) -> None:
+        event.accept()
+
+    def eventFilter(self, obj, event) -> bool:
+        kind = event.type()
+        if obj is self.sheet:
+            if kind == QEvent.Type.Hide:
+                self.hide()
+                self.release()
+            elif kind == QEvent.Type.Show:
+                self.cover()
+                self.show()
+                self.raise_()
+                obj.raise_()
+                self.hold()
+        elif kind == QEvent.Type.Resize and self.isVisible():
+            self.cover()
+            try:
+                _centre_in_window(self.sheet, obj)
+            except RuntimeError:
+                pass
+        return False
+
+
+def _centre_in_window(dialog: QWidget, window: QWidget) -> None:
+    top = TOOLBAR_HEIGHT + 6
+    dialog.setMaximumHeight(max(160, window.height() - top - 14))
+    if dialog.height() > dialog.maximumHeight():
+        dialog.resize(dialog.width(), dialog.maximumHeight())
+    dialog.move(max(8, (window.width() - dialog.width()) // 2), top)
+
+
 def place_sheet(dialog: QWidget, window: QWidget) -> None:
     """Puts a sheet under the toolbar, centred, before it is shown (so it never appears
     somewhere else first). On Windows 11 its native window gets rounded corners and a
-    hairline border before it appears, too."""
+    hairline border before it appears, too. On Linux the sheet is part of the window,
+    over a dimmed backdrop, and takes the keyboard."""
+    if IN_WINDOW_SHEETS and dialog.isWindow() and isinstance(dialog.parentWidget(), QWidget):
+        dialog.setWindowFlags(Qt.WindowType.Widget)     # stays a child of the window it belongs to
+    in_window = not dialog.isWindow()
+    if in_window and dialog.parentWidget() is not window:
+        window = dialog.parentWidget() or window
+    if in_window and dialog.property("inWindow") is not True:
+        dialog.setProperty("inWindow", True)
+        dialog.style().unpolish(dialog)
+        dialog.style().polish(dialog)
     dialog.adjustSize()
     layout = dialog.layout()
     if layout is not None and layout.hasHeightForWidth():
@@ -12095,6 +12318,16 @@ def place_sheet(dialog: QWidget, window: QWidget) -> None:
         needed = layout.totalHeightForWidth(dialog.width())
         if needed > dialog.height():
             dialog.resize(dialog.width(), needed)
+    if in_window:
+        _centre_in_window(dialog, window)
+        if getattr(dialog, "_scrim", None) is None:
+            dialog._scrim = SheetScrim(window, dialog)
+        dialog._scrim.cover()
+        dialog._scrim.show()
+        dialog._scrim.raise_()
+        dialog.raise_()
+        QTimer.singleShot(0, dialog, partial(_focus_sheet, dialog))
+        return
     anchor = window.mapToGlobal(QPoint(window.width() // 2, TOOLBAR_HEIGHT + 6))
     dialog.move(anchor.x() - dialog.width() // 2, anchor.y())
     if IS_WIN11:
@@ -12102,6 +12335,18 @@ def place_sheet(dialog: QWidget, window: QWidget) -> None:
         set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
         set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR,
                           colorref(getattr(window, "theme", LIGHT_THEME)["menu_border"]))
+
+
+def _focus_sheet(dialog: QWidget) -> None:
+    """An in-window sheet takes the keyboard (Escape, Enter, typing) from the page behind it."""
+    if not dialog.isVisible() or (dialog.focusWidget() is not None and dialog.focusWidget().hasFocus()):
+        return
+    for child in dialog.findChildren(QWidget):
+        if (child.isVisible() and child.isEnabled() and child.focusPolicy() & Qt.FocusPolicy.TabFocus
+                and isinstance(child, (QLineEdit, QPlainTextEdit, QAbstractButton, QComboBox))):
+            child.setFocus(Qt.FocusReason.PopupFocusReason)
+            return
+    dialog.setFocus(Qt.FocusReason.PopupFocusReason)
 
 
 def paint_floating_card(p: QPainter, rect: QRectF, theme: dict, radius: float = 12.0) -> None:
@@ -12845,7 +13090,7 @@ class PrivacySettingsDialog(QDialog):
     permissions and history. Changes apply immediately to every window."""
 
     def __init__(self, window: "BrowserWindow") -> None:
-        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        super().__init__(window, sheet_flags())
         self.setObjectName("Sheet")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -12977,6 +13222,14 @@ class PrivacySettingsDialog(QDialog):
         h.addWidget(summary, 1)
         layout.addWidget(card)
 
+        if SANDBOX_OFF:                                  # Ubuntu without Huginn's AppArmor profile
+            g = self._group(layout, "Security")
+            note = QLabel("Off")
+            note.setObjectName("RowSubtitle")
+            self._row(g, "Page sandbox", "Ubuntu runs a browser's page sandbox only with a security profile for it, and "
+                      f"{BROWSER_NAME}'s isn't installed, so pages run without that extra wall. Run {BROWSER_NAME}'s "
+                      "installer again to add it (it asks for your password), then restart.", note, first=True)
+
         g = self._group(layout, "Search")
         self.search_combo = QComboBox()
         for key, (label, _url) in SEARCH_ENGINES.items():
@@ -12999,7 +13252,7 @@ class PrivacySettingsDialog(QDialog):
                         "Save logins encrypted, fill them in with a click and get strong passwords for new accounts.")
                 button = self._button("Open…" if passwords.vault.exists() else "Set Up…", self._open_passwords)
             else:
-                text = "Run setup.bat in the browser's folder once to turn on the password manager."
+                text = f"{REPAIR_HINT} to turn on the password manager."
                 button = self._button("Open…", self._open_passwords)
                 button.setEnabled(False)
             self._row(g, "Saved passwords", text, button, first=True)
@@ -13226,7 +13479,7 @@ class PasswordsDialog(QDialog):
     LIST, DETAIL, MESSAGE = range(3)
 
     def __init__(self, window: "BrowserWindow") -> None:
-        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        super().__init__(window, sheet_flags())
         self.setObjectName("Sheet")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -13444,7 +13697,7 @@ class PasswordsDialog(QDialog):
         ready = self.manager.available() and vault.exists() and not vault.locked()
         if not self.manager.available():
             self._message("Passwords need the encryption library",
-                          "Run setup.bat in the browser's folder once to add it.", "", "")
+                          f"{REPAIR_HINT} to add it.", "", "")
         elif not vault.exists():
             self._message("Keep your passwords encrypted",
                           f"{BROWSER_NAME} saves logins in a vault encrypted with a master password only you know. "
@@ -13909,7 +14162,7 @@ class _Sheet(QDialog):
 
     def __init__(self, window: QWidget, title: str, message: str = "", width: int = 520,
                  ok: str | None = "Done", cancel: str | None = None) -> None:
-        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        super().__init__(window, sheet_flags())
         self.setObjectName("Sheet")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setFixedWidth(width)
@@ -13941,6 +14194,11 @@ class _Sheet(QDialog):
             o.clicked.connect(self.accept)
             row.addWidget(o)
         self.outer.addLayout(row)
+
+    def setVisible(self, visible: bool) -> None:
+        if visible and not self.isVisible() and IN_WINDOW_SHEETS and self.parentWidget() is not None:
+            place_sheet(self, self.parentWidget())     # Linux: inside the window, under the toolbar
+        super().setVisible(visible)
 
     def showEvent(self, event) -> None:
         theme = getattr(self.parent(), "theme", None)
@@ -14776,7 +15034,7 @@ class TabManager(QDialog):
     LIMITS = {0: "No limit", 1024: "1 GB", 2048: "2 GB", 3072: "3 GB", 4096: "4 GB", 6144: "6 GB", 8192: "8 GB"}
 
     def __init__(self, window: "BrowserWindow") -> None:
-        super().__init__(window, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        super().__init__(window, sheet_flags())
         self.window_ = window
         self.setObjectName("Sheet")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -15296,8 +15554,11 @@ class BrowserWindow(QWidget):
         self._build_ui()
         self._build_shortcuts()
         self.mac_menu_bar: QMenuBar | None = None
+        self.global_menu_bar: QMenuBar | None = None
         if IS_MAC and main_window is None:
             self.mac_menu_bar = self.build_mac_menu_bar()
+        elif IS_LINUX:
+            QTimer.singleShot(0, self, self.export_global_menu)
         profile.downloadRequested.connect(self._on_download_requested)
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):                     # Qt 6.5+
@@ -15485,6 +15746,8 @@ class BrowserWindow(QWidget):
             bind(["Meta+Shift+Tab", "Ctrl+Shift+["], self.previous_tab)
             bind("Ctrl+Alt+I", self.open_inspector)                # Safari's Web Inspector
             bind("Meta+Ctrl+F", self.toggle_window_fullscreen)
+        else:
+            bind("F11", self.toggle_window_fullscreen)              # as every Windows and Linux browser
         bind("Ctrl+J", self.show_downloads)
         bind("Ctrl+Shift+S", partial(self.take_screenshot, True))
         if IS_MAC:                     # Command-M minimizes on a Mac; Control-M mutes (as in Firefox)
@@ -15511,12 +15774,32 @@ class BrowserWindow(QWidget):
         self._escape_shortcut.setEnabled(False)
 
     # ---------------------------------------------------------------------------- Mac menu bar
-    def build_mac_menu_bar(self) -> QMenuBar:
+    def export_global_menu(self) -> bool:
+        """Linux desktops with a global menu bar along the top of the screen (KDE Plasma's,
+        Unity's, Huginn OS's: anything providing com.canonical.AppMenu.Registrar) show
+        Huginn's menus there, as on a Mac. Qt sends them over D-Bus when the desktop asks;
+        elsewhere the bar is dropped and nothing changes in the window."""
+        if self.global_menu_bar is not None:
+            return True
+        bar = self.build_mac_menu_bar(parent=self, mac=False)
+        if not bar.isNativeMenuBar():
+            bar.hide()
+            bar.deleteLater()
+            return False
+        self.global_menu_bar = bar
+        return True
+
+    def build_mac_menu_bar(self, parent: QWidget | None = None, mac: bool = True) -> QMenuBar:
         """The menu bar along the top of a Mac's screen, as every Mac app has: File, Edit,
         View, History, Bookmarks, Window and Help, with their usual Command-key shortcuts.
         One bar for all of Huginn's windows; each command goes to the window you're in. (A
-        key goes to the text field or page first, so Copy and Paste still work as before.)"""
-        bar = QMenuBar(None)                         # no parent: macOS's own bar, shared by every window
+        key goes to the text field or page first, so Copy and Paste still work as before.)
+        mac=False: the same menus for a Linux global menu bar (one per window), with the keys
+        Linux uses; there the window's own shortcuts do the work and the menu shows them."""
+        bar = QMenuBar(parent)                       # no parent: macOS's own bar, shared by every window
+        linux_keys = {"Ctrl+[": "Alt+Left", "Ctrl+]": "Alt+Right", "Meta+Ctrl+F": "F11", "Ctrl+Alt+I": "F12",
+                      "Meta+Tab": "Ctrl+Tab", "Meta+Shift+Tab": "Ctrl+Shift+Tab", "Ctrl+M": None,
+                      "Ctrl+Shift+Backspace": "Ctrl+Shift+Delete", READER_KEY: "F9"}
 
         def target() -> "BrowserWindow":
             w = QApplication.activeWindow()
@@ -15527,8 +15810,12 @@ class BrowserWindow(QWidget):
         def item(menu: QMenu, text: str, method: str, keys: str | None = None, *args,
                  role: QAction.MenuRole | None = None) -> QAction:
             action = menu.addAction(text)
+            if keys and not mac:
+                keys = linux_keys.get(keys, keys)
             if keys:
                 action.setShortcut(QKeySequence(keys))
+                if not mac:                          # shown in the menu; the window's own shortcut does it
+                    action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
             if role is not None:
                 action.setMenuRole(role)
             action.triggered.connect(lambda *_: getattr(target(), method)(*args))
@@ -15551,7 +15838,8 @@ class BrowserWindow(QWidget):
         item(file, "Reopen Closed Tab", "reopen_closed_tab", "Ctrl+Shift+T")
         file.addSeparator()
         item(file, "Import From Another Browser…", "show_import_menu")
-        item(file, f"Share {BROWSER_NAME} With Friends…", "share_with_friends")
+        if mac or app_dir_writable():                 # a system install: the OS updates it, nothing to share
+            item(file, f"Share {BROWSER_NAME} With Friends…", "share_with_friends")
         file.addSeparator()
         item(file, "Take Screenshot of Page", "take_screenshot", "Ctrl+Shift+S", True)
 
@@ -15596,7 +15884,7 @@ class BrowserWindow(QWidget):
 
         window = bar.addMenu("Window")
         item(window, "Minimize", "showMinimized", "Ctrl+M")
-        item(window, "Zoom", "toggle_maximize")
+        item(window, "Zoom" if mac else "Maximize", "toggle_maximize")
         window.addSeparator()
         item(window, "Show Next Tab", "next_tab", "Meta+Tab")
         item(window, "Show Previous Tab", "previous_tab", "Meta+Shift+Tab")
@@ -15775,7 +16063,11 @@ class BrowserWindow(QWidget):
         self._start_refresh_timer.start()
 
     def open_from_another_launch(self, targets: list[str]) -> None:
-        """A second launch handed us its URLs (see SingleInstance); show them here."""
+        """A second launch handed us its URLs (see SingleInstance); show them here (in a new
+        private window when it was `huginn --private-window`)."""
+        if PRIVATE_LAUNCH in targets:
+            self.open_private_window([t for t in targets if t != PRIVATE_LAUNCH])
+            return
         for target in targets:
             self.add_tab(url_from_user_input(target) or QUrl(START_URL))
         if not targets:
@@ -19209,11 +19501,12 @@ class BrowserWindow(QWidget):
         return dialog
 
     # ---------------------------------------------------------------------------- private browsing
-    def open_private_window(self) -> "BrowserWindow":
+    def open_private_window(self, targets: list[str] | None = None) -> "BrowserWindow":
         main = self.main_window or self
         window = create_private_window(main)
         main._private_windows.append(window)
-        window.add_tab(QUrl(START_URL))
+        for target in (targets if isinstance(targets, list) else None) or [START_URL]:
+            window.add_tab(url_from_user_input(target) or QUrl(START_URL))
         window.show()
         window.raise_()
         window.activateWindow()
@@ -19792,7 +20085,7 @@ class BrowserWindow(QWidget):
             tools.addSeparator()
             if self.updater is not None:
                 self._add_action(tools, "Check for Updates", self.check_for_updates)
-            elif load_update_config() is None:
+            elif load_update_config() is None and app_dir_writable():   # a system install: the OS updates it
                 self._add_action(tools, f"Share {BROWSER_NAME} With Friends…", self.share_with_friends).setIcon(
                     self.icons.icon("gift", sec))
                 if self.settings.value("updateUrl", ""):
@@ -20382,6 +20675,10 @@ def create_application(argv: list[str]) -> QApplication:
         font.setFamilies(["Segoe UI Variable Text", "Segoe UI", "Arial"])
     else:                  # the system's own font (San Francisco on a Mac); naming missing ones costs a start
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+        if IS_LINUX:       # Inter, as the pages use, where installed: fontconfig's default is often DejaVu
+            inter = next((f for f in LINUX_UI_FONTS if QFontDatabase.hasFamily(f)), None)
+            if inter:
+                font.setFamilies([inter, font.family()])
     font.setPointSizeF(12.0 if IS_MAC else 9.0)  # the same size on screen: a Mac point is 3/4 of a Windows one
     app.setFont(font)
     app.setWindowIcon(make_app_icon())
@@ -20567,6 +20864,10 @@ def main() -> int:
             pass
         args = args[2:]
     main_started = time.perf_counter()
+    global SANDBOX_OFF
+    if page_sandbox_blocked():                       # before the engine starts: it reads this once
+        os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+        SANDBOX_OFF = True
     # On Linux the program name is the window's X11 class name, which the dock matches to
     # huginn.desktop (StartupWMClass=huginn) - whether Huginn was run as a script or imported.
     app = create_application((sys.argv[:1] if IS_WINDOWS else ["huginn"]) + args)
@@ -20574,9 +20875,10 @@ def main() -> int:
     pending: list[str] = []                            # links macOS hands over while starting
     app.file_opened.connect(pending.append)
     targets = launch_targets(args)
+    private = wants_private_window(args)
     steps: dict[str, float] = {}
     instance = SingleInstance(app)
-    if instance.send_to_running(targets):
+    if instance.send_to_running(([PRIVATE_LAUNCH] if private else []) + targets):
         return 0                               # the running browser opened them
     instance.listen()
     steps["instance"] = time.perf_counter()
@@ -20588,12 +20890,14 @@ def main() -> int:
     if not restored and restart:
         restored = window.restore_after_engine_restart(restart)
     steps["restored"] = time.perf_counter()
-    for target in targets:
+    for target in ([] if private else targets):
         window.add_tab(url_from_user_input(target) or QUrl(START_URL))
-    if not targets and not restored:
+    if (private or not targets) and not restored:
         window.add_tab(QUrl(START_URL))
     window.first_run_welcome()
     window.show()
+    if private:                                        # started as `huginn --private-window`
+        QTimer.singleShot(0, window, partial(window.open_private_window, targets))
     if perf_probe_log() is not None:                   # a testing aid; normally off
         steps["pending_opens"] = len(pending)
         watch_startup(window, main_started, app_ready, {k: v for k, v in steps.items() if isinstance(v, float)})

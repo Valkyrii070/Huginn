@@ -37,7 +37,8 @@ Install it (Linux): in a terminal, bash "Install Huginn (Linux).sh". It puts Hug
             missing a library Qt needs to open a window on X11 (usually libxcb-cursor0), it
             says so and offers the command that adds it (Wayland desktops don't need it).
             Read Aloud uses your desktop's voices (speech-dispatcher).
-            Video formats (the H.264 build) are Windows-only.
+            For every user of the computer (a distribution's image, Huginn OS's for one), see
+            "Huginn on Linux" below: sudo installer/install.sh --system, or a .deb package.
 Or run it:  double-click run.bat in this folder (Windows; no installing, sets itself up)
 
 The first time Huginn opens, a short welcome tour shows what makes it different and lets
@@ -106,6 +107,43 @@ Video formats (H.264 / AAC)
   engine; Privacy & Security then shows Update... (it rebuilds in the background the same
   way). setup.bat leaves an H.264 engine alone.
   DRM services such as Netflix and Disney+ still won't play - use Edge or Chrome for those.
+
+Huginn on Linux
+  For every user   sudo installer/install.sh --system puts Huginn in /opt/huginn, huginn in
+                   /usr/bin, its apps-menu entry and icons under /usr/share, and registers it
+                   as a web browser (x-www-browser, gnome-www-browser). Add --default to make
+                   it everyone's default browser (/etc/xdg/mimeapps.list). Remove it with
+                   sudo /opt/huginn/installer/install.sh --system --uninstall.
+  Packages         installer/build-deb.sh makes a .deb of the same (run it on the release it's
+                   for). installer/build-deb.sh --system-engine makes a small one (under 1 MB,
+                   every architecture) that runs on the distribution's own python3 and PySide6
+                   (Ubuntu 25.04+ / Debian 13+, PySide6 6.10 or later): that engine plays H.264
+                   and AAC video, and its security fixes arrive with the system's updates.
+                   install.sh --system-engine does the same without a package. Set the
+                   package's version with HUGINN_VERSION=2026.11.12.1.
+  Video            Huginn's own engine plays YouTube (VP9, AV1, Opus) but not H.264/AAC, and
+                   the H.264 build is Windows-only; installed with --system-engine, the
+                   distribution's engine plays both.
+  Page sandbox     Ubuntu 23.10 and later let a browser's page sandbox run only with an
+                   AppArmor profile for it. The installer and the package add Huginn's
+                   (/etc/apparmor.d/huginn); Ubuntu's own covers the system engine. Without
+                   either, Huginn runs pages with the sandbox off and says so in Privacy &
+                   Security (run the installer again to add it).
+  Global menu      On a desktop with a menu bar along the top of the screen (KDE Plasma,
+                   Unity, Huginn OS: anything offering com.canonical.AppMenu.Registrar) Huginn's
+                   File, Edit, View, History, Bookmarks, Window and Help menus appear there,
+                   with Linux keys (Alt+Left, F11, F12...). Elsewhere nothing changes.
+  Sheets           Settings, Clear History, Valhalla and the like open inside the window over
+                   a dimmed backdrop (Wayland doesn't let an app place a window of its own);
+                   while one is open the window's keys and menus wait for it.
+  From a terminal  huginn [link], huginn --new-tab, huginn --private-window [link] (the
+                   last two are also the apps menu entry's right-click actions). A second
+                   launch hands its links to the running Huginn.
+  Fonts            Huginn uses Inter where it's installed (fonts-inter), else your desktop's.
+  Default browser  Huginn reads which browser opens links from the desktop's mimeapps.list
+                   files (yours first, then the system's), as every desktop keeps it.
+  Not on Linux     Game Mode (Windows), sharing or publishing updates from a system install
+                   (the package manager updates it).
 
 Privacy & Security  (Ctrl+, or "Privacy & Security..." in the page menu)
   Private Browsing      Ctrl+Shift+N opens a private window (dark address field): no
@@ -418,7 +456,8 @@ Handy shortcuts
   Ctrl+L address field  Ctrl+R reload             Alt+Left / Alt+Right back / forward
   Ctrl+Shift+\ all tabs Ctrl+Shift+L sidebar      Ctrl+D add to Favorites
   Ctrl+Shift+H Start Page                         Ctrl+= / Ctrl+- / Ctrl+0 zoom
-  F12 Web Inspector     Ctrl+Q quit
+  F12 Web Inspector     Ctrl+Q quit               F11 full screen
+  Ctrl+Tab / Ctrl+Shift+Tab next / previous tab
   On a Mac: ⌘ for Ctrl and ⌥ for Alt throughout, plus ⇧⌘R Reader, ⌘M minimize,
   ⌃M mute tab, ⌃Tab / ⌃⇧Tab next / previous tab, ⌃⌘F full screen, ⌥⌘I Web Inspector.
 
