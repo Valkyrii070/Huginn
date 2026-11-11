@@ -10,3 +10,5 @@ README.txt text eol=crlf
 *.mp4   binary
 *.bdic  binary
 *.zip   binary
+*.sh       text eol=lf
+*.command  text eol=lf

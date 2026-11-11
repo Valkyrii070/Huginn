@@ -4,16 +4,28 @@ Huginn - a Safari-style, privacy-first browser for Windows
 SafariQt at first; some files and folders still carry that name.)
 Free for non-commercial use: PolyForm Noncommercial License 1.0.0 (LICENSE.md).
 
-Install it: double-click "Install Huginn.bat" and press Install. That's all.
+Install it (Windows): double-click "Install Huginn.bat" and press Install. That's all.
             It installs for you only (no admin rights), by default to
-            %LOCALAPPDATA%\Programs\Huginn, with a desktop and Start menu shortcut and an
-            entry in Settings > Apps (Uninstall removes it cleanly). Switches in the
-            installer: Desktop shortcut, Start menu, and "Build H.264 video support" (off -
-            see Video formats; when it's on, Huginn starts that build in the background
-            the first time it opens). It takes a few minutes: it fetches a portable Python
-            and the browser engine (about 250 MB) and shows its progress as it goes.
+            %LOCALAPPDATA%\Programs\Huginn. Like Chrome and Firefox it always adds itself
+            to the Start menu, puts a shortcut on the desktop (a switch) and an entry in
+            Settings > Apps (Uninstall removes it cleanly). To keep it on the taskbar, right-
+            click its icon there once it's open and choose Pin to taskbar (Windows only lets
+            you do that, not apps). The other switch, "Build H.264 video support" (off), is
+            explained under Video formats; when it's on, Huginn starts that build in the
+            background the first time it opens. It takes a few minutes: it fetches a
+            portable Python and the browser engine (about 250 MB) and shows its progress.
             Running it again updates or repairs the copy you installed.
-Or run it:  double-click run.bat in this folder (no installing; sets itself up the first time)
+Install it (Mac): double-click "Install Huginn (Mac).command" (if macOS says it can't
+            check it: right-click it, Open, Open). It makes Huginn.app in Applications - so
+            Huginn is in Launchpad and Spotlight - and can keep it in the Dock. To remove it,
+            drag Huginn from Applications to the Bin. (macOS 11 or later.)
+Install it (Linux): in a terminal, bash "Install Huginn (Linux).sh". It puts Huginn in
+            your apps menu, and can add it to the desktop and (GNOME) pin it to the dock.
+            To remove it: ~/.local/share/huginn/installer/install.sh --uninstall
+            The Mac and Linux installers ask a few questions in the terminal, take a few
+            minutes, and get their own Python and engine; nothing is installed system-wide.
+            Video formats (the H.264 build) are Windows-only.
+Or run it:  double-click run.bat in this folder (Windows; no installing, sets itself up)
 
 The first time Huginn opens, a short welcome tour shows what makes it different and lets
 you pick a theme (or Auto, which follows the time of day), light or dark, which side the
@@ -21,7 +33,9 @@ window buttons go, the Start Page touches,
 and import your bookmarks. Page menu > More Tools > Welcome Tour brings it back.
 
 What's in this folder
-  Install Huginn.bat  installs Huginn (installer\install.ps1 is the installer window)
+  Install Huginn.bat  installs Huginn on Windows (installer\install.ps1 is the installer window)
+  Install Huginn (Mac).command, Install Huginn (Linux).sh
+                      install it on a Mac or Linux (installer/install.sh does the work)
   safari_browser.py   the browser (one file)
   readability.js      Reader's article finder (Mozilla Readability, Apache License 2.0)
   dictionaries\       the spell-check dictionary (en-US, from SCOWL / Kevin Atkinson; free licence)

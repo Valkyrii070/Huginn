@@ -296,10 +296,11 @@ $Xaml = @'
                   <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <StackPanel>
-                      <TextBlock Style="{StaticResource Title}" Text="Start menu"/>
-                      <TextBlock Style="{StaticResource Sub}" Text="Find Huginn by searching from Start"/>
+                      <TextBlock Style="{StaticResource Title}" Text="Start menu and taskbar"/>
+                      <TextBlock Style="{StaticResource Sub}"
+                                 Text="Huginn is always in Start. To keep it on the taskbar, right-click its icon there once it's open and choose Pin to taskbar."/>
                     </StackPanel>
-                    <ToggleButton x:Name="StartSwitch" Grid.Column="1" Style="{StaticResource Switch}" IsChecked="True" Margin="12,0,0,0"/>
+                    <TextBlock Grid.Column="1" Style="{StaticResource Sub}" Text="Always" VerticalAlignment="Center" Margin="12,0,2,0"/>
                   </Grid>
                 </Border>
                 <Border Style="{StaticResource Card}">
@@ -413,7 +414,7 @@ foreach ($k in $C.Keys) { $Xaml = $Xaml.Replace("@@$k@@", $C[$k]) }
 $window = [Windows.Markup.XamlReader]::Parse($Xaml)
 $ui = @{}
 foreach ($name in 'CloseDot', 'MinDot', 'Logo', 'Heading', 'Lead', 'PageOptions', 'PathText', 'ChangeButton',
-                  'DesktopSwitch', 'StartSwitch', 'VideoText', 'VideoSwitch', 'NoteText', 'CancelButton', 'InstallButton',
+                  'DesktopSwitch', 'VideoText', 'VideoSwitch', 'NoteText', 'CancelButton', 'InstallButton',
                   'PageProgress', 'Bar', 'DetailText', 'StopButton', 'PageDone', 'DoneList', 'CloseButton', 'OpenButton',
                   'PageFailed', 'FailText', 'LogButton', 'FailCloseButton', 'RetryButton', 'PageRemove', 'RemovePath',
                   'DataSwitch', 'KeepButton', 'RemoveButton') {
@@ -619,20 +620,19 @@ function Start-Install {
         return
     }
     $S.video = [bool]$ui.VideoSwitch.IsChecked
-    $S.links = @()
+    # Like Chrome and Firefox: always in the Start menu; on the desktop unless you said no.
+    $S.links = @(Join-Path ([Environment]::GetFolderPath('Programs')) 'Huginn.lnk')
     if ($ui.DesktopSwitch.IsChecked) { $S.links += Join-Path ([Environment]::GetFolderPath('Desktop')) 'Huginn.lnk' }
-    if ($ui.StartSwitch.IsChecked) { $S.links += Join-Path ([Environment]::GetFolderPath('Programs')) 'Huginn.lnk' }
 
     $ui.Heading.Text = 'Installing Huginn'
     $ui.Lead.Text = 'You can keep working; this takes a few minutes.'
     $ui.StepText1.Text = 'Copying Huginn'
     $ui.StepText2.Text = 'Getting Python'
     $ui.StepText3.Text = 'Getting the browser engine'
-    $ui.StepText4.Text = 'Adding shortcuts'
+    $ui.StepText4.Text = 'Adding Huginn to Start'
     $ui.StepText5.Text = 'H.264 video support'
     foreach ($i in 1..5) { Set-Step $i 'Wait' '' }
     if (-not $S.video) { Set-Step 5 'Wait' 'not chosen' }
-    if ($S.links.Count -eq 0) { Set-Step 4 'Wait' 'none chosen' }
     $S.fraction = 0.0
     $ui.Bar.BeginAnimation([Windows.FrameworkElement]::WidthProperty, $null)
     $ui.Bar.Width = 0
@@ -754,7 +754,7 @@ function Start-Shortcuts {
     $S.phase = 'shortcuts'
     if ($S.links.Count -eq 0) { Finish-Install; return }
     Set-Step 4 'Run' ''
-    Set-Detail 'Adding Huginn to your desktop and Start menu'
+    Set-Detail $(if ($S.links.Count -gt 1) { 'Adding Huginn to Start and your desktop' } else { 'Adding Huginn to Start' })
     $python = Join-Path $S.target 'python\python.exe'
     $quoted = ($S.links | ForEach-Object { '"' + $_ + '"' }) -join ' '
     $S.proc = Start-Hidden $python ('"' + (Join-Path $S.target 'safari_browser.py') + '" --install-shortcuts ' + $quoted) $S.target
@@ -785,11 +785,9 @@ function Finish-Install {
     $ui.Lead.Text = 'A quiet, private browser, set up and waiting.'
     $ui.DoneList.Children.Clear()
     $desktop = @($S.links | Where-Object { $_ -like '*Desktop*' }).Count -gt 0
-    $start = @($S.links | Where-Object { $_ -like '*Programs*' }).Count -gt 0
-    if ($desktop -and $start) { Add-DoneLine 'Open it from your desktop or the Start menu.' }
-    elseif ($desktop) { Add-DoneLine 'Open it from the shortcut on your desktop.' }
-    elseif ($start) { Add-DoneLine 'Open it from the Start menu.' }
-    else { Add-DoneLine ('Open it any time with run.bat in ' + $S.target + '.') }
+    if ($desktop) { Add-DoneLine 'Huginn is in your Start menu and on your desktop.' }
+    else { Add-DoneLine 'Huginn is in your Start menu: press Start and type Huginn.' }
+    Add-DoneLine 'To keep it on your taskbar: open it, right-click its icon on the taskbar and choose Pin to taskbar.' $true
     if (-not $S.update) { Add-DoneLine 'A short tour shows you around the first time it opens.' }
     if ($S.video) {
         Add-DoneLine ('H.264 video support starts building when Huginn opens. It runs in the background for a few ' +

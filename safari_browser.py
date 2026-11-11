@@ -2807,6 +2807,42 @@ def register_with_windows() -> bool:
     return True
 
 
+def export_icons(folder: str) -> int:
+    """For the macOS and Linux installers: Huginn's icon as huginn-<size>.png files (the app
+    bundle's .icns and the Linux menu icon are made from them). Returns the exit code."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QGuiApplication.instance() or QGuiApplication([sys.argv[0]])
+    icon = make_app_icon()
+    os.makedirs(folder, exist_ok=True)
+    ok = True
+    for size in (16, 32, 48, 64, 128, 256, 512, 1024):
+        pixmap = icon.pixmap(size, size)
+        if pixmap.width() != size:
+            pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+        ok = pixmap.save(os.path.join(folder, f"huginn-{size}.png")) and ok
+    del app
+    return 0 if ok else 1
+
+
+class HuginnApplication(QApplication):
+    """The application object. macOS hands links and files to an app as FileOpen events sent
+    to the application itself (clicking a link elsewhere with Huginn as the default browser,
+    or dropping a file on its icon), not as arguments. Only events addressed to the app
+    come through here - an app-wide event filter would see every event (slow, and it crashed)."""
+
+    file_opened = Signal(str)
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.FileOpen:
+            url = event.url()
+            target = url.toString() if url.isValid() and not url.isEmpty() else event.file()
+            if target:
+                self.file_opened.emit(target)
+            return True
+        return super().event(event)
+
+
 def install_shortcuts(links: list[str]) -> int:
     """For the installer (installer/install.ps1), once Python is set up: Huginn's desktop and
     Start menu shortcuts, carrying its taskbar identity. Returns the process exit code."""
@@ -2829,7 +2865,7 @@ def open_default_apps_settings() -> None:
 
 # --------------------------------------------------------------------------------------
 # Sharing with friends, and updates. "Share Huginn…" (page menu) makes a zip a friend
-# unpacks and installs with "Install Huginn.bat". "Publish Update…" makes an update (a zip plus
+# unpacks and installs with "Install Huginn" (Windows, Mac or Linux). "Publish Update…" makes an update (a zip plus
 # huginn-update.json) for you to upload to the address you chose; friends' copies check
 # it once a day. Every update is signed with a key only your PC has (Ed25519), and a
 # friend's copy installs only updates with that signature - a hacked upload site can't
@@ -2843,6 +2879,7 @@ RELEASE_KEY_FILE = "release-key.pem"
 UPDATE_CHECK_EVERY = 24 * 3600
 # What a package / update carries (paths relative to the browser's folder).
 PACKAGE_FILES = ("Install Huginn.bat", "installer/install.ps1",
+                 "Install Huginn (Mac).command", "Install Huginn (Linux).sh", "installer/install.sh",
                  "safari_browser.py", "run.bat", "setup.bat", "README.txt", "LICENSE.md", "Huginn.ico", "readability.js",
                  "dictionaries/en-US.bdic", "build-engine.bat", "restore-engine.bat", "engine/build_engine.py",
                  "engine/codec_check.py", "engine/codec_test.mp4", "engine/gnu_tools.zip",
@@ -2930,6 +2967,9 @@ def verify_manifest(manifest: dict, public_key: str) -> bool:
         return False
 
 
+EXECUTABLE_SUFFIXES = (".sh", ".command")         # the macOS / Linux installers: must stay runnable
+
+
 def _write_zip(target: str, folder: str, version: str, extra: dict[str, bytes]) -> list[str]:
     """Zips PACKAGE_FILES (those present) under a 'Huginn' folder; returns what went in."""
     import zipfile
@@ -2942,7 +2982,13 @@ def _write_zip(target: str, folder: str, version: str, extra: dict[str, bytes]) 
                 continue
             path = os.path.join(folder, *rel.split("/"))
             if os.path.isfile(path):
-                z.write(path, "Huginn/" + rel)
+                info = zipfile.ZipInfo.from_file(path, "Huginn/" + rel)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                if rel.endswith(EXECUTABLE_SUFFIXES):     # made on Windows, unzipped on a Mac: keep it runnable
+                    info.create_system = 3
+                    info.external_attr = (0o100755 & 0xFFFF) << 16
+                with open(path, "rb") as f:
+                    z.writestr(info, f.read())
                 added.append(rel)
         for rel, data in extra.items():
             z.writestr("Huginn/" + rel, data)
@@ -3008,6 +3054,8 @@ def install_update(zip_bytes: bytes, manifest: dict, public_key: str, folder: st
             staged.append((temp, target))
         for temp, target in staged:
             os.replace(temp, target)
+            if target.endswith(EXECUTABLE_SUFFIXES) and not IS_WINDOWS:
+                os.chmod(target, 0o755)
             written.append(os.path.relpath(target, folder).replace(os.sep, "/"))
     return written
 
@@ -7769,6 +7817,12 @@ def render_start_page(theme: dict, store: BrowserStore, tracking_prevention: boo
 # Its links (safariqt:welcome-set / welcome-do) only work from the welcome page itself.
 # --------------------------------------------------------------------------------------
 WELCOME_URL = f"{START_SCHEME}:welcome"
+PLATFORM = "windows" if IS_WINDOWS else ("mac" if sys.platform == "darwin" else "linux")
+PIN_TIPS = {      # the last slide: how to keep Huginn one click away (apps can't pin themselves)
+    "windows": "<div><b>Taskbar</b> · right-click Huginn's icon there and choose Pin to taskbar</div>",
+    "mac": "<div><b>Dock</b> · right-click Huginn's icon, then Options › Keep in Dock</div>",
+    "linux": "<div><b>Dock</b> · right-click Huginn's icon and choose Pin (or Add to Favorites)</div>",
+}
 WELCOME_LINKS = ("welcome-set", "welcome-do")
 
 _WX = 'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
@@ -8002,6 +8056,7 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
     <div><b>Ctrl+K</b> · find or do anything</div>
     <div><b>The page menu</b> (left of the address bar) · this site's privacy, zoom, reader and settings</div>
     <div><b>Ctrl+Alt+N</b> · a burner tab that leaves no trace</div>
+    $pin_tip
   </div>
   <button class="primary" onclick="hw.go('finish')">Start browsing</button>
   <p class="note building" id="building">Huginn is building H.264 video support in the background ·
@@ -8082,10 +8137,15 @@ def render_welcome_page(theme: dict, state: dict) -> str:
                  'and dusk, deep blue at night"><span class="swatch auto"></span><small>Auto</small></button>')
     variables = " ".join(f"{k}: {v};" for k, v in welcome_vars(theme).items() if k != "--scheme")
     icons = {f"i_{k}": v for k, v in WELCOME_ICONS.items()}
-    return WELCOME_PAGE.substitute(scheme="dark" if theme["dark"] else "light", vars=variables,
+    page = WELCOME_PAGE.substitute(scheme="dark" if theme["dark"] else "light", vars=variables,
                                    runes=html.escape(to_runes("Huginn")), realm_picks="".join(picks),
-                                   body_class="ripple" if state.get("ripple") else "",
-                                   state=json.dumps(state).replace("</", "<\\/"), **icons)
+                                   body_class="ripple" if state.get("ripple") else "", pin_tip=PIN_TIPS.get(
+                                       PLATFORM, ""), state=json.dumps(state).replace("</", "<\\/"), **icons)
+    if PLATFORM == "mac":                          # Qt turns Ctrl into Command there
+        page = (page.replace("<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd>", "<kbd>⌘</kbd><kbd>⌥</kbd><kbd>N</kbd>")
+                .replace("<kbd>Ctrl</kbd>+<kbd>K</kbd>", "<kbd>⌘</kbd><kbd>K</kbd>")
+                .replace("<b>Ctrl+K</b>", "<b>⌘K</b>").replace("<b>Ctrl+Alt+N</b>", "<b>⌘⌥N</b>"))
+    return page
 
 
 class StartPageSchemeHandler(QWebEngineUrlSchemeHandler):
@@ -11409,6 +11469,14 @@ def place_sheet(dialog: QWidget, window: QWidget) -> None:
     somewhere else first). On Windows 11 its native window gets rounded corners and a
     hairline border before it appears, too."""
     dialog.adjustSize()
+    layout = dialog.layout()
+    if layout is not None and layout.hasHeightForWidth():
+        # adjustSize measures wrapped text at the width it would like (often far wider than
+        # the sheet), so long text came out a few lines short and was cut off. Measure it
+        # again at the sheet's real width.
+        needed = layout.totalHeightForWidth(dialog.width())
+        if needed > dialog.height():
+            dialog.resize(dialog.width(), needed)
     anchor = window.mapToGlobal(QPoint(window.width() // 2, TOOLBAR_HEIGHT + 6))
     dialog.move(anchor.x() - dialog.width() // 2, anchor.y())
     if IS_WIN11:
@@ -15995,8 +16063,9 @@ class BrowserWindow(QWidget):
         """Makes the zip to give friends (on the Desktop)."""
         url = self.ask_text(
             "Share Huginn With Friends",
-            "This makes a zip on your Desktop for a friend to unpack and install with “Install Huginn.bat” (a "
-            "few clicks, no admin rights). Nothing of yours goes in it - no bookmarks, history, passwords or settings.\n\n"
+            "This makes a zip on your Desktop for a friend. They unzip it and open the installer for their "
+            "computer: Windows, Mac or Linux (no admin rights). Nothing of yours goes in it - no bookmarks, "
+            "history, passwords or settings.\n\n"
             "Optional, for updates: the web address where you'll upload updates (huginn-update.json), e.g. a "
             "GitHub release. Their copy checks it daily and only installs updates signed by this PC.",
             text=str(self.settings.value("updateUrl", "")), placeholder="https://…/huginn-update.json  (optional)",
@@ -16020,7 +16089,7 @@ class BrowserWindow(QWidget):
                 "the page menu when you've changed something.") if url else ""
         self.run_dialog(SheetDialog(self, "Package ready",
                                     f"“{os.path.basename(target)}” is on your Desktop. Send it to a friend: they "
-                                    f"unpack it and double-click “Install Huginn.bat”.{note}", cancel=None))
+                                    f"unzip it and open “Install Huginn” for Windows, Mac or Linux.{note}", cancel=None))
         return target
 
     def publish_update(self, *_) -> str | None:
@@ -19405,9 +19474,11 @@ def create_application(argv: list[str]) -> QApplication:
     if os.path.isdir(dictionaries):                     # read by WebEngine when it starts
         os.environ.setdefault("QTWEBENGINE_DICTIONARIES_PATH", dictionaries)
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QApplication(argv)
+    app = HuginnApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
+    if not IS_WINDOWS:
+        app.setDesktopFileName("huginn")       # Linux: matches huginn.desktop (icon, dock grouping)
     app.setApplicationDisplayName(BROWSER_NAME)  # Windows adds it to dialog titles ("Passwords - Huginn")
     app.setStyle(HuginnStyle())                 # Fusion (a predictable base for the style sheet) + Huginn's menus
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateMenu, False)     # menus are see-through cards: no Win32 fade
@@ -19582,6 +19653,8 @@ def main() -> int:
     args = sys.argv[1:]
     if args[:1] == ["--install-shortcuts"]:             # from the installer; no window
         return install_shortcuts(args[1:])
+    if args[:1] == ["--export-icon"] and len(args) >= 2:  # from the macOS / Linux installer
+        return export_icons(args[1])
     if len(args) >= 2 and args[0] == "--after":         # restarted after an update: let the old one close
         try:
             wait_for_process(int(args[1]))
@@ -19589,6 +19662,8 @@ def main() -> int:
             pass
         args = args[2:]
     app = create_application(sys.argv[:1] + args)
+    pending: list[str] = []                            # links macOS hands over while starting
+    app.file_opened.connect(pending.append)
     targets = launch_targets(args)
     instance = SingleInstance(app)
     if instance.send_to_running(targets):
@@ -19606,6 +19681,10 @@ def main() -> int:
         window.add_tab(QUrl(START_URL))
     window.first_run_welcome()
     window.show()
+    app.file_opened.disconnect()
+    app.file_opened.connect(lambda target: window.open_from_another_launch([target]))
+    for target in pending:
+        window.add_tab(url_from_user_input(target) or QUrl(START_URL))
     QTimer.singleShot(3000, window, window.start_requested_build)
 
     exit_code = app.exec()
