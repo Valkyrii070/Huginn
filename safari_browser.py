@@ -66,6 +66,7 @@ import tempfile
 import threading
 import time
 _STARTED = time.perf_counter()                  # for the performance probe's start-up timings
+STARTUP_MARKS: dict[str, float] = {}            # (probe) when each part of create_browser finished
 import unicodedata
 from array import array
 from collections import Counter
@@ -3097,10 +3098,22 @@ class HuginnApplication(QApplication):
         if event.type() == QEvent.Type.FileOpen:
             url = event.url()
             target = url.toString() if url.isValid() and not url.isEmpty() else event.file()
-            if target:
+            if target and not is_own_launch_path(event.file() or (url.toLocalFile() if url.isLocalFile() else "")):
                 self.file_opened.emit(target)
             return True
         return super().event(event)
+
+
+def is_own_launch_path(path: str) -> bool:
+    """macOS treats a program's path arguments as documents to open, so Huginn's own folder
+    or file (how Python was started) can arrive as a FileOpen; they're not for a tab."""
+    if not path:
+        return False
+    try:
+        real = os.path.realpath(path)
+        return real in (os.path.realpath(APP_DIR), os.path.realpath(os.path.abspath(__file__)))
+    except (OSError, ValueError):
+        return False
 
 
 def install_shortcuts(links: list[str]) -> int:
@@ -7374,12 +7387,13 @@ def process_usage() -> dict:
             "cpu_total_s": round(sum(r[3] for r in mine), 2)}
 
 
-def watch_startup(window: QWidget, main_started: float, app_ready: float) -> None:
+def watch_startup(window: QWidget, main_started: float, app_ready: float, steps: dict | None = None) -> None:
     """For the probe: how long Huginn took to start - Python and Qt loading, the window
     appearing, its first page, the filter lists - then its CPU and memory every 30 seconds."""
     shown = time.perf_counter()
     ms = lambda t: round((t - _STARTED) * 1000)               # noqa: E731 - from Huginn's first line
     perf_note("startup", step="window", imports_ms=ms(main_started), app_ms=ms(app_ready), window_ms=ms(shown),
+              steps_ms={k: ms(v) for k, v in {**STARTUP_MARKS, **(steps or {})}.items()}, argv=sys.argv[:8],
               **process_usage())
     view = window.current_view() if hasattr(window, "current_view") else None
     if view is not None:
@@ -20230,6 +20244,7 @@ def create_browser(app: QApplication, *, persistent: bool = True,
         purge_cookie_db(cookie_dir, {str(k) for k in keep})
     # A named profile keeps cookies, cache and logins; an unnamed one is off-the-record.
     profile = QWebEngineProfile(APP_NAME, app) if persistent else QWebEngineProfile(app)
+    STARTUP_MARKS["profile"] = time.perf_counter()
     if persistent:
         store.settings.setValue("cookieDbPath", profile.persistentStoragePath())
     configure_profile(profile)
@@ -20238,11 +20253,14 @@ def create_browser(app: QApplication, *, persistent: bool = True,
     # throwaway profiles, which never download anything).
     blocker.adblock = AdBlocker(os.path.join(data_dir, "filters") if persistent else None, app)
     profile.setUrlRequestInterceptor(blocker)
+    STARTUP_MARKS["blocker"] = time.perf_counter()
     favicons = FaviconCache(os.path.join(data_dir, "favicons"))
     fetcher = TouchIconFetcher(favicons, profile.httpUserAgent(), app)
+    STARTUP_MARKS["user agent"] = time.perf_counter()
     start_handler = StartPageSchemeHandler(store, favicons, fetcher, app)
     profile.installUrlSchemeHandler(START_SCHEME.encode(), start_handler)
     window = BrowserWindow(profile, store, start_handler, blocker)
+    STARTUP_MARKS["window"] = time.perf_counter()
     window.data_dir = data_dir
     window.muninn = Muninn(os.path.join(data_dir, MUNINN_FILE) if (persistent and data_dir) else None)
     window.game_mode = GameMode(window)
@@ -20259,6 +20277,7 @@ def create_browser(app: QApplication, *, persistent: bool = True,
         window.attach_engine(EngineManager(store.settings, app))
         QTimer.singleShot(60_000, window.engine.check_for_update)   # an H.264 engine checks for fixes daily
     window.attach_passwords(PasswordManager(os.path.join(data_dir, VAULT_FILE), store.settings, app))
+    STARTUP_MARKS["passwords"] = time.perf_counter()
     app.aboutToQuit.connect(window.passwords.icloud.disconnect)
     app.aboutToQuit.connect(window.muninn.close)
     window.typing_sounds = TypingSounds(store.settings, os.path.join(data_dir, "sounds"), app)
@@ -20382,16 +20401,20 @@ def main() -> int:
     pending: list[str] = []                            # links macOS hands over while starting
     app.file_opened.connect(pending.append)
     targets = launch_targets(args)
+    steps: dict[str, float] = {}
     instance = SingleInstance(app)
     if instance.send_to_running(targets):
         return 0                               # the running browser opened them
     instance.listen()
+    steps["instance"] = time.perf_counter()
     window = create_browser(app)
+    steps["browser"] = time.perf_counter()
     instance.received.connect(window.open_from_another_launch)
     restart = window.engine.take_restart() if window.engine is not None else None
     restored = bool(window.restore_tabs or restart) and window.restore_session()
     if not restored and restart:
         restored = window.restore_after_engine_restart(restart)
+    steps["restored"] = time.perf_counter()
     for target in targets:
         window.add_tab(url_from_user_input(target) or QUrl(START_URL))
     if not targets and not restored:
@@ -20399,7 +20422,10 @@ def main() -> int:
     window.first_run_welcome()
     window.show()
     if perf_probe_log() is not None:                   # a testing aid; normally off
-        watch_startup(window, main_started, app_ready)
+        steps["pending_opens"] = len(pending)
+        watch_startup(window, main_started, app_ready, {k: v for k, v in steps.items() if isinstance(v, float)})
+        if pending or targets:
+            perf_note("startup", step="opened", targets=targets[:4], pending=pending[:4])
     app.file_opened.disconnect()
     app.file_opened.connect(lambda target: window.open_from_another_launch([target]))
     for target in pending:

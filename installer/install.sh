@@ -92,7 +92,7 @@ desktop_folder() {
 if [ "$UNINSTALL" = 1 ]; then
   banner "Remove Huginn" "Huginn and its own Python go; your bookmarks, history and passwords stay unless you say otherwise."
   pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true            # started as a script (older launchers)
-  pkill -f "safari_browser\.main\(\)\) $TARGET" 2>/dev/null || true      # started by this installer's launcher
+  pkill -f "$VENV/bin/python -c import os, sys; sys.path.insert" 2>/dev/null || true   # this installer's launcher
   if [ "$OS" = Darwin ]; then
     rm -rf "$BUNDLE" && done_ "Removed $BUNDLE"
     say "  ${D}If Huginn was in your Dock, drag it out (it shows a question mark now).${N}"
@@ -254,8 +254,11 @@ export CFProcessPath="$(cd "$(dirname "$0")" && pwd)/Huginn"
 LOGS="$HOME/Library/Logs/Huginn"
 mkdir -p "$LOGS" 2>/dev/null || LOGS=/dev
 # Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
-exec "$HERE/python/bin/python" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); import safari_browser; sys.exit(safari_browser.main())' \
-  "$HERE/huginn" "$@" >"$LOGS/huginn.log" 2>&1
+# Its folder goes in the environment, not the arguments: macOS would treat a path argument as
+# a document to open.
+export HUGINN_DIR="$HERE/huginn"
+exec "$HERE/python/bin/python" -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
+  "$@" >"$LOGS/huginn.log" 2>&1
 LAUNCH
   chmod +x "$BUNDLE/Contents/MacOS/Huginn"
   cat > "$BUNDLE/Contents/Info.plist" <<PLIST
@@ -301,9 +304,8 @@ PLIST
     iconutil -c icns "$SET" -o "$BUNDLE/Contents/Resources/Huginn.icns" 2>/dev/null || true
   fi
   xattr -dr com.apple.quarantine "$BUNDLE" 2>/dev/null || true      # it's yours now: no "downloaded" warning
-  LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-  [ -x "$LSREG" ] && "$LSREG" -f "$BUNDLE" >/dev/null 2>&1 || true   # Launchpad and Spotlight see it now
-  touch "$BUNDLE"
+  # No lsregister -f or touch here: macOS registers the app by itself when it first opens
+  # (just below), and forcing it made that first window wait about 12 seconds.
   done_ "Huginn.app is in $APPS (Launchpad and Spotlight too)"
   if [ "$DOCK" = 1 ]; then
     if ! defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "$BUNDLE"; then
@@ -319,8 +321,9 @@ else
 #!/bin/sh
 # Starts Huginn (installed in $TARGET).
 # Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
-exec "$VENV/bin/python" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); import safari_browser; sys.exit(safari_browser.main())' \
-  "$TARGET" "\$@"
+export HUGINN_DIR="$TARGET"
+exec "$VENV/bin/python" -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
+  "\$@"
 LAUNCH
   chmod +x "$LAUNCHER"
   for s in 16 32 48 64 128 256 512; do
