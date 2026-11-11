@@ -174,6 +174,10 @@ DEVICE = "Mac" if IS_MAC else ("PC" if IS_WINDOWS else "computer")       # "kept
 SYSTEM_NAME = "macOS" if IS_MAC else ("Windows" if IS_WINDOWS else "System")
 MAC_BUNDLE_ID = "io.github.valkyrii070.huginn"      # Huginn.app, as installer/install.sh makes it
 READER_KEY = "Ctrl+Shift+R" if IS_MAC else "F9"     # Safari's Reader key on a Mac (F-keys need fn there)
+# On a Mac the window is a real macOS window (it resizes, snaps, goes full screen and has rounded
+# corners the Mac's way) whose content runs up under a see-through title bar (Qt 6.9+).
+MAC_NATIVE_FRAME = (IS_MAC and hasattr(Qt.WindowType, "ExpandedClientAreaHint")
+                    and os.environ.get("SAFARIQT_QT_FRAME") != "1")
 
 DEFAULT_BOOKMARKS = [
     {"title": "Apple", "url": "https://www.apple.com/"},
@@ -2805,6 +2809,34 @@ def mac_url_handler(scheme: str) -> str | None:
     ok = cf.CFStringGetCString(handler, buffer, len(buffer), _CF_UTF8)
     cf.CFRelease(handler)
     return buffer.value.decode("utf-8", "replace") if ok else None
+
+
+def mac_hide_window_buttons(view_id: int) -> bool:
+    """Hides macOS's own red/yellow/green buttons and title on Huginn's window (Huginn draws
+    its own buttons, Mac or Windows style, in the toolbar). view_id is the window's winId()."""
+    if not IS_MAC or not view_id:
+        return False
+    try:
+        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = (ctypes.c_char_p,)
+        address = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+        get = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(address)
+        get_with = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong)(address)
+        set_bool = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)(address)
+        set_long = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)(address)
+        sel = objc.sel_registerName
+        window = get(view_id, sel(b"window"))
+        if not window:
+            return False
+        for kind in (0, 1, 2):                     # NSWindowCloseButton, MiniaturizeButton, ZoomButton
+            button = get_with(window, sel(b"standardWindowButton:"), kind)
+            if button:
+                set_bool(button, sel(b"setHidden:"), True)
+        set_long(window, sel(b"setTitleVisibility:"), 1)               # NSWindowTitleHidden
+        return True
+    except (OSError, AttributeError, ValueError, TypeError):
+        return False
 
 
 def mac_choose_default_browser() -> bool:
@@ -14789,10 +14821,17 @@ class BrowserWindow(QWidget):
         self._native_frame = WindowsFrame(self) if (IS_WINDOWS and os.environ.get("SAFARIQT_QT_FRAME") != "1") else None
 
         # Frameless window. On Windows, WindowsFrame restores the native frame behaviour;
-        # elsewhere the min/max/system-menu hints keep taskbar minimize working.
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
-                            | Qt.WindowType.WindowMinMaxButtonsHint
-                            | Qt.WindowType.WindowSystemMenuHint)
+        # elsewhere the min/max/system-menu hints keep taskbar minimize working. On a Mac it's
+        # a real window with the content under a see-through title bar (MAC_NATIVE_FRAME).
+        self._mac_native_frame = MAC_NATIVE_FRAME
+        if self._mac_native_frame:
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.ExpandedClientAreaHint
+                                | Qt.WindowType.NoTitleBarBackgroundHint)
+            self.setAttribute(Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False)
+        else:
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+                                | Qt.WindowType.WindowMinMaxButtonsHint
+                                | Qt.WindowType.WindowSystemMenuHint)
         styled(self, "BrowserWindow")
         self.setWindowTitle(self._title_suffix())
         self.setWindowIcon(self.app_icon)
@@ -15259,6 +15298,9 @@ class BrowserWindow(QWidget):
             self.apply_theme()
 
     def _apply_native_effects(self) -> None:
+        if self._mac_native_frame:
+            mac_hide_window_buttons(int(self.winId()))
+            return
         hwnd = int(self.winId())
         set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if self.theme["dark"] else 0)
         if IS_WIN11:
@@ -19657,9 +19699,10 @@ class BrowserWindow(QWidget):
             self._edge_cursor_active = True
 
     def eventFilter(self, obj, event) -> bool:
-        # Edge resizing when Windows' native frame isn't in use (other platforms). The filter
-        # sits on the QWindow, which sees mouse events before any child widget does.
-        if isinstance(obj, QWindow):
+        # Edge resizing when Windows' native frame isn't in use (other platforms; a Mac's own
+        # window resizes itself). The filter sits on the QWindow, which sees mouse events
+        # before any child widget does.
+        if isinstance(obj, QWindow) and not self._mac_native_frame:
             kind = event.type()
             if kind == QEvent.Type.MouseMove and event.buttons() == Qt.MouseButton.NoButton:
                 self._update_edge_cursor(self._edges_at(event.position()))
@@ -19701,7 +19744,7 @@ class BrowserWindow(QWidget):
 
     def _update_frame_margins(self) -> None:
         # Windows draws the edge itself (shadow / Win11 border); elsewhere draw a 1px frame.
-        native_edge = self._native_frame is not None or IS_WIN11
+        native_edge = self._native_frame is not None or IS_WIN11 or self._mac_native_frame
         edge = 0 if (native_edge or self.isMaximized() or self.isFullScreen()) else 1
         self.layout().setContentsMargins(edge, edge, edge, edge)
 
@@ -19731,6 +19774,8 @@ class BrowserWindow(QWidget):
         if hasattr(self, "toolbar"):
             if event.type() == QEvent.Type.WindowStateChange:
                 self._update_frame_margins()
+                if self._mac_native_frame:            # in case macOS put its buttons back
+                    QTimer.singleShot(0, self._apply_native_effects)
                 self.toolbar.lights.set_maximized(self.isMaximized())
                 self.toolbar.window_buttons.set_maximized(self.isMaximized())
                 self._update_edge_cursor(Qt.Edge(0))
