@@ -2,24 +2,34 @@
 
 <h1 align="center">Huginn</h1>
 
-<p align="center"><b>A quiet, private, Safari-style browser for Windows.</b><br>
+<p align="center"><b>A quiet, private, Safari-style browser for Windows and Mac.</b><br>
 Named for Odin's raven of thought, which flies over the world each day and keeps what it sees to itself.</p>
 
 <p align="center"><img src="docs/start-dark.png" width="820" alt="Huginn's Start Page in dark mode"></p>
 
 ## Install
 
-1. Download the zip from the [latest release](https://github.com/Valkyrii070/huginn/releases/latest) and unzip it.
-2. Double-click **Install Huginn.bat** and press **Install**.
+Download the zip from the [latest release](https://github.com/Valkyrii070/huginn/releases/latest) and unzip it.
 
-That's it. It installs for you only, with no admin rights, to `%LOCALAPPDATA%\Programs\Huginn`, and adds desktop
-and Start menu shortcuts plus an entry in **Settings › Apps** for a clean uninstall. Setup takes a few minutes
-because it fetches a portable Python and the browser engine (about 250 MB). Needs 64-bit Windows 10 or 11.
+| | |
+|---|---|
+| **Windows 10 / 11** | Double-click **Install Huginn.bat**, press **Install**. |
+| **macOS 11+** | Double-click **Install Huginn (Mac).command**. The first time, macOS won't open it because it isn't from the App Store: click **Done**, then **System Settings › Privacy & Security › Open Anyway** (macOS 14 and older: right-click it and choose **Open**). |
+| **Linux** | In a terminal: `bash "Install Huginn (Linux).sh"` |
 
-The installer has one optional switch, **Build H.264 video support**, off by default. Huginn's standard engine
-plays YouTube (VP9/AV1), but Twitch, Reddit, X and many news sites use H.264. With the switch on, Huginn compiles
-its own engine with H.264 and AAC in the background after install. That takes a few hours at low priority and
-needs about 60 GB free while it works. You can also start it any time later from **Privacy & Security › Video**.
+Each one installs for you only, with no admin password, and fetches its own Python and the browser engine
+(a few hundred MB, a few minutes). Huginn ends up where your other browsers are:
+- **Windows:** in the Start menu, on the desktop, and in **Settings › Apps** for a clean uninstall. To keep it
+  on the taskbar, right-click its icon there and choose *Pin to taskbar*.
+- **macOS:** `Huginn.app` in Applications, so it's in Launchpad and Spotlight, and in the Dock. It has the
+  usual Mac menu bar and ⌘ shortcuts, and can be your default browser.
+- **Linux:** your apps menu, optionally the desktop and the GNOME dock.
+
+The Windows installer has one optional switch, **Build H.264 video support**, off by default. Huginn's standard
+engine plays YouTube (VP9/AV1), but Twitch, Reddit, X and many news sites use H.264. With the switch on, Huginn
+compiles its own engine with H.264 and AAC in the background after install. That takes a few hours at low
+priority and needs about 60 GB free while it works. You can also start it any time later from
+**Privacy & Security › Video**. (Windows only.)
 
 Updates arrive by themselves: copies check this repository's releases once a day and install only updates
 signed with the publisher's key.

@@ -23,12 +23,19 @@ for arg in "$@"; do
   esac
 done
 [ -t 0 ] || ASK=0                                  # no terminal to answer in: take the defaults
+# On a Mac it's double-clicked like any installer, so it asks nothing: Huginn goes in Applications
+# and the Dock (--no-dock to skip that) and opens when it's ready.
+[ "$OS" = Darwin ] && ASK=0
 
 # ------------------------------------------------------------------------------------- look
 if [ -t 1 ]; then
   B=$'\033[1m'; D=$'\033[2m'; A=$'\033[38;5;79m'; R=$'\033[38;5;203m'; N=$'\033[0m'
 else
   B=""; D=""; A=""; R=""; N=""
+fi
+if [ "$OS" = Darwin ]; then                        # a copy of what it said, for when something goes wrong
+  LOGS="$HOME/Library/Logs/Huginn"
+  mkdir -p "$LOGS" 2>/dev/null && exec > >(tee "$LOGS/$([ "$UNINSTALL" = 1 ] && echo uninstall || echo install).log") 2>&1
 fi
 say()  { printf '%s\n' "$*"; }
 step() { printf '  %s•%s %s\n' "$A" "$N" "$*"; }
@@ -42,9 +49,9 @@ ask() {                                            # ask "Question" default(y/n)
   reply="$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')"
   if [ -z "$reply" ]; then [ "$def" = y ]; else [ "${reply:0:1}" = y ]; fi
 }
-finish() {                                         # a double-clicked .command keeps its window open
+finish() {                                         # a failed .command keeps its window open to read
   local code="${1:-0}"
-  if [ "$OS" = Darwin ] && [ -t 0 ] && [ "${HUGINN_NO_PAUSE:-}" = "" ]; then
+  if [ "$OS" = Darwin ] && [ "$code" != 0 ] && [ -t 0 ] && [ "${HUGINN_NO_PAUSE:-}" = "" ]; then
     printf '\n  %sPress Return to close this window.%s' "$D" "$N"; read -r _ || true
   fi
   exit "$code"
@@ -120,7 +127,7 @@ if [ "$OS" = Darwin ]; then
 else
   banner "Install Huginn" "A quiet, private browser, named for Odin's raven of thought. It goes in your apps menu."
 fi
-say "  ${D}Takes a few minutes: it fetches its own Python and the browser engine (about 250 MB).${N}"
+say "  ${D}Takes a few minutes: it fetches its own Python and the browser engine (a few hundred MB).${N}"
 say "  ${D}For you only, no administrator password. Remove it any time (see README.txt).${N}"
 say ""
 if [ "$OS" = Darwin ]; then
@@ -138,6 +145,7 @@ say ""
 # 1. Huginn's files (not anything a copy of Huginn made while running)
 step "Copying Huginn"
 mkdir -p "$TARGET"
+chmod -R u+w "$TARGET" 2>/dev/null || true         # installing again: some files came read-only
 if [ "$(cd "$SOURCE" && pwd -P)" != "$(cd "$TARGET" && pwd -P)" ]; then
   (cd "$SOURCE" && tar cf - --exclude=./python --exclude='./.python' --exclude='__pycache__' --exclude=./test_out \
       --exclude=./engine/standard-engine --exclude='*.log' --exclude=./engine/installed.json \
@@ -182,7 +190,7 @@ fi
 done_ "Python ready"
 
 # 3. The browser engine (PySide6 / Qt WebEngine) and the password manager's encryption library
-step "Getting the browser engine (about 250 MB)"
+step "Getting the browser engine (a few hundred MB)"
 if [ -n "$UV" ]; then
   "$UV" pip install --python "$VENV/bin/python" --upgrade PySide6 cryptography \
     || fail "Couldn't download the browser engine. Check the internet connection, then try again."
@@ -204,9 +212,13 @@ if [ "$OS" = Darwin ]; then
   mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
   cat > "$BUNDLE/Contents/MacOS/Huginn" <<'LAUNCH'
 #!/bin/bash
-# Starts Huginn with the Python inside this app.
+# Starts Huginn with the Python inside this app. CFProcessPath tells macOS this Python is
+# Huginn.app (its name in the menu bar, its icon and place in the Dock, its permissions).
 HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
-exec "$HERE/python/bin/python" "$HERE/huginn/safari_browser.py" "$@"
+export CFProcessPath="$(cd "$(dirname "$0")" && pwd)/Huginn"
+LOGS="$HOME/Library/Logs/Huginn"
+mkdir -p "$LOGS" 2>/dev/null || LOGS=/dev
+exec "$HERE/python/bin/python" "$HERE/huginn/safari_browser.py" "$@" >"$LOGS/huginn.log" 2>&1
 LAUNCH
   chmod +x "$BUNDLE/Contents/MacOS/Huginn"
   cat > "$BUNDLE/Contents/Info.plist" <<PLIST
@@ -224,6 +236,10 @@ LAUNCH
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSCameraUsageDescription</key><string>A website you're on wants to use your camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>A website you're on wants to use your microphone.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>A website you're on wants to know where you are.</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>CFBundleURLTypes</key>
   <array><dict>
@@ -320,7 +336,7 @@ rm -rf "$ICONDIR"
 say ""
 say "  ${B}Huginn is ready.${N} A short tour shows you around the first time it opens."
 if [ "$OS" = Darwin ]; then
-  say "  ${D}Open it from Launchpad, Spotlight (⌘ Space, Huginn) or Applications.${N}"
+  say "  ${D}Open it from the Dock, Launchpad, Spotlight (⌘ Space, Huginn) or Applications.${N}"
   say "  ${D}To remove it: drag Huginn from Applications to the Bin (your bookmarks stay).${N}"
 else
   say "  ${D}Open it from your apps menu$( [ "$DESKTOP" = 1 ] && printf ' or the desktop'), or type huginn in a terminal.${N}"
@@ -329,6 +345,11 @@ fi
 say "  ${D}The folder you unzipped isn't needed any more.${N}"
 say ""
 if ask "Open Huginn now?" y; then
-  if [ "$OS" = Darwin ]; then open "$BUNDLE"; else (nohup "$LAUNCHER" >/dev/null 2>&1 &); fi
+  if [ "$OS" = Darwin ]; then
+    open "$BUNDLE"
+    say "  ${D}Opening Huginn. You can close this window.${N}"; say ""
+  else
+    (nohup "$LAUNCHER" >/dev/null 2>&1 &)
+  fi
 fi
 finish 0

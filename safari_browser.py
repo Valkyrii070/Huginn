@@ -48,6 +48,7 @@ import io
 import secrets
 import uuid
 import configparser
+import ctypes
 import datetime
 import itertools
 import json
@@ -78,7 +79,8 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import (
-    QAction, QActionGroup, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QFontMetricsF, QGuiApplication,
+    QAction, QActionGroup, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QFontMetricsF,
+    QGuiApplication,
     QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
     QPolygonF, QShortcut, QWindow,
 )
@@ -95,7 +97,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
     QFileDialog, QFileIconProvider, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMenu, QProgressBar, QProxyStyle, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyleFactory,
+    QMenu, QMenuBar, QProgressBar, QProxyStyle, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyleFactory,
     QPlainTextEdit, QSizeGrip, QSplitter, QTimeEdit, QStyleOptionMenuItem, QStyleOptionTab, QStyleOptionViewItem, QStyledItemDelegate, QTabBar, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QWidgetAction,
 )
@@ -167,6 +169,11 @@ WEEK = 7 * 24 * 3600
 
 IS_WINDOWS = sys.platform == "win32"
 IS_WIN11 = IS_WINDOWS and sys.getwindowsversion().build >= 22000
+IS_MAC = sys.platform == "darwin"
+DEVICE = "Mac" if IS_MAC else ("PC" if IS_WINDOWS else "computer")       # "kept on this Mac"
+SYSTEM_NAME = "macOS" if IS_MAC else ("Windows" if IS_WINDOWS else "System")
+MAC_BUNDLE_ID = "io.github.valkyrii070.huginn"      # Huginn.app, as installer/install.sh makes it
+READER_KEY = "Ctrl+Shift+R" if IS_MAC else "F9"     # Safari's Reader key on a Mac (F-keys need fn there)
 
 DEFAULT_BOOKMARKS = [
     {"title": "Apple", "url": "https://www.apple.com/"},
@@ -887,6 +894,10 @@ QScrollBar::handle:horizontal:hover { background: $scroll_handle_hover; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """)
+if IS_MAC:     # a point is 1 px on a Mac but 1.33 px on Windows, where these sizes were chosen
+    QSS_TEMPLATE = Template(re.sub(r"font-size: *([0-9.]+)pt",
+                                   lambda m: f"font-size: {float(m.group(1)) * 4 / 3:.2f}pt", QSS_TEMPLATE.template)
+                            .replace('"Cascadia Mono", Consolas, monospace', 'Menlo, monospace'))
 
 _RGBA_RE = re.compile(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
 
@@ -1568,6 +1579,31 @@ def without_credentials(url: QUrl) -> QUrl:
 def plain_tooltip(text: str) -> str:
     """Tooltips auto-detect HTML; escape page-controlled text so it shows literally."""
     return f"<qt>{html.escape(text)}</qt>"
+
+
+_MAC_MODIFIERS = (("Meta", "⌃"), ("Alt", "⌥"), ("Shift", "⇧"), ("Ctrl", "⌘"))    # Apple's order
+_MAC_KEY_NAMES = {"Left": "←", "Right": "→", "Up": "↑", "Down": "↓", "Delete": "⌫", "Del": "⌫",
+                  "Backspace": "⌫", "PgUp": "Page Up", "PgDown": "Page Down"}
+_SHORTCUT = re.compile(r"(?<![\w+])((?:(?:Ctrl|Alt|Shift|Meta)\+)+)"
+                       r"(F\d{1,2}\b|Left\b|Right\b|Up\b|Down\b|Home\b|End\b|Tab\b|Esc\b|Delete\b|Del\b|"
+                       r"Backspace\b|PgUp\b|PgDown\b|[Cc]lick\b|[A-Za-z0-9](?![a-z])|[^\sA-Za-z0-9])")
+
+
+def shortcut_text(text: str, mac: bool = IS_MAC) -> str:
+    """Shortcuts written the way the computer's own apps write them. Qt turns Ctrl into the
+    Command key on a Mac, so "New Tab (Ctrl+T)" reads "New Tab (⌘T)" there."""
+    if not mac or "+" not in text:
+        return text
+
+    def one(m: re.Match) -> str:
+        mods = m.group(1).split("+")[:-1]
+        key = m.group(2)
+        symbols = "".join(sym for name, sym in _MAC_MODIFIERS if name in mods)
+        if key.lower() == "click":
+            return f"{symbols}-click"
+        return symbols + _MAC_KEY_NAMES.get(key, key.upper() if len(key) == 1 else key)
+
+    return _SHORTCUT.sub(one, text)
 
 
 # Qt's own command-line options that take a value (their values aren't URLs to open).
@@ -2412,7 +2448,50 @@ FIREFOX_BROWSERS = (
     ("Waterfox", "APPDATA", ("Waterfox",)),
     ("Zen", "APPDATA", ("zen",)),
 )
+CHROMIUM_BROWSERS_MAC = (                 # below ~/Library/Application Support
+    ("Chrome", ("Google", "Chrome")),
+    ("Edge", ("Microsoft Edge",)),
+    ("Brave", ("BraveSoftware", "Brave-Browser")),
+    ("Arc", ("Arc", "User Data")),
+    ("Vivaldi", ("Vivaldi",)),
+    ("Chromium", ("Chromium",)),
+    ("Opera", ("com.operasoftware.Opera",)),
+)
+FIREFOX_BROWSERS_MAC = (("Firefox", ("Firefox",)), ("LibreWolf", ("librewolf",)), ("Waterfox", ("Waterfox",)),
+                        ("Zen", ("zen",)))
+CHROMIUM_BROWSERS_LINUX = (               # below ~/.config
+    ("Chrome", ("google-chrome",)),
+    ("Edge", ("microsoft-edge",)),
+    ("Brave", ("BraveSoftware", "Brave-Browser")),
+    ("Vivaldi", ("vivaldi",)),
+    ("Chromium", ("chromium",)),
+    ("Opera", ("opera",)),
+)
+FIREFOX_BROWSERS_LINUX = (                # below the home folder
+    ("Firefox", (".mozilla", "firefox")),
+    ("Firefox", ("snap", "firefox", "common", ".mozilla", "firefox")),
+    ("LibreWolf", (".librewolf",)),
+    ("Waterfox", (".waterfox",)),
+    ("Zen", (".zen",)),
+)
 _WEBKIT_EPOCH = 11644473600               # seconds from 1601-01-01 to 1970-01-01
+
+
+def browser_data_folders(env: dict, platform: str | None = None) -> tuple[list, list]:
+    """Where other browsers keep their profiles on this kind of computer: ([(name, folder)]
+    for Chromium-based browsers, the same for Firefox-based ones)."""
+    platform = platform or PLATFORM
+    if platform == "windows" or "LOCALAPPDATA" in env or "APPDATA" in env:
+        return ([(n, os.path.join(env[v], *p)) for n, v, p in CHROMIUM_BROWSERS if env.get(v)],
+                [(n, os.path.join(env[v], *p)) for n, v, p in FIREFOX_BROWSERS if env.get(v)])
+    home = env.get("HOME") or os.path.expanduser("~")
+    if platform == "mac":
+        base = os.path.join(home, "Library", "Application Support")
+        return ([(n, os.path.join(base, *p)) for n, p in CHROMIUM_BROWSERS_MAC],
+                [(n, os.path.join(base, *p)) for n, p in FIREFOX_BROWSERS_MAC])
+    config = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return ([(n, os.path.join(config, *p)) for n, p in CHROMIUM_BROWSERS_LINUX],
+            [(n, os.path.join(home, *p)) for n, p in FIREFOX_BROWSERS_LINUX])
 
 
 class BrowserImportError(Exception):
@@ -2423,16 +2502,13 @@ def importable_url(url: str) -> bool:
     return isinstance(url, str) and url.startswith(("http://", "https://", "file:///")) and len(url) < 4096
 
 
-def find_import_sources(env: dict | None = None) -> list[dict]:
-    """Browsers (and their profiles) on this PC with bookmarks or history to import:
+def find_import_sources(env: dict | None = None, platform: str | None = None) -> list[dict]:
+    """Browsers (and their profiles) on this computer with bookmarks or history to import:
     [{"browser", "label", "kind": "chromium" | "firefox", "path"}]."""
     env = os.environ if env is None else env
     sources: list[dict] = []
-    for name, var, parts in CHROMIUM_BROWSERS:
-        base = env.get(var)
-        if not base:
-            continue
-        root = os.path.join(base, *parts)
+    chromium, firefox = browser_data_folders(env, platform)
+    for name, root in chromium:
         if not os.path.isdir(root):
             continue
         names = {}
@@ -2451,11 +2527,7 @@ def find_import_sources(env: dict | None = None) -> list[dict]:
             label = f"{name} — {profile}" if len(found) > 1 and profile else (
                 f"{name} — {os.path.basename(path)}" if len(found) > 1 else name)
             sources.append({"browser": name, "label": label, "kind": "chromium", "path": path})
-    for name, var, parts in FIREFOX_BROWSERS:
-        base = env.get(var)
-        if not base:
-            continue
-        root = os.path.join(base, *parts)
+    for name, root in firefox:
         profiles = []
         ini = configparser.ConfigParser(interpolation=None)
         try:
@@ -2686,10 +2758,72 @@ def default_browser_progid() -> str | None:
 
 
 def is_default_browser() -> bool | None:
-    """True / False, or None where there's no such thing (not Windows)."""
+    """True / False, or None where it can't be (a Mac copy run from source; Linux)."""
+    if IS_MAC:
+        if mac_app_bundle() is None:
+            return None
+        try:
+            return (mac_url_handler("https") or "").lower() == MAC_BUNDLE_ID
+        except (OSError, AttributeError):
+            return None
     if not IS_WINDOWS:
         return None
     return default_browser_progid() == BROWSER_PROGID_URL
+
+
+def _mac_launch_services():
+    """CoreFoundation and Launch Services (macOS's record of which app opens what)."""
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    ls = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32)
+    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFStringGetCString.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32)
+    cf.CFRelease.restype = None
+    cf.CFRelease.argtypes = (ctypes.c_void_p,)
+    ls.LSCopyDefaultHandlerForURLScheme.restype = ctypes.c_void_p
+    ls.LSCopyDefaultHandlerForURLScheme.argtypes = (ctypes.c_void_p,)
+    ls.LSSetDefaultHandlerForURLScheme.restype = ctypes.c_int32
+    ls.LSSetDefaultHandlerForURLScheme.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    return cf, ls
+
+
+_CF_UTF8 = 0x08000100
+
+
+def mac_url_handler(scheme: str) -> str | None:
+    """The bundle id of the app that opens scheme: links on this Mac."""
+    cf, ls = _mac_launch_services()
+    name = cf.CFStringCreateWithCString(None, scheme.encode(), _CF_UTF8)
+    try:
+        handler = ls.LSCopyDefaultHandlerForURLScheme(name)
+    finally:
+        cf.CFRelease(name)
+    if not handler:
+        return None
+    buffer = ctypes.create_string_buffer(512)
+    ok = cf.CFStringGetCString(handler, buffer, len(buffer), _CF_UTF8)
+    cf.CFRelease(handler)
+    return buffer.value.decode("utf-8", "replace") if ok else None
+
+
+def mac_choose_default_browser() -> bool:
+    """Asks macOS to open web links with Huginn.app. macOS then asks you to confirm (Use
+    "Huginn" / Keep the other browser), so nothing changes behind your back."""
+    if not IS_MAC or mac_app_bundle() is None:
+        return False
+    try:
+        cf, ls = _mac_launch_services()
+    except OSError:
+        return False
+    bundle = cf.CFStringCreateWithCString(None, MAC_BUNDLE_ID.encode(), _CF_UTF8)
+    ok = True
+    for scheme in ("http", "https"):
+        name = cf.CFStringCreateWithCString(None, scheme.encode(), _CF_UTF8)
+        ok = ls.LSSetDefaultHandlerForURLScheme(name, bundle) == 0 and ok
+        cf.CFRelease(name)
+    cf.CFRelease(bundle)
+    return ok
 
 
 def start_menu_shortcut_path() -> str:
@@ -2858,7 +2992,13 @@ def install_shortcuts(links: list[str]) -> int:
 
 
 def open_default_apps_settings() -> None:
-    """Windows' Default apps page, opened at Huginn where Windows supports that."""
+    """Windows' Default apps page, opened at Huginn where Windows supports that. (On a Mac,
+    macOS's own question instead.)"""
+    if IS_MAC:
+        mac_choose_default_browser()
+        return
+    if not IS_WINDOWS:
+        return
     if not QDesktopServices.openUrl(QUrl(f"ms-settings:defaultapps?registeredAppUser={BROWSER_REG_NAME}")):
         QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))
 
@@ -3136,10 +3276,22 @@ class Updater(QObject):
         self.ready.emit(self.installed, str(manifest.get("notes", ""))[:300])
 
 
+def mac_app_bundle(folder: str = APP_DIR) -> str | None:
+    """Huginn.app, when this copy runs inside one (as the Mac installer sets it up)."""
+    if sys.platform != "darwin":
+        return None
+    path = os.path.abspath(folder)
+    i = path.rfind(".app" + os.sep + "Contents" + os.sep)
+    return path[:i + 4] if i >= 0 else None
+
+
 def restart_browser(after_pid: int, extra_args: list[str] | None = None) -> bool:
     """Starts Huginn again once this process (after_pid) has closed."""
     program, arguments = browser_launch_command()
     args = [program, os.path.abspath(__file__), "--after", str(after_pid)] + (extra_args or [])
+    bundle = mac_app_bundle(APP_DIR)
+    if bundle:                              # through the app, so it's Huginn in the Dock again
+        args = ["/usr/bin/open", "-n", "-a", bundle, "--args", "--after", str(after_pid)] + (extra_args or [])
     try:
         flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if IS_WINDOWS else 0
         subprocess.Popen(args, close_fds=True, creationflags=flags, cwd=APP_DIR)
@@ -6242,6 +6394,8 @@ READER_TOGGLE_JS = r"""(function (prefs, themes) {
   } };
   return 'open';
 })(%PREFS%, %THEMES%)"""
+if IS_MAC:
+    READER_TOGGLE_JS = READER_TOGGLE_JS.replace("(F9 or Esc)", "(⇧⌘R or Esc)")
 
 
 class ReaderBridge(QObject):
@@ -7820,7 +7974,7 @@ WELCOME_URL = f"{START_SCHEME}:welcome"
 PLATFORM = "windows" if IS_WINDOWS else ("mac" if sys.platform == "darwin" else "linux")
 PIN_TIPS = {      # the last slide: how to keep Huginn one click away (apps can't pin themselves)
     "windows": "<div><b>Taskbar</b> · right-click Huginn's icon there and choose Pin to taskbar</div>",
-    "mac": "<div><b>Dock</b> · right-click Huginn's icon, then Options › Keep in Dock</div>",
+    "mac": "<div><b>Dock</b> · Huginn is there already; drag it out if you'd rather not</div>",
     "linux": "<div><b>Dock</b> · right-click Huginn's icon and choose Pin (or Add to Favorites)</div>",
 }
 WELCOME_LINKS = ("welcome-set", "welcome-do")
@@ -8142,9 +8296,15 @@ def render_welcome_page(theme: dict, state: dict) -> str:
                                    body_class="ripple" if state.get("ripple") else "", pin_tip=PIN_TIPS.get(
                                        PLATFORM, ""), state=json.dumps(state).replace("</", "<\\/"), **icons)
     if PLATFORM == "mac":                          # Qt turns Ctrl into Command there
-        page = (page.replace("<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd>", "<kbd>⌘</kbd><kbd>⌥</kbd><kbd>N</kbd>")
+        page = (page.replace("<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd>", "<kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd>")
                 .replace("<kbd>Ctrl</kbd>+<kbd>K</kbd>", "<kbd>⌘</kbd><kbd>K</kbd>")
-                .replace("<b>Ctrl+K</b>", "<b>⌘K</b>").replace("<b>Ctrl+Alt+N</b>", "<b>⌘⌥N</b>"))
+                .replace("<kbd>F9</kbd>", "<kbd>⇧</kbd><kbd>⌘</kbd><kbd>R</kbd>")
+                .replace("<b>Ctrl+K</b>", "<b>⌘K</b>").replace("<b>Ctrl+Alt+N</b>", "<b>⌥⌘N</b>"))
+    if PLATFORM != "windows":
+        device = "Mac" if PLATFORM == "mac" else "computer"
+        page = (page.replace("this PC", f"this {device}").replace("your PC", f"your {device}")
+                .replace("<small>Match Windows</small>",
+                         "<small>Match Mac</small>" if PLATFORM == "mac" else "<small>Match System</small>"))
     return page
 
 
@@ -8528,7 +8688,7 @@ def capsule_button(icon_name: str, tooltip: str, width: int = 34, icon_size: int
     button.setFixedSize(width, CAPSULE_HEIGHT - 4)
     button.setIconSize(QSize(icon_size, icon_size))
     button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    button.setToolTip(tooltip)
+    button.setToolTip(shortcut_text(tooltip))
     return button
 
 
@@ -8654,7 +8814,7 @@ class AddressField(QWidget):
         self.page_button = self._field_button("Page menu: privacy, zoom and settings")
         self.edit = AddressEdit()
         self.audio_button = self._field_button("Mute this tab")
-        self.reader_button = self._field_button("Show Reader (F9)")
+        self.reader_button = self._field_button(f"Show Reader ({READER_KEY})")
         self.action_button = self._field_button("Reload this page (Ctrl+R)")
         self.audio_button.hide()
         self.reader_button.hide()
@@ -8692,7 +8852,7 @@ class AddressField(QWidget):
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setFixedSize(24, 24)
         button.setIconSize(QSize(15, 15))
-        button.setToolTip(tooltip)
+        button.setToolTip(shortcut_text(tooltip))
         return button
 
     def mousePressEvent(self, event) -> None:            # clicks on the padding focus the editor
@@ -8712,10 +8872,10 @@ class AddressField(QWidget):
         self.page_button.setIcon(self._icons.icon("search" if editing else self.page_glyph, secondary))
         self.page_button.setEnabled(not editing)
         self.action_button.setIcon(self._icons.icon("stop" if self._loading else "reload", secondary))
-        self.action_button.setToolTip("Stop loading" if self._loading else "Reload this page (Ctrl+R)")
+        self.action_button.setToolTip("Stop loading" if self._loading else shortcut_text("Reload this page (Ctrl+R)"))
         self.reader_button.setVisible(self.reader_state is not None and not editing)
         self.reader_button.setIcon(self._icons.icon("reader", self._theme["accent"] if self.reader_state else secondary))
-        self.reader_button.setToolTip("Hide Reader (F9)" if self.reader_state else "Show Reader (F9)")
+        self.reader_button.setToolTip(shortcut_text(("Hide" if self.reader_state else "Show") + f" Reader ({READER_KEY})"))
         self.audio_button.setVisible(self.audio_state is not None and not editing)
         muted = self.audio_state == "muted"
         self.audio_button.setIcon(self._icons.icon("speaker_muted" if muted else "speaker",
@@ -9015,7 +9175,7 @@ class SafariTabBar(QTabBar):
         close.setIconSize(QSize(11, 11))
         close.setFixedSize(18, 18)
         close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        close.setToolTip("Close Tab (Ctrl+W)")
+        close.setToolTip(shortcut_text("Close Tab (Ctrl+W)"))
         close.clicked.connect(lambda _checked=False, b=close: self._close_button_clicked(b))
         self.setTabButton(index, QTabBar.ButtonPosition.LeftSide, close)
         speaker = QToolButton(self)
@@ -11868,7 +12028,7 @@ class MenuStepper(QWidget):
         row.addWidget(text, 1)
         self.value = QPushButton(value)
         self.value.setObjectName("MenuStepperValue")
-        self.value.setToolTip("Actual Size (Ctrl+0)")
+        self.value.setToolTip(shortcut_text("Actual Size (Ctrl+0)"))
         self.value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for icon, slot, tip in ((icons[0], minus, "Zoom Out (Ctrl+-)"), (None, reset, None), (icons[1], plus, "Zoom In (Ctrl+=)")):
             if icon is None:
@@ -11880,7 +12040,7 @@ class MenuStepper(QWidget):
             b.setIcon(icon)
             b.setIconSize(QSize(14, 14))
             b.setFixedSize(26, 24)
-            b.setToolTip(tip)
+            b.setToolTip(shortcut_text(tip))
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setAutoRepeat(True)
             b.clicked.connect(lambda *_, s=slot: self._step(s))
@@ -12446,7 +12606,7 @@ class PrivacySettingsDialog(QDialog):
                   self._switch("globalPrivacyControl"))
         self._row(g, "Reject cookie pop-ups", "Clicks “Reject all” on cookie consent banners for you, and hides "
                   "banners that only say OK.", self._switch("rejectCookieBanners"))
-        self._row(g, "Protect against fingerprinting", "Makes your PC look slightly different to every site, so "
+        self._row(g, "Protect against fingerprinting", f"Makes your {DEVICE} look slightly different to every site, so "
                   "sites can't recognise you without cookies.", self._switch("fingerprintProtection"))
 
         g = self._group(layout, "Connections")
@@ -12456,13 +12616,13 @@ class PrivacySettingsDialog(QDialog):
                   self._combo("secureDns", SECURE_DNS_PROVIDERS))
 
         g = self._group(layout, "Downloads & websites")
-        self._row(g, "Warn before downloading apps and scripts", "Files like .exe, .msi and .ps1 can harm your PC.",
+        self._row(g, "Warn before downloading apps and scripts", f"Files like .exe, .msi and .ps1 can harm your {DEVICE}.",
                   self._switch("warnDownloads"), first=True)
         self._row(g, "Website permissions", "Camera, microphone, location and more you've allowed or denied.",
                   self._button("Manage…", lambda: self.show_page(1)))
         self._row(g, "History and website data", "Clear what sites remember about you.",
                   self._button("Clear…", self._clear_history))
-        self._row(g, "Remember what pages say (Muninn)", "Keeps the words of pages you visit on this PC, so the "
+        self._row(g, "Remember what pages say (Muninn)", f"Keeps the words of pages you visit on this {DEVICE}, so the "
                   "address field, Ctrl+K and the sidebar can find a page by what was on it. Never from private "
                   "windows or burner tabs, or pages with a password or card field.", self._switch("rememberPages"))
         if not self.window_.private:
@@ -14623,6 +14783,7 @@ class BrowserWindow(QWidget):
         self._inspector: QWebEngineView | None = None
         self._qwindow: QWindow | None = None
         self._edge_cursor_active = False
+        self._resize_drag: tuple | None = None            # (edges, start point, start geometry)
         self._restore_maximized = False
         self._sidebar_before_fullscreen = False
         self._native_frame = WindowsFrame(self) if (IS_WINDOWS and os.environ.get("SAFARIQT_QT_FRAME") != "1") else None
@@ -14643,6 +14804,9 @@ class BrowserWindow(QWidget):
         QApplication.instance().setStyleSheet(QSS_TEMPLATE.substitute(self.theme))
         self._build_ui()
         self._build_shortcuts()
+        self.mac_menu_bar: QMenuBar | None = None
+        if IS_MAC and main_window is None:
+            self.mac_menu_bar = self.build_mac_menu_bar()
         profile.downloadRequested.connect(self._on_download_requested)
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):                     # Qt 6.5+
@@ -14823,9 +14987,19 @@ class BrowserWindow(QWidget):
         bind(["F3", "Ctrl+G"], self.find_next)
         bind(["Shift+F3", "Ctrl+Shift+G"], self.find_previous)
         bind("F9", self.toggle_reader)
+        if IS_MAC:
+            bind("Ctrl+Shift+R", self.toggle_reader)               # Safari's Reader
+            bind(["Meta+Tab", "Ctrl+Shift+]"], self.next_tab)       # Command-Tab belongs to macOS
+            bind(["Meta+Shift+Tab", "Ctrl+Shift+["], self.previous_tab)
+            bind("Ctrl+Alt+I", self.open_inspector)                # Safari's Web Inspector
+            bind("Meta+Ctrl+F", self.toggle_window_fullscreen)
         bind("Ctrl+J", self.show_downloads)
         bind("Ctrl+Shift+S", partial(self.take_screenshot, True))
-        bind("Ctrl+M", self.toggle_mute)
+        if IS_MAC:                     # Command-M minimizes on a Mac; Control-M mutes (as in Firefox)
+            bind("Ctrl+M", self.showMinimized)
+            bind("Meta+M", self.toggle_mute)
+        else:
+            bind("Ctrl+M", self.toggle_mute)
         bind(["Ctrl+K", "Ctrl+E"], self.show_command_bar)
         bind("Ctrl+Shift+D", self.add_to_reading_list)
         bind("Shift+Esc", self.show_tab_manager)
@@ -14843,6 +15017,130 @@ class BrowserWindow(QWidget):
         self._escape_shortcut = QShortcut(QKeySequence("Escape"), self)
         self._escape_shortcut.activated.connect(self._on_escape)
         self._escape_shortcut.setEnabled(False)
+
+    # ---------------------------------------------------------------------------- Mac menu bar
+    def build_mac_menu_bar(self) -> QMenuBar:
+        """The menu bar along the top of a Mac's screen, as every Mac app has: File, Edit,
+        View, History, Bookmarks, Window and Help, with their usual Command-key shortcuts.
+        One bar for all of Huginn's windows; each command goes to the window you're in. (A
+        key goes to the text field or page first, so Copy and Paste still work as before.)"""
+        bar = QMenuBar(None)                         # no parent: macOS's own bar, shared by every window
+
+        def target() -> "BrowserWindow":
+            w = QApplication.activeWindow()
+            while w is not None and not isinstance(w, BrowserWindow):
+                w = w.parentWidget()
+            return w if isinstance(w, BrowserWindow) else self
+
+        def item(menu: QMenu, text: str, method: str, keys: str | None = None, *args,
+                 role: QAction.MenuRole | None = None) -> QAction:
+            action = menu.addAction(text)
+            if keys:
+                action.setShortcut(QKeySequence(keys))
+            if role is not None:
+                action.setMenuRole(role)
+            action.triggered.connect(lambda *_: getattr(target(), method)(*args))
+            return action
+
+        app = bar.addMenu(BROWSER_NAME)                # macOS moves these into its Huginn menu
+        item(app, f"About {BROWSER_NAME}", "show_about", role=QAction.MenuRole.AboutRole)
+        # (Qt would rename a PreferencesRole item "Preferences…"; macOS calls it Settings now)
+        item(app, "Settings…", "show_privacy_settings", "Ctrl+,", role=QAction.MenuRole.ApplicationSpecificRole)
+        item(app, f"Quit {BROWSER_NAME}", "quit_all", "Ctrl+Q", role=QAction.MenuRole.QuitRole)
+
+        file = bar.addMenu("File")
+        item(file, "New Tab", "new_tab", "Ctrl+T")
+        item(file, "New Private Window", "open_private_window", "Ctrl+Shift+N")
+        item(file, "New Burner Tab", "new_burner_tab", "Ctrl+Alt+N")
+        file.addSeparator()
+        item(file, "Open Location…", "focus_address_bar", "Ctrl+L")
+        file.addSeparator()
+        item(file, "Close Tab", "close_current_tab", "Ctrl+W")
+        item(file, "Reopen Closed Tab", "reopen_closed_tab", "Ctrl+Shift+T")
+        file.addSeparator()
+        item(file, "Import From Another Browser…", "show_import_menu")
+        item(file, f"Share {BROWSER_NAME} With Friends…", "share_with_friends")
+        file.addSeparator()
+        item(file, "Take Screenshot of Page", "take_screenshot", "Ctrl+Shift+S", True)
+
+        edit = bar.addMenu("Edit")
+        for entry in (("Undo", "undo", "Ctrl+Z"), ("Redo", "redo", "Ctrl+Shift+Z"), None, ("Cut", "cut", "Ctrl+X"),
+                      ("Copy", "copy", "Ctrl+C"), ("Paste", "paste", "Ctrl+V"), ("Select All", "selectAll", "Ctrl+A")):
+            if entry is None:
+                edit.addSeparator()
+            else:
+                item(edit, entry[0], "edit_command", entry[2], entry[1])
+        edit.addSeparator()
+        item(edit, "Find…", "show_find_bar", "Ctrl+F")
+        item(edit, "Find Next", "find_next", "Ctrl+G")
+        item(edit, "Find Previous", "find_previous", "Ctrl+Shift+G")
+
+        view = bar.addMenu("View")
+        item(view, "Reload Page", "reload", "Ctrl+R")
+        view.addSeparator()
+        item(view, "Zoom In", "zoom_in", "Ctrl+=")
+        item(view, "Zoom Out", "zoom_out", "Ctrl+-")
+        item(view, "Actual Size", "zoom_reset", "Ctrl+0")
+        view.addSeparator()
+        item(view, "Show Reader", "toggle_reader", READER_KEY)
+        item(view, "Show Sidebar", "toggle_sidebar", "Ctrl+Shift+L")
+        item(view, "Show All Tabs", "toggle_overview", "Ctrl+Shift+\\")
+        view.addSeparator()
+        item(view, "Enter Full Screen", "toggle_window_fullscreen", "Meta+Ctrl+F")
+        view.addSeparator()
+        item(view, "Web Inspector", "open_inspector", "Ctrl+Alt+I")
+
+        history = bar.addMenu("History")
+        item(history, "Back", "go_back", "Ctrl+[")
+        item(history, "Forward", "go_forward", "Ctrl+]")
+        item(history, "Start Page", "go_home", "Ctrl+Shift+H")
+        history.addSeparator()
+        item(history, "Valhalla (Closed Tabs)…", "show_valhalla")
+        item(history, "Clear History…", "show_clear_history_dialog", "Ctrl+Shift+Backspace")
+
+        bookmarks = bar.addMenu("Bookmarks")
+        item(bookmarks, "Add to Favorites", "add_bookmark_for_current", "Ctrl+D")
+        item(bookmarks, "Add to Reading List", "add_to_reading_list", "Ctrl+Shift+D")
+
+        window = bar.addMenu("Window")
+        item(window, "Minimize", "showMinimized", "Ctrl+M")
+        item(window, "Zoom", "toggle_maximize")
+        window.addSeparator()
+        item(window, "Show Next Tab", "next_tab", "Meta+Tab")
+        item(window, "Show Previous Tab", "previous_tab", "Meta+Shift+Tab")
+        window.addSeparator()
+        item(window, "Downloads", "show_downloads", "Ctrl+J")
+        item(window, "Passwords", "show_passwords", "Ctrl+Shift+P")
+        item(window, "Command Bar", "show_command_bar", "Ctrl+K")
+
+        help_menu = bar.addMenu("Help")
+        item(help_menu, "Welcome Tour", "show_welcome")
+        item(help_menu, f"{BROWSER_NAME} Manual", "show_manual")
+        return bar
+
+    def edit_command(self, name: str, *_) -> None:
+        """Edit menu > Undo/Cut/Copy/Paste/Select All, for wherever you're typing or the page."""
+        widget = QApplication.focusWidget()
+        if isinstance(widget, (QLineEdit, QPlainTextEdit)) or type(widget).__name__ == "QTextEdit":
+            getattr(widget, name)()
+            return
+        view = self.current_view()
+        actions = {"undo": "Undo", "redo": "Redo", "cut": "Cut", "copy": "Copy", "paste": "Paste",
+                   "selectAll": "SelectAll"}
+        if view is not None and name in actions:
+            view.triggerPageAction(getattr(QWebEnginePage.WebAction, actions[name]))
+
+    def show_about(self, *_) -> None:
+        self.run_dialog(SheetDialog(
+            self, f"{BROWSER_NAME} {app_version()}",
+            "A quiet, private browser, named for Odin's raven of thought.\n\nFree to use, change and share for any "
+            "non-commercial purpose (PolyForm Noncommercial 1.0.0). Built on Qt WebEngine.", cancel=None))
+
+    def show_manual(self, *_) -> None:
+        """README.txt, the full manual, in a new tab."""
+        path = os.path.join(APP_DIR, "README.txt")
+        if os.path.isfile(path):
+            self.add_tab(QUrl.fromLocalFile(path))
 
     # ---------------------------------------------------------------------------- theme
     def _effective_dark(self) -> bool:
@@ -15399,10 +15697,16 @@ class BrowserWindow(QWidget):
         self._default_waiting = True
         self.open_default_apps()
         self._sync_default_bar()
+        if IS_MAC:                 # macOS's box doesn't bring the window back: look for the answer
+            for second in range(1, 61):
+                QTimer.singleShot(second * 1000, self, self._check_default_after_settings)
 
     def _default_notice(self) -> tuple | None:
         if self.private or self.is_default_browser() is not False:
             return None
+        if self._default_waiting and IS_MAC:
+            return ("waiting", f"In the box macOS shows, choose <b>Use “{BROWSER_NAME}”</b>.", "globe",
+                    "Ask Again", "Done", None)
         if self._default_waiting:
             return ("waiting", f"In Settings, click <b>Set default</b> under {BROWSER_NAME} (or choose "
                     f"{BROWSER_NAME} for HTTP and HTTPS).", "globe", "Open Settings", "Done", None)
@@ -16067,7 +16371,7 @@ class BrowserWindow(QWidget):
             "computer: Windows, Mac or Linux (no admin rights). Nothing of yours goes in it - no bookmarks, "
             "history, passwords or settings.\n\n"
             "Optional, for updates: the web address where you'll upload updates (huginn-update.json), e.g. a "
-            "GitHub release. Their copy checks it daily and only installs updates signed by this PC.",
+            f"GitHub release. Their copy checks it daily and only installs updates signed by this {DEVICE}.",
             text=str(self.settings.value("updateUrl", "")), placeholder="https://…/huginn-update.json  (optional)",
             ok="Create Package", allow_empty=True, max_length=500)
         if url is None:
@@ -16388,7 +16692,7 @@ class BrowserWindow(QWidget):
             cmds.append(("Passwords", "key", self.show_passwords))
         for key, spec in REALMS.items():
             cmds.append((f"Theme: {spec['label']}", "sidebar", partial(self.set_realm, key)))
-        for mode, label in (("light", "Light"), ("dark", "Dark"), ("system", "Follow Windows")):
+        for mode, label in (("light", "Light"), ("dark", "Dark"), ("system", f"Follow {SYSTEM_NAME}")):
             cmds.append((f"Appearance: {label}", "moon", partial(self.set_appearance, mode)))
         for mode, label in DARK_WEBSITE_MODES.items():
             cmds.append((f"Websites: {label}", "moon", partial(self.set_dark_websites, mode)))
@@ -17229,13 +17533,13 @@ class BrowserWindow(QWidget):
         self._sync_welcome()
 
     def show_import_menu(self, *_) -> None:
-        """Other browsers found on this PC, as a menu at the mouse (from the welcome tour)."""
+        """Other browsers found on this computer, as a menu at the mouse (from the welcome tour)."""
         menu = prepare_menu(QMenu(self))
         sources = self.find_import_sources()
         for source in sources:
             self._add_action(menu, f"{source['label']}…".replace("&", "&&"), partial(self._welcome_import, source))
         if not sources:
-            self._add_action(menu, "No other browsers found on this PC", lambda: None, enabled=False)
+            self._add_action(menu, f"No other browsers found on this {DEVICE}", lambda: None, enabled=False)
         menu.addSeparator()
         self._add_action(menu, "Bookmarks File (HTML)…", partial(self._welcome_import, None))
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -17470,7 +17774,7 @@ class BrowserWindow(QWidget):
     def set_sidebar_open(self, opened: bool) -> None:
         self.sidebar.set_open(opened)
         self.toolbar.sidebar_button.setChecked(opened)
-        self.toolbar.sidebar_button.setToolTip(("Hide" if opened else "Show") + " Sidebar (Ctrl+Shift+L)")
+        self.toolbar.sidebar_button.setToolTip(shortcut_text(("Hide" if opened else "Show") + " Sidebar (Ctrl+Shift+L)"))
 
     def show_sidebar_section(self, index: int) -> None:
         self.sidebar.show_page(index)
@@ -18199,10 +18503,14 @@ class BrowserWindow(QWidget):
             and site not in load_site_list(self.settings, "autoplayBlocked")
 
     def apply_autoplay(self, page: QWebEnginePage, url: QUrl) -> None:
-        """Lets the page start media with sound by itself only on sites you play media on."""
+        """Lets the page start media with sound by itself only on sites you play media on, and
+        only in the tab you're looking at: tabs that open or come back behind it (a restored
+        session, a link opened in the background) wait for you to press play."""
+        view = getattr(page, "_view", None)
+        in_sight = view is None or (view is self.current_view() and self.isVisible() and not self.isMinimized())
         try:
             page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture,
-                                         not self.autoplay_allowed(url.host()))
+                                         not (in_sight and self.autoplay_allowed(url.host())))
         except RuntimeError:
             pass
 
@@ -18722,14 +19030,14 @@ class BrowserWindow(QWidget):
     # ---------------------------------------------------------------------------- menus
     @staticmethod
     def _add_action(menu: QMenu, text: str, slot, enabled: bool = True):
-        action = menu.addAction(text)
+        action = menu.addAction(shortcut_text(text))
         action.triggered.connect(lambda *_: slot())
         action.setEnabled(enabled)
         return action
 
     @staticmethod
     def _add_toggle(menu: QMenu, text: str, checked: bool, slot):
-        action = menu.addAction(text)
+        action = menu.addAction(shortcut_text(text))
         action.setCheckable(True)
         action.setChecked(checked)
         action.toggled.connect(slot)
@@ -18754,14 +19062,14 @@ class BrowserWindow(QWidget):
         strong, accent = self.theme["text"], self.theme["accent"]
 
         def tile(glyph: str, label: str, text: str, slot, enabled: bool, active: bool = False) -> None:
-            action = QAction(text, tiles)
+            action = QAction(shortcut_text(text), tiles)
             action.setEnabled(enabled)
             tiles.add(self.icons.icon(glyph, accent if active else strong), label, action, slot, active)
 
         reader_on = bool(view and view.reader_on)
         reading = self.reader_voice.reading
         tile("search", "Find", "Find on Page…\tCtrl+F", self.show_find_bar, view is not None)
-        tile("reader", "Reader", ("Hide Reader" if reader_on else "Show Reader") + "\tF9", self.toggle_reader,
+        tile("reader", "Reader", ("Hide Reader" if reader_on else "Show Reader") + f"\t{READER_KEY}", self.toggle_reader,
              bool(view and (view.readerable or view.reader_on)) and bool(reader_source()), reader_on)
         tile("voice", "Stop" if reading else "Listen", "Stop Reading Aloud" if reading else "Read Aloud", self.read_aloud,
              reading or (view is not None and url.scheme() in ("http", "https", "file")), reading)
@@ -18810,7 +19118,7 @@ class BrowserWindow(QWidget):
                          view is not None).setIcon(self.icons.icon("pin", sec))
         muted = bool(view and view.page().isAudioMuted())
         if view is not None and (muted or view.page().recentlyAudible()):        # only when there's sound
-            self._add_action(menu, ("Unmute Tab" if muted else "Mute Tab") + "\tCtrl+M", self.toggle_mute).setIcon(
+            self._add_action(menu, ("Unmute Tab" if muted else "Mute Tab") + ("\tMeta+M" if IS_MAC else "\tCtrl+M"), self.toggle_mute).setIcon(
                 self.icons.icon("speaker_muted" if muted else "speaker", sec))
         if not self.private and view is not None:
             move = prepare_menu(menu.addMenu("Move Tab to Group"))
@@ -18959,7 +19267,7 @@ class BrowserWindow(QWidget):
         for source in sources:
             self._add_action(imports, f"{source['label']}…".replace("&", "&&"), partial(self.import_from, source))
         if not sources:
-            self._add_action(imports, "No other browsers found on this PC", lambda: None, enabled=False)
+            self._add_action(imports, f"No other browsers found on this {DEVICE}", lambda: None, enabled=False)
         imports.addSeparator()
         self._add_action(imports, "Bookmarks File (HTML)…", partial(self.import_from, None))
         if not self.private:
@@ -19026,7 +19334,7 @@ class BrowserWindow(QWidget):
                 details.addSection(f"Privacy Grade: {letter}")
                 for line in grade[1]:
                     if line == "Secure connection" and _is_local_host(url.host()):
-                        line = "Local connection (on this PC)"
+                        line = f"Local connection (on this {DEVICE})"
                     self._add_action(details, line, lambda: None, enabled=False)
             if ads:
                 self._add_action(details, ads, lambda: None, enabled=False).setIcon(self.icons.icon("noads", sec))
@@ -19258,6 +19566,16 @@ class BrowserWindow(QWidget):
     def toggle_maximize(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
 
+    def toggle_window_fullscreen(self, *_) -> None:
+        """The whole window full screen (a Mac's Control-Command-F), not a page's video."""
+        if self._fullscreen_view is not None:
+            self._exit_page_fullscreen()
+        elif self.isFullScreen():
+            self.showMaximized() if self._restore_maximized else self.showNormal()
+        else:
+            self._restore_maximized = self.isMaximized()
+            self.showFullScreen()
+
     def is_drag_area(self, pos: QPoint) -> bool:
         """True where a press should move the window (empty parts of the toolbar)."""
         child = self.childAt(pos)
@@ -19300,6 +19618,24 @@ class BrowserWindow(QWidget):
             edges |= Qt.Edge.BottomEdge
         return edges
 
+    def _drag_resize(self, global_pos: QPointF) -> None:
+        """Resizing from an edge by hand (where the system can't do it), never below the
+        window's minimum size."""
+        edges, start, rect = self._resize_drag
+        dx, dy = round(global_pos.x() - start.x()), round(global_pos.y() - start.y())
+        g = QRect(rect)
+        min_w, min_h = self.minimumWidth(), self.minimumHeight()
+        if edges & Qt.Edge.LeftEdge:
+            g.setLeft(min(rect.left() + dx, rect.right() - min_w + 1))
+        if edges & Qt.Edge.RightEdge:
+            g.setRight(max(rect.right() + dx, rect.left() + min_w - 1))
+        if edges & Qt.Edge.TopEdge:
+            g.setTop(min(rect.top() + dy, rect.bottom() - min_h + 1))
+        if edges & Qt.Edge.BottomEdge:
+            g.setBottom(max(rect.bottom() + dy, rect.top() + min_h - 1))
+        if g != self.geometry():
+            self.setGeometry(g)
+
     def _update_edge_cursor(self, edges: Qt.Edge) -> None:
         if not edges:
             if self._edge_cursor_active:
@@ -19330,8 +19666,15 @@ class BrowserWindow(QWidget):
             elif kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 edges = self._edges_at(event.position())
                 if edges:
-                    obj.startSystemResize(edges)
+                    if not obj.startSystemResize(edges):       # macOS can't: follow the mouse ourselves
+                        self._resize_drag = (edges, event.globalPosition(), QRect(self.geometry()))
                     return True
+            elif kind == QEvent.Type.MouseMove and self._resize_drag is not None:
+                self._drag_resize(event.globalPosition())
+                return True
+            elif kind == QEvent.Type.MouseButtonRelease and self._resize_drag is not None:
+                self._resize_drag = None
+                return True
             elif kind == QEvent.Type.Leave:
                 self._update_edge_cursor(Qt.Edge(0))
         elif obj is (self.tabs.stack or self.tabs) and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
@@ -19475,6 +19818,9 @@ def create_application(argv: list[str]) -> QApplication:
         os.environ.setdefault("QTWEBENGINE_DICTIONARIES_PATH", dictionaries)
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = HuginnApplication(argv)
+    # Huginn.app's launcher sets CFProcessPath so macOS treats this Python as Huginn.app. macOS
+    # has read it by now; the page processes started later mustn't think they're Huginn too.
+    os.environ.pop("CFProcessPath", None)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
     if not IS_WINDOWS:
@@ -19483,9 +19829,12 @@ def create_application(argv: list[str]) -> QApplication:
     app.setStyle(HuginnStyle())                 # Fusion (a predictable base for the style sheet) + Huginn's menus
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateMenu, False)     # menus are see-through cards: no Win32 fade
     app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, False)
-    font = QFont()
-    font.setFamilies(["Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Helvetica Neue", "Arial"])
-    font.setPointSizeF(9.0)
+    if IS_WINDOWS:
+        font = QFont()
+        font.setFamilies(["Segoe UI Variable Text", "Segoe UI", "Arial"])
+    else:                  # the system's own font (San Francisco on a Mac); naming missing ones costs a start
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    font.setPointSizeF(12.0 if IS_MAC else 9.0)  # the same size on screen: a Mac point is 3/4 of a Windows one
     app.setFont(font)
     app.setWindowIcon(make_app_icon())
     return app

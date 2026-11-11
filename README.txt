@@ -1,5 +1,5 @@
-Huginn - a Safari-style, privacy-first browser for Windows
-==========================================================
+Huginn - a Safari-style, privacy-first browser for Windows and Mac (and Linux)
+==============================================================================
 (Named after Huginn, the raven Odin sends out over the world each day. It was called
 SafariQt at first; some files and folders still carry that name.)
 Free for non-commercial use: PolyForm Noncommercial License 1.0.0 (LICENSE.md).
@@ -15,15 +15,25 @@ Install it (Windows): double-click "Install Huginn.bat" and press Install. That'
             background the first time it opens. It takes a few minutes: it fetches a
             portable Python and the browser engine (about 250 MB) and shows its progress.
             Running it again updates or repairs the copy you installed.
-Install it (Mac): double-click "Install Huginn (Mac).command" (if macOS says it can't
-            check it: right-click it, Open, Open). It makes Huginn.app in Applications - so
-            Huginn is in Launchpad and Spotlight - and can keep it in the Dock. To remove it,
-            drag Huginn from Applications to the Bin. (macOS 11 or later.)
+Install it (Mac): double-click "Install Huginn (Mac).command". Huginn doesn't come from
+            the App Store, so the first time macOS won't open it: click Done, then open
+            System Settings > Privacy & Security, scroll down and click Open Anyway beside
+            the installer's name (on macOS 14 or older, right-click the installer and choose
+            Open instead). If Terminal asks to use your Downloads folder, allow it. It asks
+            nothing else, takes a minute or two, and puts Huginn.app in Applications - so
+            it's in Launchpad and Spotlight - and in the Dock, then opens it. Running it
+            again updates the copy you have. To remove it, drag Huginn from Applications to
+            the Bin (and out of the Dock). Prefer Terminal? bash ~/Downloads/Huginn/installer/
+            install.sh does the same. If something goes wrong, ~/Library/Logs/Huginn has
+            what the installer and Huginn said. (macOS 11 or later.)
+            On a Mac Huginn has the usual menu bar (File, Edit, View, History, Bookmarks,
+            Window, Help) and can be your default browser; every Ctrl shortcut here is
+            Command (⌘) there and Alt is Option (⌥).
 Install it (Linux): in a terminal, bash "Install Huginn (Linux).sh". It puts Huginn in
             your apps menu, and can add it to the desktop and (GNOME) pin it to the dock.
             To remove it: ~/.local/share/huginn/installer/install.sh --uninstall
-            The Mac and Linux installers ask a few questions in the terminal, take a few
-            minutes, and get their own Python and engine; nothing is installed system-wide.
+            It asks a couple of questions in the terminal, takes a few minutes, and gets its
+            own Python and engine; nothing is installed system-wide.
             Video formats (the H.264 build) are Windows-only.
 Or run it:  double-click run.bat in this folder (Windows; no installing, sets itself up)
 
@@ -393,6 +403,8 @@ Handy shortcuts
   Ctrl+Shift+\ all tabs Ctrl+Shift+L sidebar      Ctrl+D add to Favorites
   Ctrl+Shift+H Start Page                         Ctrl+= / Ctrl+- / Ctrl+0 zoom
   F12 Web Inspector     Ctrl+Q quit
+  On a Mac: ⌘ for Ctrl and ⌥ for Alt throughout, plus ⇧⌘R Reader, ⌘M minimize,
+  ⌃M mute tab, ⌃Tab / ⌃⇧Tab next / previous tab, ⌃⌘F full screen, ⌥⌘I Web Inspector.
 
 The page menu (the small icon at the left end of the address field):
   Site card    The site's Privacy Grade, whether the connection is secure, trackers and
