@@ -10,7 +10,7 @@ Recreates the look of current macOS Safari:
   * rounded tab strip with a raised active tab (hidden while only one tab is open)
   * tab overview grid, Bookmarks/History sidebar, and a Start Page with Favorites,
     Frequently Visited and a Privacy Report fed by a built-in tracker blocker
-  * light and dark appearance (follows Windows, or choose it in the page menu)
+  * light and dark appearance (follows Windows, light by day and dark at night, or your pick)
 
 Privacy & Security (Ctrl+, opens the settings):
   * Private Browsing windows: nothing kept, cookies and website data erased on close
@@ -8347,12 +8347,17 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
   .pick.sel { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); }
   .pick small { font-size: 12.5px; }
   .swatch { width: 44px; height: 44px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
-  .swatch.auto { background: linear-gradient(135deg, #FFE3A6 0%, #F6B26B 44%, #34408A 56%, #111733 100%); }
   .mode { width: 72px; height: 44px; border-radius: 9px; box-shadow: inset 0 0 0 1px var(--line); position: relative;
     overflow: hidden; }
   .mode.light { background: linear-gradient(180deg, #E9EEF3 0 26%, #FFFFFF 26%); }
   .mode.dark { background: linear-gradient(180deg, #1C2026 0 26%, #121519 26%); }
   .mode.system { background: linear-gradient(90deg, #FFFFFF 50%, #121519 50%); }
+  .mode.sun { background: linear-gradient(135deg, #FFFFFF 50%, #121519 50%); }
+  .mode.sun::before { content: ""; position: absolute; left: 12px; top: 8px; width: 11px; height: 11px; border-radius: 50%;
+    background: #F6B26B; box-shadow: 0 0 0 3px rgba(246,178,107,.28); }
+  .mode.sun::after { content: ""; position: absolute; right: 13px; bottom: 8px; width: 11px; height: 11px; border-radius: 50%;
+    background: #121519; box-shadow: 3px -2px 0 0 #DCE3F2; }
+  .day-switch { margin-top: 12px; }
   .bar { width: 150px; height: 30px; border-radius: 9px; background: var(--hover); box-shadow: inset 0 0 0 1px var(--line);
     display: flex; align-items: center; gap: 6px; padding: 0 8px; }
   .bar .field { flex: 1; height: 12px; border-radius: 6px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
@@ -8426,11 +8431,13 @@ WELCOME_PAGE = Template("""<!DOCTYPE html>
 </section>
 <section class="slide">
   <h2>Make it yours</h2>
-  <p class="lead">Pick a realm, or Auto to follow the day, and a look. Changes apply as you choose, and you can change them any time in Settings.</p>
-  <div class="group"><div class="label">Theme</div><div class="row" id="realms">$realm_picks</div></div>
+  <p class="lead">Pick a realm and a look. Changes apply as you choose, and you can change them any time in Settings.</p>
+  <div class="group"><div class="label">Theme</div><div class="row" id="realms">$realm_picks</div>
+    <button class="switch day-switch" data-t="living"><span>Shift colours with the time of day<small>Warm at dawn and dusk, deep blue at night</small></span><i class="knob"></i></button></div>
   <div class="group"><div class="label">Appearance</div><div class="row" id="modes">
     <button class="pick" data-k="appearance" data-v="light"><span class="mode light"></span><small>Light</small></button>
     <button class="pick" data-k="appearance" data-v="dark"><span class="mode dark"></span><small>Dark</small></button>
+    <button class="pick" data-k="appearance" data-v="sun" title="Light from sunrise to sunset, dark at night. Uses your weather city's sunrise and sunset (7 am to 7 pm until you add one)."><span class="mode sun"></span><small>Sunrise to Sunset</small></button>
     <button class="pick" data-k="appearance" data-v="system"><span class="mode system"></span><small>Match Windows</small></button>
   </div></div>
   <div class="group"><div class="label">Window buttons</div><div class="row" id="buttons">
@@ -8494,7 +8501,6 @@ var hw = (function () {
   function paint() {
     Array.prototype.forEach.call(document.querySelectorAll('.pick'), function (b) {
       var on = String(state[b.dataset.k]) === b.dataset.v;
-      if (b.dataset.k === 'realm' && state.living) on = false;      // Auto is the theme then
       b.classList.toggle('sel', on);
     });
     Array.prototype.forEach.call(document.querySelectorAll('.switch'), function (b) {
@@ -8507,10 +8513,7 @@ var hw = (function () {
     document.getElementById('building').hidden = !state.building;
   }
   Array.prototype.forEach.call(document.querySelectorAll('.pick'), function (b) {
-    b.addEventListener('click', function () {
-      if (b.dataset.k === 'realm') state.living = 0;               // a realm of its own: no day/night
-      set(b.dataset.k, b.dataset.v);
-    });
+    b.addEventListener('click', function () { set(b.dataset.k, b.dataset.v); });
   });
   Array.prototype.forEach.call(document.querySelectorAll('.switch'), function (b) {
     b.addEventListener('click', function () { set(b.dataset.t, state[b.dataset.t] ? 0 : 1); });
@@ -8552,8 +8555,6 @@ def render_welcome_page(theme: dict, state: dict) -> str:
         picks.append(f'<button class="pick" data-k="realm" data-v="{key}"><span class="swatch" '
                      f'style="background: linear-gradient(135deg, {a}, {b})"></span>'
                      f'<small>{html.escape(spec["label"])}</small></button>')
-    picks.append('<button class="pick" data-k="living" data-v="1" title="Follows the time of day: warm at dawn '
-                 'and dusk, deep blue at night"><span class="swatch auto"></span><small>Auto</small></button>')
     variables = " ".join(f"{k}: {v};" for k, v in welcome_vars(theme).items() if k != "--scheme")
     icons = {f"i_{k}": v for k, v in WELCOME_ICONS.items()}
     page = WELCOME_PAGE.substitute(scheme="dark" if theme["dark"] else "light", vars=variables,
@@ -10822,6 +10823,29 @@ DAY_PHASES = (  # from hour: name, frame tint (light, dark), aurora colours
     (20, "night", ("#DCE0F2", "#0E1430"), ("#4C6FFF", "#3DD6B5")),
 )
 SEASON_GLOW = {12: "#BFE6FF", 1: "#CFEAFF", 10: "#FFA24C", 3: "#8EE59B", 4: "#8EE59B", 5: "#B6F28E"}
+
+
+# Appearance: light, dark, light by day and dark at night, or the system's choice.
+APPEARANCE_MODES = {"system": "Use System Setting", "light": "Light", "dark": "Dark", "sun": "Sunrise to Sunset"}
+SUN_FALLBACK = ("07:00", "19:00")       # "Sunrise to Sunset" before you've added a weather city
+
+
+def sun_times(forecast: dict | None, when: time.struct_time) -> tuple[str, str]:
+    """Today's sunrise and sunset ("HH:MM") from your weather city's forecast when it has
+    today, else 7 am and 7 pm (also during polar day or night, when there are none)."""
+    today = time.strftime("%Y-%m-%d", when)
+    for day in (forecast or {}).get("days") or []:
+        if not isinstance(day, dict) or day.get("date") != today:
+            continue
+        rise, sets = str(day.get("sunrise", "")), str(day.get("sunset", ""))
+        if re.fullmatch(r"\d\d:\d\d", rise) and re.fullmatch(r"\d\d:\d\d", sets) and rise < sets:
+            return rise, sets
+    return SUN_FALLBACK
+
+
+def is_daylight(forecast: dict | None, when: time.struct_time) -> bool:
+    rise, sets = sun_times(forecast, when)
+    return rise <= time.strftime("%H:%M", when) < sets
 
 
 def day_phase(hour: int) -> tuple:
@@ -15050,8 +15074,9 @@ class BrowserWindow(QWidget):
         self.reader_voice.stateChanged.connect(self._reading_aloud_changed)
         self._focus_pauses: dict[str, float] = {}
         self._banner_sites: set[str] = set()
+        self.local_time = time.localtime                # (a seam for tests: the clock Sunrise to Sunset reads)
         self._phase_timer = QTimer(self)
-        self._phase_timer.setInterval(10 * 60 * 1000)
+        self._phase_timer.setInterval(60 * 1000)
         self._phase_timer.timeout.connect(self._check_phase)
         self._phase_timer.start()
         self._ram_timer = QTimer(self)
@@ -15487,6 +15512,10 @@ class BrowserWindow(QWidget):
     def _effective_dark(self) -> bool:
         if self.appearance in ("light", "dark"):
             return self.appearance == "dark"
+        if self.appearance == "sun":
+            service = self.weather_service()
+            cache = service.cached() if service is not None else None
+            return not is_daylight(cache.get("forecast") if cache else None, self.local_time())
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorScheme"):
             scheme = hints.colorScheme()
@@ -17040,7 +17069,8 @@ class BrowserWindow(QWidget):
             cmds.append(("Game Mode On / Off", "game", self.toggle_game_mode_now))
         for key, spec in REALMS.items():
             cmds.append((f"Theme: {spec['label']}", "sidebar", partial(self.set_realm, key)))
-        for mode, label in (("light", "Light"), ("dark", "Dark"), ("system", f"Follow {SYSTEM_NAME}")):
+        for mode, label in (("light", "Light"), ("dark", "Dark"), ("sun", APPEARANCE_MODES["sun"]),
+                            ("system", f"Follow {SYSTEM_NAME}")):
             cmds.append((f"Appearance: {label}", "moon", partial(self.set_appearance, mode)))
         for mode, label in DARK_WEBSITE_MODES.items():
             cmds.append((f"Websites: {label}", "moon", partial(self.set_dark_websites, mode)))
@@ -17573,7 +17603,10 @@ class BrowserWindow(QWidget):
         self._sync_welcome()
 
     def _check_phase(self) -> None:
-        if self.living and self.theme.get("phase") != day_phase(time.localtime().tm_hour)[1]:
+        """Every minute: a new part of the day (time-of-day colours), or sunrise or sunset
+        (Sunrise to Sunset appearance). Nothing is redrawn unless one of them changed."""
+        if ((self.living and self.theme.get("phase") != day_phase(time.localtime().tm_hour)[1])
+                or (self.appearance == "sun" and self._effective_dark() != self.theme["dark"])):
             self.apply_theme()
 
     def set_window_buttons(self, style: str, *_) -> None:
@@ -17852,11 +17885,9 @@ class BrowserWindow(QWidget):
             for key, value in query.queryItems(QUrl.ComponentFormattingOption.FullyDecoded):
                 if key == "realm" and value in REALMS:
                     self.set_realm(value)
-                    if self.living:
-                        self.set_living_theme(False)
                 elif key == "living":
                     self.set_living_theme(value == "1")
-                elif key == "appearance" and value in ("light", "dark", "system"):
+                elif key == "appearance" and value in APPEARANCE_MODES:
                     self.set_appearance(value)
                 elif key == "buttons" and value in WINDOW_BUTTON_STYLES:
                     self.set_window_buttons(value)
@@ -17909,6 +17940,7 @@ class BrowserWindow(QWidget):
         snapshot = service.snapshot()
         for window in self.all_windows():
             window.start_handler.weather = snapshot
+            window._check_phase()                       # a new city can mean a different sunset
             window._refresh_start_pages()
 
     def set_weather_enabled(self, on: bool, *_) -> None:
@@ -19544,7 +19576,7 @@ class BrowserWindow(QWidget):
                              partial(self.set_site_tint, url.host()))
         appearance = prepare_menu(settings.addMenu("Appearance"))
         group = QActionGroup(appearance)
-        for mode, label in (("system", "Use System Setting"), ("light", "Light"), ("dark", "Dark")):
+        for mode, label in APPEARANCE_MODES.items():
             action = appearance.addAction(label)
             action.setCheckable(True)
             action.setChecked(self.appearance == mode)
@@ -20268,6 +20300,7 @@ def create_browser(app: QApplication, *, persistent: bool = True,
     window.game_mode.changed.connect(window.on_game_mode)
     window.weather = WeatherService(store.settings, window)
     window.weather.changed.connect(window.on_weather_changed)
+    window._check_phase()                                      # Sunrise to Sunset: your city's sun times
     start_handler.weather = window.weather.snapshot()          # the last forecast shows straight away
     QTimer.singleShot(2500, window, window.weather.refresh)    # then a fresh one, after start-up
     fetcher.fetched.connect(window.schedule_start_page_refresh)

@@ -41,8 +41,8 @@ Install it (Linux): in a terminal, bash "Install Huginn (Linux).sh". It puts Hug
 Or run it:  double-click run.bat in this folder (Windows; no installing, sets itself up)
 
 The first time Huginn opens, a short welcome tour shows what makes it different and lets
-you pick a theme (or Auto, which follows the time of day), light or dark, which side the
-window buttons go, the Start Page touches,
+you pick a theme (and whether its colours shift with the time of day), light or dark (or
+light by day and dark at night), which side the window buttons go, the Start Page touches,
 and import your bookmarks. Page menu > More Tools > Welcome Tour brings it back.
 
 What's in this folder
@@ -333,10 +333,19 @@ Window Buttons  (page menu > Settings > Window Buttons; Mac style by default)
   (close turns red on hover). The address field stays centred either way. Also in the
   welcome tour, and in the command bar (Ctrl+K > "Window Buttons").
 
-Change Theme With Time of Day  (page menu > Settings; off by default)
+Change Theme With Time of Day  (page menu > Settings; off by default; in the welcome tour
+it's the switch under the themes)
   The frame and Start Page aurora warm up at dawn and dusk and turn deep blue at night;
   the season tints the glow (icy in winter, green in spring, amber in autumn). Works with
-  any theme; turn it off and your theme stays exactly as you chose.
+  any theme; turn it off and your theme stays exactly as you chose. It changes colours
+  only: light or dark is the Appearance setting.
+
+Appearance  (page menu > Settings > Appearance)
+  Use System Setting follows Windows (or your Mac or Linux desktop), or pick Light or Dark.
+  Sunrise to Sunset is light from sunrise until sunset and dark at night: it uses your
+  weather city's sunrise and sunset (see Weather), or 7 am to 7 pm until you add a city,
+  and switches within a minute. Websites' own light or dark follows your system; to have
+  them follow Huginn, pick Settings > Appearance > Websites > Dark When Huginn Is Dark.
 
 Game Mode  (page menu > Settings; on by default)
   When a game is running full screen, Huginn puts background tabs to sleep, drops to a
@@ -426,8 +435,8 @@ The page menu (the small icon at the left end of the address field):
                of Day, Web Panels, Game Mode, Focus Hours, Window Buttons (Mac or
                Windows side), Tabs (tab bar, sleeping,
                reopening), Theme (Aurora, Bifröst, Muspelheim, Niflheim - tints the
-               frame, accent and Start Page aurora), Appearance (Light, Dark, follow
-               Windows; and dark websites), Search Engine, Typing Sounds
+               frame, accent and Start Page aurora), Appearance (Light, Dark, Sunrise to
+               Sunset, follow Windows; and dark websites), Search Engine, Typing Sounds
   More Tools   Downloads, Tab Manager, Command Bar, New Burner Tab, Valhalla, Add Page
                as Web Panel (when web panels are on), Screenshot of Visible Part, Import
                From Another Browser, Share Huginn With Friends..., Welcome Tour,
