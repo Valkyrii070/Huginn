@@ -1708,7 +1708,6 @@ REPAIR_HINT = ("Run setup.bat in the browser's folder once" if IS_WINDOWS
 
 
 USERNS_SWITCH = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
-SYSTEM_ENGINE_PROFILE = "/etc/apparmor.d/QtWebEngineProcess"   # Ubuntu's own, for its Qt WebEngine
 
 
 def engine_process_path() -> str:
@@ -1718,12 +1717,43 @@ def engine_process_path() -> str:
         QLibraryInfo.path(QLibraryInfo.LibraryPath.LibraryExecutablesPath), "QtWebEngineProcess")
 
 
+def user_namespaces_work() -> bool:
+    """Whether this process may build what Chromium's page sandbox is made of: a user namespace
+    it can set itself up in. Tried for real, in a throwaway child, because a profile file being
+    there doesn't say it is loaded or that it covers this process (a live session loads none)."""
+    if not hasattr(os, "unshare") or not hasattr(os, "fork"):        # Python before 3.12: can't tell
+        return True
+    try:
+        pid = os.fork()
+    except OSError:
+        return True
+    if pid == 0:
+        code = 1
+        try:
+            uid, gid = os.getuid(), os.getgid()
+            os.unshare(os.CLONE_NEWUSER)
+            for name, text in (("setgroups", "deny"), ("uid_map", f"0 {uid} 1"), ("gid_map", f"0 {gid} 1")):
+                with open(f"/proc/self/{name}", "w", encoding="ascii") as f:
+                    f.write(text)                              # where Chromium stops with "Permission denied"
+            code = 0
+        except BaseException:
+            pass
+        os._exit(code)
+    try:
+        return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 0
+    except OSError:
+        return True
+
+
 def page_sandbox_blocked(switch: str = USERNS_SWITCH, profiles: tuple[str, ...] | None = None) -> bool:
     """Ubuntu 23.10 and later let a program make the user namespaces Chromium's page sandbox
-    is built from only when an AppArmor profile allows it. Huginn's engine gets one when it's
-    installed for everyone (or the installer added it), and Ubuntu's own covers its Qt WebEngine;
-    without one every page would fail to open, so Huginn then starts with the page sandbox off
-    (it says so in Privacy & Security)."""
+    is built from only when an AppArmor profile allows it. Huginn's own engine gets one when
+    it's installed for everyone (or the installer added it). On the distribution's engine
+    (--system-engine) the namespace is made by Huginn's own process, so Ubuntu's profile for
+    QtWebEngineProcess isn't enough: the installer's profile for the `huginn` command is what
+    allows it, and there Huginn simply tries. Where it isn't allowed every page would fail to
+    open (the engine stops with "credentials.cc: Permission denied"), so Huginn then starts
+    with the page sandbox off (it says so in Privacy & Security)."""
     if not IS_LINUX or os.environ.get("QTWEBENGINE_DISABLE_SANDBOX"):
         return False
     try:
@@ -1731,10 +1761,13 @@ def page_sandbox_blocked(switch: str = USERNS_SWITCH, profiles: tuple[str, ...] 
             restricted = f.read().strip() == "1"
     except OSError:
         return False
+    if not restricted:
+        return False
     if profiles is None:
-        system = re.fullmatch(r"/usr/lib/[^/]+/qt6/libexec/QtWebEngineProcess", engine_process_path())
-        profiles = (APPARMOR_PROFILE,) + ((SYSTEM_ENGINE_PROFILE,) if system else ())
-    return restricted and not any(os.path.exists(p) for p in profiles)
+        if "/.python/" not in engine_process_path():   # not the engine the installer fetched for Huginn
+            return not user_namespaces_work()
+        profiles = (APPARMOR_PROFILE,)
+    return not any(os.path.exists(p) for p in profiles)
 
 
 SANDBOX_OFF = False                                   # set by main() when page_sandbox_blocked()

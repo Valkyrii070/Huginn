@@ -126,9 +126,10 @@ Huginn on Linux
                    distribution's engine plays both.
   Page sandbox     Ubuntu 23.10 and later let a browser's page sandbox run only with an
                    AppArmor profile for it. The installer and the package add Huginn's
-                   (/etc/apparmor.d/huginn); Ubuntu's own covers the system engine. Without
-                   either, Huginn runs pages with the sandbox off and says so in Privacy &
-                   Security (run the installer again to add it).
+                   (/etc/apparmor.d/huginn): for its own engine, or, with --system-engine,
+                   for the huginn command itself (Ubuntu's profile for its engine is not
+                   enough there). Without it, Huginn runs pages with the sandbox off and
+                   says so in Privacy & Security (run the installer again to add it).
   Global menu      On a desktop with a menu bar along the top of the screen (KDE Plasma,
                    Unity, Huginn OS: anything offering com.canonical.AppMenu.Registrar) Huginn's
                    File, Edit, View, History, Bookmarks, Window and Help menus appear there,

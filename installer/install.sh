@@ -114,9 +114,29 @@ W="$ROOT"                                          # files are written under W; 
 system_hooks() { [ "$SYSTEM" = 1 ] && [ -z "$ROOT" ]; }   # refresh the system's menus, icons, alternatives
 
 # Ubuntu 23.10+ lets a program make the user namespaces Chromium's page sandbox is built from
-# only when an AppArmor profile allows it. This one covers Huginn's own engine (installed for
-# everyone or for one person); without it Huginn runs its pages with the sandbox off.
+# only when an AppArmor profile allows it. With Huginn's own engine the profile covers that
+# engine's page process. With --system-engine it has to cover the `huginn` command itself: the
+# namespace is made by the browser's own process, so Ubuntu's profile for its QtWebEngineProcess
+# doesn't help, and without this one the engine stops at once ("credentials.cc: Permission
+# denied"). AppArmor attaches a profile by a program's path, which is why that launcher is a
+# Python script run through its "#!" line and not a shell script that starts python3.
 apparmor_profile() {
+  if [ "$SYS_ENGINE" = 1 ]; then
+    cat <<PROFILE
+# Huginn's web engine (Chromium) builds its page sandbox from user namespaces, which
+# Ubuntu 23.10 and later allow only to programs whose AppArmor profile says so.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile huginn $LAUNCHER flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides.
+  include if exists <local/huginn>
+}
+PROFILE
+    return
+  fi
   cat <<'PROFILE'
 # Huginn's web engine (Chromium) builds its page sandbox from user namespaces, which
 # Ubuntu 23.10 and later allow only to programs whose AppArmor profile says so.
@@ -146,6 +166,7 @@ if [ "$UNINSTALL" = 1 ]; then
   pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true            # started as a script (older launchers)
   pkill -f "$VENV/bin/python -c import os, sys; sys.path.insert" 2>/dev/null || true   # this installer's launcher
   [ "$SYS_ENGINE" = 0 ] || pkill -f "import safari_browser; sys.exit(safari_browser.main())" 2>/dev/null || true
+  [ "$SYS_ENGINE" = 0 ] || pkill -f "^[^ ]*python[^ ]* $LAUNCHER( |\$)" 2>/dev/null || true   # --system-engine's launcher
   if [ "$SYSTEM" = 1 ]; then                     # for every user: the program goes, people's own data stays
     rm -rf "$W$TARGET" "$W$LAUNCHER" "$W$ENTRY"
     find "$W$ICONS" -name huginn.png -delete 2>/dev/null || true
@@ -423,7 +444,23 @@ PLIST
   fi
 else
   mkdir -p "$(dirname "$W$LAUNCHER")" "$(dirname "$W$ENTRY")"
-  cat > "$W$LAUNCHER" <<LAUNCH
+  if [ "$SYS_ENGINE" = 1 ]; then
+    # A Python script, not a shell script that starts python3: the AppArmor profile that lets
+    # the page sandbox work is attached to this file's path (see apparmor_profile above).
+    cat > "$W$LAUNCHER" <<LAUNCH
+#!$RUNPY
+# Starts Huginn (installed in $TARGET) on the system's Python and browser engine.
+# Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
+import sys
+
+sys.path.insert(0, "$TARGET")
+sys.argv[0] = "huginn"
+import safari_browser  # noqa: E402
+
+sys.exit(safari_browser.main())
+LAUNCH
+  else
+    cat > "$W$LAUNCHER" <<LAUNCH
 #!/bin/sh
 # Starts Huginn (installed in $TARGET).
 # Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
@@ -431,6 +468,7 @@ export HUGINN_DIR="$TARGET"
 exec "$RUNPY" -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
   "\$@"
 LAUNCH
+  fi
   chmod 755 "$W$LAUNCHER"
   for s in 16 32 48 64 128 256 512; do
     if [ -f "$ICONDIR/huginn-$s.png" ]; then
@@ -463,9 +501,7 @@ Name=New Private Window
 Exec=$LAUNCHER --private-window
 DESKTOP
   chmod 644 "$W$ENTRY"
-  if [ "$SYS_ENGINE" = 1 ]; then                   # Ubuntu's own profile covers its engine
-    :
-  elif [ "$SYSTEM" = 1 ]; then                     # the page sandbox's AppArmor profile (Ubuntu 23.10+)
+  if [ "$SYSTEM" = 1 ]; then                       # the page sandbox's AppArmor profile (Ubuntu 23.10+)
     mkdir -p "$W/etc/apparmor.d" && apparmor_profile > "$W/etc/apparmor.d/huginn" && chmod 644 "$W/etc/apparmor.d/huginn"
     if system_hooks && command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
       apparmor_parser -r -W /etc/apparmor.d/huginn >/dev/null 2>&1 || true
