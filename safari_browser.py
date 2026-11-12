@@ -42,6 +42,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import hmac
 import html
 import importlib.util
 import io
@@ -59,6 +60,8 @@ import random
 import re
 import shutil
 import signal
+import socket
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -68,6 +71,7 @@ import time
 _STARTED = time.perf_counter()                  # for the performance probe's start-up timings
 STARTUP_MARKS: dict[str, float] = {}            # (probe) when each part of create_browser finished
 import unicodedata
+import zlib
 from array import array
 from collections import Counter
 from functools import partial
@@ -76,8 +80,8 @@ from string import Template
 from urllib.parse import quote, quote_plus, unquote
 
 from PySide6.QtCore import (
-    QBuffer, QByteArray, QEasingCurve, QEvent, QFileInfo, QIODevice, QLibraryInfo, QMimeData, QObject, QPoint, QPointF,
-    QRect,
+    QBuffer, QByteArray, QEasingCurve, QEvent, QFile, QFileInfo, QFileSystemWatcher, QSysInfo, QIODevice, QLibraryInfo, QMimeData, QObject, QPoint, QPointF,
+    QProcess, QRect,
     QLocale, QRectF, QSettings, QSize, QStandardPaths, Qt, QTime, QTimer, QUrl, QUrlQuery, QVariantAnimation, Signal,
     Slot, qVersion,
 )
@@ -88,6 +92,11 @@ from PySide6.QtGui import (
     QPolygonF, QShortcut, QWindow,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket, QNetworkAccessManager, QNetworkReply, QNetworkRequest
+try:                                                   # the desktop's media controls and Huginn OS's hooks
+    from PySide6.QtDBus import QDBusConnection, QDBusMessage, QDBusObjectPath, QDBusVariant, QDBusVirtualObject
+except ImportError:                                    # pragma: no cover - a Qt without D-Bus
+    QDBusConnection = QDBusMessage = QDBusObjectPath = QDBusVariant = None
+    QDBusVirtualObject = QObject
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
@@ -99,10 +108,10 @@ from PySide6.QtWebEngineCore import (
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QFileDialog, QFileIconProvider, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QFileDialog, QFileIconProvider, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMenu, QMenuBar, QProgressBar, QProxyStyle, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyleFactory,
     QPlainTextEdit, QSizeGrip, QSplitter, QTimeEdit, QStyleOptionMenuItem, QStyleOptionTab, QStyleOptionViewItem, QStyledItemDelegate, QTabBar, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget, QWidgetAction,
+    QSystemTrayIcon, QTextBrowser, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 try:
@@ -272,6 +281,8 @@ PRIVACY_DEFAULTS = {
     "searchEngine": "google", "searchCustomUrl": "",
     "rejectCookieBanners": True, "fingerprintProtection": True, "clearCookiesOnQuit": False,
     "searchSuggestions": False, "rememberPages": True,
+    # Linux: tabs, search and web apps for the desktop over D-Bus (on in Huginn OS; see DesktopService)
+    "shareWithDesktop": "huginn" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower(),
 }
 
 # Permission prompts: (glyph, "Allow “site” to ...?" wording, short label for settings).
@@ -798,6 +809,9 @@ QTreeWidget#SidebarList { background: transparent; border: none; outline: none; 
 QTreeWidget#SidebarList::item { color: $text; padding: 5px 4px; border-radius: 7px; }
 QTreeWidget#SidebarList::item:hover { background: $hover; }
 QTreeWidget#SidebarList::branch { background: transparent; image: none; border: none; }
+QTreeWidget#TrailsTree { background: transparent; border: none; outline: none; }
+QTreeWidget#TrailsTree::item { padding: 3px 2px; }
+QLabel#PairKey { color: $text; font-family: "DejaVu Sans Mono", "Cascadia Mono", Menlo, monospace; font-size: 11pt; padding: 4px 0; }
 QLineEdit#SidebarSearch, QLineEdit#SplitAddress {
     background: $segment_bg; color: $text; border: 1px solid transparent; border-radius: 8px; padding: 4px 8px;
     selection-background-color: $selection; selection-color: $selection_text;
@@ -829,6 +843,9 @@ QToolButton#PanelButton:checked { background: $segment_active; }
 
 /* ---------- tab overview ---------- */
 QScrollArea#OverviewScroll { background: transparent; border: none; }
+QScrollArea#SheetScroll, QWidget#SheetScrollBody { background: transparent; border: none; }
+QLabel#PairCode { color: $text; font-size: 26pt; font-weight: 600; letter-spacing: 4px; padding: 6px; }
+QTextBrowser#ChangesView { background: $group_bg; color: $text; border: 1px solid $divider; border-radius: 10px; padding: 6px 10px; }
 QScrollArea#SettingsScroll { background: transparent; border: none; }
 QWidget#SettingsPage { background: transparent; }
 QLabel#OverviewEmpty { color: $text_secondary; }
@@ -853,6 +870,8 @@ QDialog#Sheet { background: $menu_bg; border: $menu_border_css; }
 QDialog#Sheet[inWindow="true"] { border-radius: 12px; }
 QLabel#SheetTitle { color: $text; font-size: 11pt; font-weight: 600; }
 QLabel#SheetBody, QLabel#RowSubtitle, QLabel#SheetNote { color: $text_secondary; }
+QLabel#SheetError { color: $danger; }
+QLabel#AppTitle { color: $text; font-weight: 600; }
 QLabel#RowSubtitle, QLabel#SheetNote { font-size: 8.5pt; }
 QLabel#RowTitle, QLabel#PromptText { color: $text; }
 QLabel#SectionHeader { color: $text_secondary; font-size: 8pt; font-weight: 600; padding: 10px 6px 3px 6px; }
@@ -1406,6 +1425,14 @@ _LOCALHOST_RE = re.compile(r"^localhost" + _TAIL, re.IGNORECASE)
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}" + _TAIL)
 _IPV6_RE = re.compile(r"^\[[0-9a-fA-F:.]+\]" + _TAIL)
 _SECOND_LEVEL = {"co", "com", "net", "org", "gov", "ac", "edu", "ne", "or", "go"}
+# Hosting domains where each name under them is someone else's site (from the Public Suffix
+# List's private part): alice.github.io and bob.github.io are two sites, not one.
+_PRIVATE_SUFFIXES = {
+    "github.io", "githubusercontent.com", "gitlab.io", "blogspot.com", "appspot.com", "herokuapp.com",
+    "netlify.app", "vercel.app", "pages.dev", "workers.dev", "web.app", "firebaseapp.com",
+    "azurewebsites.net", "cloudfront.net", "readthedocs.io", "glitch.me", "ngrok.io", "fly.dev",
+    "onrender.com", "myshopify.com", "neocities.org", "duckdns.org", "translate.goog",
+}
 
 
 def url_from_user_input(text: str) -> QUrl | None:
@@ -1434,7 +1461,8 @@ def registrable_domain(host: str) -> str:
     if ":" in host or re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
         return host                                   # an IP address is its own site
     parts = host.split(".")
-    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL:
+    if len(parts) >= 3 and (len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL
+                            or ".".join(parts[-2:]) in _PRIVATE_SUFFIXES):
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])
 
@@ -2131,6 +2159,16 @@ class IconFactory:
                     'C12.2 17 13 15.8 14.4 15.8 H16.6 C18.6 15.8 20.2 14.2 20.2 12 C20.2 7.4 16.6 3.8 12 3.8 Z"/>'
                     '<circle cx="8" cy="11" r="1.1" fill="{c}"/><circle cx="11" cy="7.6" r="1.1" fill="{c}"/>'
                     '<circle cx="15.2" cy="8.4" r="1.1" fill="{c}"/>'),
+        "mimir": ('<path d="M12 3.6 C7.4 3.6 4.6 6.8 4.6 10.4 C4.6 13 6 14.6 7.4 15.6 V18.4 H16.6 V15.6 C18 14.6 19.4 13 '
+                  '19.4 10.4 C19.4 6.8 16.6 3.6 12 3.6 Z"/><path d="M9.2 20.6 H14.8 M9.6 10.6 C10.6 9.4 13.4 9.4 14.4 10.6"/>'),
+        "bifrost": ('<path d="M2.8 18.4 C5 9.6 19 9.6 21.2 18.4"/><path d="M6.2 18.4 C7.8 12.8 16.2 12.8 17.8 18.4"/>'
+                    '<path d="M2.8 18.4 H6.2 M17.8 18.4 H21.2"/>'),
+        "translate": ('<path d="M3.4 5.6 H12.6 M8 3.4 V5.6 M10.8 5.6 C10.1 9.2 7.6 12.2 3.9 13.8 M5.4 8.4 C6.6 10.6 8.6 12.3 11.2 13.4"/>'
+                      '<path d="M12.6 20.6 L16.4 11.2 L20.2 20.6 M13.9 17.6 H18.9"/>'),
+        "trail": ('<circle cx="6" cy="5.6" r="2.2"/><circle cx="6" cy="18.4" r="2.2"/><circle cx="18" cy="12" r="2.2"/>'
+                  '<path d="M6 7.8 V16.2 M6 10.6 C6 12 9 12 15.8 12"/>'),
+        "watch": ('<path d="M2.8 12 C5.2 7.4 8.4 5.4 12 5.4 C15.6 5.4 18.8 7.4 21.2 12 C18.8 16.6 15.6 18.6 12 18.6 '
+                  'C8.4 18.6 5.2 16.6 2.8 12 Z"/><circle cx="12" cy="12" r="3"/>'),
         "valhalla": ('<path d="M4 20 V10.4 L12 4.6 L20 10.4 V20"/><path d="M9.4 20 V14.4 A2.6 2.6 0 0 1 14.6 14.4 V20"/>'
                      '<path d="M2.8 20 H21.2"/>'),
         "game": ('<path d="M7.4 8.4 H16.6 A4 4 0 0 1 20.4 13.2 L19.6 16.6 A2 2 0 0 1 16.4 17.6 L14.6 15.6 H9.4 '
@@ -2161,6 +2199,8 @@ class IconFactory:
         "mail": '<rect x="3.8" y="6" width="16.4" height="12" rx="2.2"/><path d="M4.6 7.2 L12 12.6 L19.4 7.2"/>',
         "open_in": ('<path d="M13.6 4.6 H19.4 V10.4 M19.4 4.6 L11.4 12.6"/>'
                     '<path d="M17.4 13.8 V17.6 A1.8 1.8 0 0 1 15.6 19.4 H6.4 A1.8 1.8 0 0 1 4.6 17.6 V8.4 A1.8 1.8 0 0 1 6.4 6.6 H10.2"/>'),
+        "more": '<circle cx="6.4" cy="12" r="1.15"/><circle cx="12" cy="12" r="1.15"/><circle cx="17.6" cy="12" r="1.15"/>',
+        "app": '<rect x="4.6" y="4.6" width="14.8" height="14.8" rx="4"/><path d="M12 8.6 V15.4 M8.6 12 H15.4"/>',
         "gift": ('<rect x="4" y="9" width="16" height="11" rx="1.8"/><path d="M3.4 9 H20.6 M12 9 V20"/>'
                  '<path d="M12 9 C10.6 5.2 7 5 7 7.2 C7 8.6 9.6 9 12 9 C14.4 9 17 8.6 17 7.2 C17 5 13.4 5.2 12 9"/>'),
     }
@@ -3203,6 +3243,244 @@ def export_icons(folder: str) -> int:
     return 0 if ok else 1
 
 
+# --------------------------------------------------------------------------------------
+# Web apps (page menu > Install as App...): a site in its own window, with its own icon in the
+# apps menu, Start menu or Applications, opened with `huginn --app=ID`. It shares the main
+# profile (so you stay signed in) and Huginn's protections; links to other sites open in
+# Huginn. Kept in settings ("webApps"); icons in <data>/webapps.
+# --------------------------------------------------------------------------------------
+APP_LAUNCH = "⁣huginn:app="                       # in a second launch's message: open this web app
+WEB_APPS_KEY = "webApps"
+WEB_APPS_DIR = "webapps"
+WEB_APP_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
+
+
+def wants_app(argv: list[str]) -> str | None:
+    """`huginn --app=ID`: the web app to open (None if none, or not a valid id)."""
+    for arg in argv:
+        if arg.lower().startswith("--app="):
+            app_id = arg[6:].strip().lower()
+            return app_id if WEB_APP_ID.fullmatch(app_id) else None
+    return None
+
+
+def load_web_apps(settings: QSettings) -> list[dict]:
+    try:
+        apps = json.loads(str(settings.value(WEB_APPS_KEY, "[]") or "[]"))
+    except (ValueError, TypeError):
+        return []
+    return [a for a in apps if isinstance(a, dict) and WEB_APP_ID.fullmatch(str(a.get("id", "")))
+            and str(a.get("url", "")).startswith(("https://", "http://"))]
+
+
+def save_web_apps(settings: QSettings, apps: list[dict]) -> None:
+    settings.setValue(WEB_APPS_KEY, json.dumps(apps))
+    settings.sync()
+
+
+def web_app_id(name: str, url: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24] or "app"
+    start = QUrl(url)
+    origin = f"{start.scheme()}://{start.authority()}"
+    return f"{slug}-{hashlib.sha1(origin.encode()).hexdigest()[:6]}"
+
+
+def web_app_scope(url: str, scope: str = "") -> str:
+    """Where the app's pages live: its manifest's scope on the same site, else the whole site."""
+    start = QUrl(url)
+    origin = f"{start.scheme()}://{start.authority()}"
+    candidate = QUrl(start).resolved(QUrl(scope)) if scope else QUrl()
+    if candidate.isValid() and f"{candidate.scheme()}://{candidate.authority()}" == origin and candidate.path():
+        path = candidate.path()
+        return origin + (path if path.endswith("/") else path.rsplit("/", 1)[0] + "/")
+    return origin + "/"
+
+
+def web_app_in_scope(app: dict, url: QUrl) -> bool:
+    scope = str(app.get("scope") or web_app_scope(app["url"]))
+    here = f"{url.scheme()}://{url.authority()}{url.path() or '/'}"
+    return here.startswith(scope) or here.rstrip("/") + "/" == scope
+
+
+def web_app_for_origin(apps: list[dict], url: QUrl) -> dict | None:
+    origin = f"{url.scheme()}://{url.authority()}"
+    return next((a for a in apps if str(a.get("scope", a["url"])).startswith(origin + "/")), None)
+
+
+def letter_icon(name: str, colour: str, size: int = 256) -> QImage:
+    """An app with no icon of its own: its first letter on a rounded square of its colour."""
+    image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    p = QPainter(image)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(colour) if QColor(colour).isValid() else QColor("#4C6A88"))
+    p.drawRoundedRect(QRectF(0, 0, size, size), size * 0.22, size * 0.22)
+    font = QFont(QApplication.font())
+    font.setPixelSize(int(size * 0.5))
+    font.setWeight(QFont.Weight.DemiBold)
+    p.setFont(font)
+    p.setPen(QColor("#FFFFFF"))
+    p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, (name.strip()[:1] or "?").upper())
+    p.end()
+    return image
+
+
+def square_icon(image: QImage, size: int = 256) -> QImage:
+    """A site's icon, centred on a square canvas (icons that aren't square stay unstretched)."""
+    if image.isNull():
+        return image
+    scaled = image.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    canvas = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(Qt.GlobalColor.transparent)
+    p = QPainter(canvas)
+    p.drawImage((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    p.end()
+    return canvas
+
+
+def huginn_launch_command() -> list[str]:
+    """How to start Huginn from an app shortcut: its installed launcher, else this Python."""
+    if IS_MAC:
+        launcher = os.path.normpath(os.path.join(APP_DIR, "..", "..", "MacOS", "Huginn"))
+        if os.path.isfile(launcher):
+            return [launcher]
+    elif IS_LINUX:
+        own = os.path.join(os.path.expanduser("~"), ".local", "bin", "huginn")
+        for launcher in (own, "/usr/bin/huginn", shutil.which("huginn") or ""):
+            if launcher and os.path.isfile(launcher) and os.access(launcher, os.X_OK):
+                return [launcher]
+    program, _ = browser_launch_command()
+    return [program, os.path.abspath(__file__)]
+
+
+def _desktop_quote(arg: str) -> str:
+    """An argument for a .desktop file's Exec line (freedesktop's quoting rules)."""
+    if re.fullmatch(r"[A-Za-z0-9_./=:+-]+", arg):
+        return arg
+    return '"' + re.sub(r'([\\"`$])', r"\\\1", arg).replace("%", "%%") + '"'
+
+
+def web_app_launcher_path(app: dict) -> str:
+    name = re.sub(r'[\\/:*?"<>|]+', "", str(app.get("name", ""))).strip() or app["id"]
+    if IS_WINDOWS:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs", f"{BROWSER_NAME} Apps", f"{name}.lnk")
+    if IS_MAC:
+        return os.path.join(os.path.expanduser("~"), "Applications", f"{BROWSER_NAME} Apps", f"{name}.app")
+    data = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(data, "applications", f"huginn-app-{app['id']}.desktop")
+
+
+def install_web_app_launcher(app: dict, icon_png: str) -> str | None:
+    """The app's entry in the apps menu (Linux), Start menu (Windows) or ~/Applications (Mac)."""
+    path = web_app_launcher_path(app)
+    command = huginn_launch_command() + [f"--app={app['id']}"]
+    try:
+        if IS_WINDOWS:
+            icon = os.path.splitext(icon_png)[0] + ".ico"
+            QImage(icon_png).scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation).save(icon, "ICO")
+            arguments = " ".join(f'"{a}"' for a in command[1:])
+            return path if create_windows_shortcut(path, command[0], arguments, APP_DIR,
+                                                   icon if os.path.isfile(icon) else app_icon_file(),
+                                                   f"{app['name']} - a {BROWSER_NAME} web app") else None
+        if IS_MAC:
+            contents = os.path.join(path, "Contents")
+            os.makedirs(os.path.join(contents, "MacOS"), exist_ok=True)
+            os.makedirs(os.path.join(contents, "Resources"), exist_ok=True)
+            plist = {"CFBundleName": app["name"], "CFBundleDisplayName": app["name"],
+                     "CFBundleIdentifier": f"org.huginn.app.{app['id']}", "CFBundleExecutable": "app",
+                     "CFBundleIconFile": "icon.icns", "CFBundlePackageType": "APPL", "LSUIElement": True}
+            import plistlib
+            with open(os.path.join(contents, "Info.plist"), "wb") as f:
+                plistlib.dump(plist, f)
+            script = os.path.join(contents, "MacOS", "app")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\nexec " + " ".join("'" + a.replace("'", "'\\''") + "'" for a in command) + "\n")
+            os.chmod(script, 0o755)
+            QImage(icon_png).save(os.path.join(contents, "Resources", "icon.icns"), "ICNS")
+            return path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        host = QUrl(app["url"]).host()
+        entry = ("[Desktop Entry]\nType=Application\n"
+                 f"Name={app['name']}\nComment={host} - a {BROWSER_NAME} web app\n"
+                 f"Exec={' '.join(_desktop_quote(a) for a in command)}\nIcon={icon_png}\n"
+                 "Terminal=false\nCategories=Network;\nStartupNotify=true\n"
+                 f"X-Huginn-App={app['id']}\nX-Huginn-Url={app['url']}\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(entry)
+        os.chmod(path, 0o644)
+        if shutil.which("update-desktop-database"):
+            subprocess.Popen(["update-desktop-database", "-q", os.path.dirname(path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return path
+    except OSError:
+        return None
+
+
+def remove_web_app_files(app: dict, data_dir: str) -> None:
+    path = web_app_launcher_path(app)
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+    for ext in (".png", ".ico"):
+        try:
+            os.remove(os.path.join(data_dir, WEB_APPS_DIR, app["id"] + ext))
+        except OSError:
+            pass
+
+
+def remove_web_app(settings: QSettings, data_dir: str, app_id: str) -> bool:
+    apps = load_web_apps(settings)
+    gone = [a for a in apps if a["id"] == app_id]
+    for app in gone:
+        remove_web_app_files(app, data_dir)
+    save_web_apps(settings, [a for a in apps if a["id"] != app_id])
+    return bool(gone)
+
+
+# A page's own description of itself as an app (its web app manifest), read in the page.
+WEB_APP_INFO_JS = r"""(async () => {
+  const pick = (sel, attr) => { const el = document.querySelector(sel); return el ? el.getAttribute(attr) || "" : ""; };
+  const abs = (u, base) => { try { return new URL(u, base || location.href).href; } catch (e) { return ""; } };
+  const out = {title: document.title || "", url: location.href, theme: pick('meta[name="theme-color"]', "content"),
+               appName: pick('meta[name="application-name"]', "content") || pick('meta[name="apple-mobile-web-app-title"]', "content"),
+               icons: []};
+  for (const link of document.querySelectorAll('link[rel~="apple-touch-icon"], link[rel~="icon"]')) {
+    const sizes = (link.getAttribute("sizes") || "").split(/\s+/).map(s => parseInt(s, 10) || 0);
+    out.icons.push({src: abs(link.getAttribute("href")), size: Math.max(0, ...sizes) || (link.rel.includes("apple") ? 180 : 32)});
+  }
+  const href = pick('link[rel~="manifest"]', "href");
+  if (href) {
+    try {
+      const manifestUrl = abs(href);
+      const m = await (await fetch(manifestUrl, {credentials: "include"})).json();
+      out.name = m.short_name || m.name || ""; out.longName = m.name || "";
+      out.start = m.start_url ? abs(m.start_url, manifestUrl) : ""; out.scope = m.scope ? abs(m.scope, manifestUrl) : "";
+      if (m.theme_color) out.theme = m.theme_color;
+      for (const icon of (m.icons || [])) {
+        const sizes = String(icon.sizes || "").split(/\s+/).map(s => parseInt(s, 10) || 0);
+        if (!/monochrome/.test(icon.purpose || "")) out.icons.push({src: abs(icon.src, manifestUrl), size: Math.max(0, ...sizes)});
+      }
+    } catch (e) {}
+  }
+  out.icons.sort((a, b) => b.size - a.size);
+  const best = out.icons.find(i => i.size >= 128 && i.size <= 1024) || out.icons[0];
+  if (best) {
+    try {
+      const blob = await (await fetch(best.src, {credentials: "include"})).blob();
+      if (blob.size < 2000000) out.icon = await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(blob); });
+    } catch (e) {}
+  }
+  return JSON.stringify(out);
+})()"""
+
+
 class HuginnApplication(QApplication):
     """The application object. macOS hands links and files to an app as FileOpen events sent
     to the application itself (clicking a link elsewhere with Huginn as the default browser,
@@ -3699,6 +3977,7 @@ class TouchIconFetcher(QObject):
 
 _MAIN_FRAME = QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMainFrame
 _REDIRECT = QWebEngineUrlRequestInfo.NavigationType.NavigationTypeRedirect
+_SUB_FRAME = QWebEngineUrlRequestInfo.ResourceType.ResourceTypeSubFrame
 
 
 class PrivacyGuard(QWebEngineUrlRequestInterceptor):
@@ -3730,12 +4009,17 @@ class PrivacyGuard(QWebEngineUrlRequestInterceptor):
         self.trackers_by_site: Counter[str] = Counter()
         self.third_parties: dict[str, set[str]] = {}   # site -> other companies it contacted
         self._page_flags: dict[tuple, int] = {}
+        self.on_same_site_frame = None           # Forget on Close hears of a site's frames of itself
 
     # -- requests ---------------------------------------------------------------------------
     def interceptRequest(self, info) -> None:
         url = info.requestUrl()
         if self.gpc:
             info.setHttpHeader(b"Sec-GPC", b"1")
+        if info.resourceType() == _SUB_FRAME and self.on_same_site_frame is not None:
+            first = info.firstPartyUrl().host().lower()
+            if first and url.host() and registrable_domain(url.host().lower()) == registrable_domain(first):
+                self.on_same_site_frame(url)
         if info.resourceType() == _MAIN_FRAME and bytes(info.requestMethod()) == b"GET":
             if self.strip_links:
                 clean = strip_tracking_params(url)
@@ -3876,13 +4160,20 @@ class CookieKeeper(QObject):
     """Mirrors a profile's cookie jar so cookies can be deleted per site (Clear History
     for 'the last hour' removes only the cookies of sites visited in that hour)."""
 
-    def __init__(self, store, parent: QObject | None = None) -> None:
+    def __init__(self, profile: QWebEngineProfile, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.store = store
+        self.profile = profile
         self.cookies: dict[tuple, object] = {}
+        store = profile.cookieStore()
         store.cookieAdded.connect(self._added)
         store.cookieRemoved.connect(self._removed)
         store.loadAllCookies()
+
+    @property
+    def store(self):
+        """Asked for each time: PySide drops a kept handle to it when the newest page using the
+        profile closes (the cookie store itself lives on)."""
+        return self.profile.cookieStore()
 
     @staticmethod
     def _key(cookie) -> tuple:
@@ -4300,6 +4591,3432 @@ def set_consent_script(profile: QWebEngineProfile, on: bool) -> None:
         script.setWorldId(CONSENT_WORLD)
         script.setRunsOnSubFrames(True)
         scripts.insert(script)
+
+
+def purge_cookie_db_sites(storage_path: str, sites: set[str]) -> int:
+    """Forget on Close, after a quit or crash with the site still open: its cookies go
+    straight from the database, before the profile opens it. Returns how many."""
+    path = os.path.join(storage_path, "Cookies")
+    if not sites or not os.path.isfile(path):
+        return 0
+    try:
+        con = sqlite3.connect(path, timeout=2)
+        try:
+            rows = con.execute("SELECT rowid, host_key FROM cookies").fetchall()
+            doomed = [(rowid,) for rowid, host in rows
+                      if registrable_domain(str(host or "").lstrip(".").lower()) in sites]
+            con.executemany("DELETE FROM cookies WHERE rowid = ?", doomed)
+            con.commit()
+            return len(doomed)
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return 0
+
+
+# Forget on Close (page menu): when a site's last tab closes (or leaves it), what it kept goes:
+# cookies, and - from a hidden page that is that site for a moment - its local storage,
+# IndexedDB databases, caches and service workers. Sites are in settings "forgetSites";
+# origins visited and not yet wiped in "forgetPending" (wiped at the next start if Huginn
+# closed with them open).
+FORGET_SITES_KEY = "forgetSites"
+FORGET_PENDING_KEY = "forgetPending"
+WIPE_STORAGE_JS = r"""(async () => {
+  try { localStorage.clear(); } catch (e) {}
+  try { sessionStorage.clear(); } catch (e) {}
+  try {                       // each deletion waits for the closing tab's connection to let go
+    await Promise.all((await indexedDB.databases()).filter(db => db.name).map(db => new Promise(done => {
+      const request = indexedDB.deleteDatabase(db.name);
+      request.onsuccess = request.onerror = () => done();
+    })));
+  } catch (e) {}
+  try { for (const key of await caches.keys()) await caches.delete(key); } catch (e) {}
+  try { for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister(); } catch (e) {}
+  return "wiped";
+})()"""
+
+
+class SiteDataWiper(QObject):
+    """Clears origins' storage one at a time, each from a hidden page on that origin
+    (loaded from text, so nothing is fetched from the site)."""
+    finished = Signal(str)                               # the origin
+
+    def __init__(self, profile: QWebEngineProfile, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.profile = profile
+        self.queue: list[str] = []
+        self.page: QWebEnginePage | None = None
+        self.current = ""
+
+    def wipe(self, origins) -> None:
+        for origin in origins:
+            if origin not in self.queue and origin != self.current:
+                self.queue.append(origin)
+        if self.page is None:
+            self._next()
+
+    def busy(self) -> bool:
+        return self.page is not None or bool(self.queue)
+
+    def _next(self) -> None:
+        if not self.queue:
+            return
+        self.current = self.queue.pop(0)
+        self.page = QWebEnginePage(self.profile, self)
+        self.page.loadFinished.connect(self._loaded)
+        self.page.setHtml("<!doctype html><title></title>", QUrl(self.current + "/"))
+        QTimer.singleShot(10000, self, partial(self._done, self.page))     # never stuck on one
+
+    def _loaded(self, *_) -> None:
+        page = self.page
+        if page is None:
+            return
+        page.runJavaScript("window.__huginnWiped = null; " + WIPE_STORAGE_JS + ".then(r => window.__huginnWiped = r);",
+                           QWebEngineScript.ScriptWorldId.MainWorld)
+        started = time.monotonic()
+
+        def poll() -> None:
+            if self.page is not page:
+                return
+            def got(result) -> None:
+                if result or time.monotonic() - started > 7:
+                    self._done(page)
+                else:
+                    QTimer.singleShot(60, self, poll)
+            page.runJavaScript("window.__huginnWiped", QWebEngineScript.ScriptWorldId.MainWorld, got)
+        QTimer.singleShot(30, self, poll)
+
+    def _done(self, page) -> None:
+        if self.page is not page:
+            return
+        origin, self.current, self.page = self.current, "", None
+        page.deleteLater()
+        self.finished.emit(origin)
+        self._next()
+
+
+# ---------------------------------------------------------------------------- Heimdall
+# Heimdall watches pages for you (page menu > Watch Page for Changes). While Huginn is open
+# he visits each one on its own schedule from a fresh private profile - no cookies, no
+# history, Huginn's blocking - reads its text (or just the part you selected), and tells
+# you when it changed: a notification, and the changes in his sheet. Kept in heimdall.json.
+HEIMDALL_FILE = "heimdall.json"
+HEIMDALL_EVERY = ((60, "Every hour"), (360, "Every 6 hours"), (1440, "Every day"))    # minutes
+HEIMDALL_DEFAULT_EVERY = 360
+HEIMDALL_TICK_MS = 5 * 60_000            # how often he looks at what's due
+HEIMDALL_FIRST_MS = 90_000               # after start, so he doesn't slow it down
+HEIMDALL_SETTLE_MS = 2500                # a loaded page gets this long to draw itself
+HEIMDALL_TIMEOUT_MS = 45_000
+HEIMDALL_GAP_MS = 1500                   # between two visits
+HEIMDALL_KEEP_CHANGES = 12
+HEIMDALL_MAX_LINES = 4000
+HEIMDALL_SHOW_LINES = 40                 # kept per change, per side
+HEIMDALL_EXTRACT_JS = r"""(() => {
+  const sel = %s;
+  let el = null;
+  try { el = sel ? document.querySelector(sel) : null; } catch (e) {}
+  const found = !sel || !!el;
+  if (!el) el = document.querySelector('main, [role="main"], article') || document.body;
+  const text = el ? (el.innerText || el.textContent || '') : '';
+  return JSON.stringify({title: document.title || '', text: text.slice(0, 400000), found: found});
+})()"""
+# The part of the page you selected: the nearest block around the selection, as a CSS path.
+HEIMDALL_PICK_JS = r"""(() => {
+  const s = window.getSelection();
+  if (!s || s.isCollapsed || !s.rangeCount) return '';
+  let el = s.getRangeAt(0).commonAncestorContainer;
+  if (el && el.nodeType !== 1) el = el.parentElement;
+  while (el && el !== document.body && getComputedStyle(el).display.startsWith('inline')) el = el.parentElement;
+  if (!el || el === document.body || el === document.documentElement) return '';
+  const path = [];
+  for (let n = el; n && n.nodeType === 1 && n !== document.documentElement; n = n.parentElement) {
+    if (n.id && /^[A-Za-z][\w-]*$/.test(n.id) && document.querySelectorAll('#' + n.id).length === 1) {
+      path.unshift('#' + n.id);
+      break;
+    }
+    let part = n.localName;
+    const parent = n.parentElement;
+    if (parent && n.localName !== 'body') {
+      const same = Array.from(parent.children).filter(c => c.localName === n.localName);
+      if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(n) + 1) + ')';
+    }
+    path.unshift(part);
+    if (n.localName === 'body') break;
+  }
+  const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+  return JSON.stringify({selector: path.join(' > '), text: text.slice(0, 140)});
+})()"""
+_HEIMDALL_NOISE = re.compile(
+    r"\b(?:\d+|an?|one)\s*(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\s+ago\b|\bjust now\b", re.I)
+
+
+def heimdall_lines(text: str) -> list[str]:
+    """A page's text as the lines Heimdall compares: whitespace evened out, blanks gone."""
+    lines = []
+    for raw in str(text or "").splitlines():
+        line = " ".join(raw.split())
+        if line:
+            lines.append(line[:500])
+            if len(lines) >= HEIMDALL_MAX_LINES:
+                break
+    return lines
+
+
+def heimdall_diff(old: list[str], new: list[str]) -> tuple[list[str], list[str]]:
+    """(added, removed) lines. "5 minutes ago"-style times don't count as changes, and
+    neither does the same lines in another order."""
+    import difflib
+    def key(line: str) -> str:
+        return _HEIMDALL_NOISE.sub("~ago", line.lower())
+    a, b = [key(x) for x in old], [key(x) for x in new]
+    added, removed = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += old[i1:i2]
+        if tag in ("replace", "insert"):
+            added += new[j1:j2]
+    if sorted(key(x) for x in added) == sorted(key(x) for x in removed):
+        return [], []
+    return added, removed
+
+
+def heimdall_ago(when: float, now: float | None = None) -> str:
+    seconds = max(0, (now or time.time()) - float(when or 0))
+    if seconds < 90:
+        return "just now"
+    if seconds < 3600:
+        return f"{round(seconds / 60)} min ago"
+    if seconds < 86400:
+        hours = round(seconds / 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = round(seconds / 86400)
+    return "yesterday" if days == 1 else f"{days} days ago" if days < 8 else time.strftime("%d %b", time.localtime(when))
+
+
+def heimdall_url(url: QUrl | str) -> str:
+    """A watched page's address: without its #fragment."""
+    return QUrl(url).toString().split("#", 1)[0]          # (a '#' in the path is written %23)
+
+
+class _HeimdallPage(QWebEnginePage):
+    """The page Heimdall visits with: never shows a dialog, never makes a sound."""
+
+    def javaScriptAlert(self, *_):
+        pass
+
+    def javaScriptConfirm(self, *_):
+        return False
+
+    def javaScriptPrompt(self, *_):
+        return False, ""
+
+    def javaScriptConsoleMessage(self, *_):
+        pass
+
+
+class Heimdall(QObject):
+    changed = Signal()                       # the list or a watch changed (his sheet refreshes)
+    noticed = Signal(dict, list, list)       # a watch, the lines added, the lines removed
+
+    def __init__(self, window: "BrowserWindow", path: str) -> None:
+        super().__init__(window)
+        self.window = window
+        self.path = path
+        self.watches: list[dict] = self._load()
+        self.queue: list[str] = []
+        self.page: QWebEnginePage | None = None
+        self.current: dict | None = None
+        self.paused = lambda: bool(window.game_mode is not None and window.game_mode.active)
+        self._tick = QTimer(self)
+        self._tick.setInterval(HEIMDALL_TICK_MS)
+        self._tick.timeout.connect(self.check_due)
+        self._tick.start()
+        QTimer.singleShot(HEIMDALL_FIRST_MS, self, self.check_due)
+        self._deadline = QTimer(self)
+        self._deadline.setSingleShot(True)
+        self._deadline.setInterval(HEIMDALL_TIMEOUT_MS)
+        self._deadline.timeout.connect(lambda: self._finish(error="The page took too long to load."))
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(HEIMDALL_SETTLE_MS)
+        self._settle.timeout.connect(self._extract)
+
+    # -- the list
+    def _load(self) -> list[dict]:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return []
+        watches = []
+        for watch in data.get("watches", []) if isinstance(data, dict) else []:
+            if not isinstance(watch, dict) or not isinstance(watch.get("url"), str):
+                continue
+            if QUrl(watch["url"]).scheme() not in ("http", "https") or not isinstance(watch.get("id"), str):
+                continue
+            watch["every"] = int(watch.get("every") or HEIMDALL_DEFAULT_EVERY)
+            if not isinstance(watch.get("changes"), list):
+                watch["changes"] = []
+            watches.append(watch)
+        return watches
+
+    def save(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "watches": self.watches}, f, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def get(self, watch_id: str) -> dict | None:
+        return next((w for w in self.watches if w["id"] == watch_id), None)
+
+    def find(self, url: QUrl | str) -> dict | None:
+        key = heimdall_url(url)
+        return next((w for w in self.watches if w["url"] == key), None)
+
+    def add(self, url: QUrl | str, title: str = "", selector: str = "", snippet: str = "",
+            every: int = HEIMDALL_DEFAULT_EVERY) -> dict:
+        key = heimdall_url(url)
+        watch = self.find(key)
+        if watch is None:
+            watch = {"id": uuid.uuid4().hex[:12], "url": key, "added": time.time(), "changes": []}
+            self.watches.append(watch)
+        watch.update({"title": title.strip()[:200] or bare_host(QUrl(key)), "selector": selector, "snippet": snippet[:140],
+                      "every": int(every), "checked": 0, "unread": False, "error": ""})
+        watch.pop("lines", None)                          # the next visit is the new starting point
+        self.save()
+        self.changed.emit()
+        self.check_now(watch["id"])
+        return watch
+
+    def remove(self, watch_id: str) -> None:
+        self.watches = [w for w in self.watches if w["id"] != watch_id]
+        self.queue = [i for i in self.queue if i != watch_id]
+        self.save()
+        self.changed.emit()
+
+    def set_every(self, watch_id: str, minutes: int) -> None:
+        watch = self.get(watch_id)
+        if watch is not None and watch.get("every") != minutes:
+            watch["every"] = int(minutes)
+            self.save()
+            self.changed.emit()
+
+    def mark_read(self, watch_id: str) -> None:
+        watch = self.get(watch_id)
+        if watch is not None and watch.get("unread"):
+            watch["unread"] = False
+            self.save()
+            self.changed.emit()
+
+    def unread(self) -> list[dict]:
+        return [w for w in self.watches if w.get("unread")]
+
+    # -- visiting
+    def due(self, now: float | None = None) -> list[dict]:
+        now = now or time.time()
+        return [w for w in self.watches if now - float(w.get("checked") or 0) >= w["every"] * 60 - 30]
+
+    def check_due(self) -> None:
+        if self.paused():                                 # a game is running: not now
+            return
+        for watch in self.due():
+            if watch["id"] not in self.queue and (self.current is None or self.current["id"] != watch["id"]):
+                self.queue.append(watch["id"])
+        self._next()
+
+    def check_now(self, watch_id: str) -> None:
+        if self.current is not None and self.current["id"] == watch_id:
+            return
+        self.queue = [watch_id] + [i for i in self.queue if i != watch_id]
+        self._next()
+
+    def busy(self) -> bool:
+        return self.page is not None or bool(self.queue)
+
+    def _profile(self) -> QWebEngineProfile:
+        """A new visitor each time: an off-the-record profile with Huginn's protections,
+        which goes when the visit is over."""
+        w = self.window
+        profile = QWebEngineProfile(QApplication.instance())       # unnamed = off the record
+        w._setup_profile(profile)
+        guard = PrivacyGuard(w.store, profile, record=False)        # (his visits aren't in your stats)
+        guard.adblock = w.guard.adblock
+        profile.setUrlRequestInterceptor(guard)
+        profile.cookieStore().setCookieFilter(guard.allow_cookie)
+        try:
+            profile.downloadRequested.disconnect(w._on_download_requested)
+        except (RuntimeError, TypeError):
+            pass
+        profile.downloadRequested.connect(lambda download: download.cancel())
+        profile._huginn_guard = guard
+        return profile
+
+    def _next(self) -> None:
+        if self.page is not None:
+            return
+        while self.queue:
+            watch = self.get(self.queue.pop(0))
+            if watch is None:
+                continue
+            self.current = watch
+            profile = self._profile()
+            self.page = _HeimdallPage(profile, self)
+            self.page.setAudioMuted(True)
+            self.page.destroyed.connect(profile.deleteLater)       # pages go before their profile
+            self.page.loadFinished.connect(self._loaded)
+            self._deadline.start()
+            self.page.load(QUrl(watch["url"]))
+            return
+
+    def _loaded(self, ok: bool) -> None:
+        if self.page is None:
+            return
+        if not ok:
+            self._finish(error="Heimdall couldn't reach the page.")
+            return
+        self._settle.start()
+
+    def _extract(self) -> None:
+        page, watch = self.page, self.current
+        if page is None or watch is None:
+            return
+        page.runJavaScript(HEIMDALL_EXTRACT_JS % json.dumps(watch.get("selector") or ""), APPLICATION_WORLD,
+                           lambda result, p=page: self._read(p, result))
+
+    def _read(self, page: QWebEnginePage, result) -> None:
+        if page is not self.page or self.current is None:
+            return
+        try:
+            data = json.loads(result) if isinstance(result, str) else {}
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict) or "text" not in data:
+            self._finish(error="Heimdall couldn't read the page.")
+            return
+        watch = self.current
+        if not data.get("found", True):
+            self._finish(error="The part you picked isn't on the page now.")
+            return
+        lines = heimdall_lines(data.get("text", ""))
+        if not watch.get("title") or watch["title"] == bare_host(QUrl(watch["url"])):
+            watch["title"] = str(data.get("title") or watch.get("title") or "")[:200]
+        if "lines" not in watch:                                   # the first visit: the starting point
+            watch["lines"] = lines
+            self._finish()
+            return
+        added, removed = heimdall_diff(watch["lines"], lines)
+        watch["lines"] = lines
+        if added or removed:
+            watch["changes"] = ([{"at": time.time(), "added": added[:HEIMDALL_SHOW_LINES],
+                                  "removed": removed[:HEIMDALL_SHOW_LINES], "more": max(0, len(added) + len(removed)
+                                                                                        - 2 * HEIMDALL_SHOW_LINES)}]
+                                + watch.get("changes", []))[:HEIMDALL_KEEP_CHANGES]
+            watch["changed"] = time.time()
+            watch["unread"] = True
+            self._finish(noticed=(added, removed))
+            return
+        self._finish()
+
+    def _finish(self, error: str = "", noticed: tuple | None = None) -> None:
+        self._deadline.stop()
+        self._settle.stop()
+        watch, page = self.current, self.page
+        self.current, self.page = None, None
+        if page is not None:
+            page.loadFinished.disconnect(self._loaded)
+            page.deleteLater()
+        if watch is not None and self.get(watch["id"]) is watch:
+            watch["checked"] = time.time()
+            watch["error"] = error
+            self.save()
+            self.changed.emit()
+            if noticed is not None:
+                self.noticed.emit(watch, *noticed)
+        if self.queue:
+            QTimer.singleShot(HEIMDALL_GAP_MS, self, self._next)
+
+
+# ---------------------------------------------------------------------------- Trails
+# Trails: how you got from page to page. Each page you visit is a step whose parent is the
+# page you came from - by a link in the same tab, or the page a new tab was opened from.
+# Typing an address starts a new trail. A day's steps are in trails/<date>.json, for a
+# week (like Valhalla); Clear History clears them too. Never for private windows or burner tabs.
+TRAILS_DIR = "trails"
+TRAILS_DAYS = 7
+TRAILS_MAX_PER_DAY = 4000
+TRAILS_SAVE_MS = 3000
+
+
+def trail_day(when: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(when))
+
+
+def trail_day_label(day: str, today: str | None = None) -> str:
+    today = today or trail_day(time.time())
+    try:
+        date = datetime.date.fromisoformat(day)
+        days = (datetime.date.fromisoformat(today) - date).days
+    except ValueError:
+        return day
+    return "Today" if days == 0 else "Yesterday" if days == 1 else date.strftime("%A")
+
+
+class Trails(QObject):
+    changed = Signal()
+
+    def __init__(self, folder: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.folder = folder
+        self.days: dict[str, list[dict]] = {}            # loaded days (today's is always loaded)
+        self.by_id: dict[str, dict] = {}
+        self._dirty: set[str] = set()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(TRAILS_SAVE_MS)
+        self._timer.timeout.connect(self.save)
+        self.prune()
+        self.load(trail_day(time.time()))
+
+    # -- files
+    def _path(self, day: str) -> str:
+        return os.path.join(self.folder, f"{day}.json")
+
+    def available_days(self) -> list[str]:
+        """Days with steps, newest first."""
+        days = set(d for d, steps in self.days.items() if steps)
+        try:
+            for name in os.listdir(self.folder):
+                if re.fullmatch(r"\d{4}-\d\d-\d\d\.json", name):
+                    days.add(name[:-5])
+        except OSError:
+            pass
+        return sorted(days, reverse=True)
+
+    def load(self, day: str) -> list[dict]:
+        if day in self.days:
+            return self.days[day]
+        steps = []
+        try:
+            with open(self._path(day), encoding="utf-8") as f:
+                data = json.load(f)
+            for step in data.get("steps", []) if isinstance(data, dict) else []:
+                if isinstance(step, dict) and isinstance(step.get("id"), str) and isinstance(step.get("url"), str):
+                    steps.append(step)
+        except (OSError, ValueError):
+            pass
+        self.days[day] = steps
+        for step in steps:
+            self.by_id[step["id"]] = step
+        return steps
+
+    def save(self) -> None:
+        self._timer.stop()
+        for day in sorted(self._dirty):
+            steps = self.days.get(day, [])
+            path = self._path(day)
+            try:
+                if not steps:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                    continue
+                os.makedirs(self.folder, exist_ok=True)
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({"version": 1, "steps": steps}, f, ensure_ascii=False)
+                os.replace(path + ".tmp", path)
+            except OSError:
+                pass
+        self._dirty.clear()
+
+    def _touch(self, day: str) -> None:
+        self._dirty.add(day)
+        self._timer.start()
+        self.changed.emit()
+
+    def prune(self) -> None:
+        """Trails older than a week go."""
+        oldest = trail_day(time.time() - (TRAILS_DAYS - 1) * 86400)
+        for day in self.available_days():
+            if day < oldest:
+                for step in self.days.pop(day, []):
+                    self.by_id.pop(step["id"], None)
+                try:
+                    os.remove(self._path(day))
+                except OSError:
+                    pass
+
+    # -- steps
+    def get(self, step_id: str | None) -> dict | None:
+        return self.by_id.get(step_id) if step_id else None
+
+    def add(self, url: str, title: str, parent: str | None, tab: str, via: str) -> dict:
+        now = time.time()
+        day = trail_day(now)
+        steps = self.load(day)
+        step = {"id": uuid.uuid4().hex[:12], "url": url, "title": title[:300], "t": round(now, 1),
+                "parent": parent or None, "tab": tab, "via": via}
+        steps.append(step)
+        self.by_id[step["id"]] = step
+        if len(steps) > TRAILS_MAX_PER_DAY:
+            for old in steps[:len(steps) - TRAILS_MAX_PER_DAY]:
+                self.by_id.pop(old["id"], None)
+            del steps[:len(steps) - TRAILS_MAX_PER_DAY]
+        self._touch(day)
+        return step
+
+    def update(self, step: dict, **fields) -> None:
+        if any(step.get(k) != v for k, v in fields.items()):
+            step.update(fields)
+            self._touch(trail_day(step["t"]))
+
+    def last_in_tab(self, tab: str, url: str) -> dict | None:
+        """The latest step this tab made to `url` (Back and Forward return to it)."""
+        steps = self.days.get(trail_day(time.time()), [])
+        return next((s for s in reversed(steps) if s.get("tab") == tab and s["url"] == url), None)
+
+    def path_to(self, step_id: str) -> list[dict]:
+        """The trail that led to a step: its first page first."""
+        path, seen = [], set()
+        step = self.get(step_id)
+        while step is not None and step["id"] not in seen:
+            seen.add(step["id"])
+            path.append(step)
+            step = self.get(step.get("parent"))
+        return path[::-1]
+
+    def clear(self, since: float | None = None) -> int:
+        """Clear History: everything (None), or steps from `since` on (steps that came from them
+        start trails of their own)."""
+        removed = 0
+        for day in self.available_days():
+            if since is not None and day < trail_day(since):
+                continue
+            steps = self.load(day)
+            keep = [s for s in steps if since is not None and s["t"] < since]
+            removed += len(steps) - len(keep)
+            for step in steps:
+                if step not in keep:
+                    self.by_id.pop(step["id"], None)
+            self.days[day] = keep
+            self._dirty.add(day)
+        for steps in self.days.values():
+            for step in steps:
+                if step.get("parent") and step["parent"] not in self.by_id:
+                    step["parent"] = None
+                    self._dirty.add(trail_day(step["t"]))
+        self.save()
+        self.changed.emit()
+        return removed
+
+
+# ---------------------------------------------------------------------------- translation
+# On-device translation with Mozilla's Bergamot engine (the one in Firefox). Firefox's model
+# list and files come from Mozilla's Remote Settings service, only when you translate, and
+# each file is checked against its SHA-256. The engine itself - Firefox's own WebAssembly
+# build and the loader Firefox ships beside it, both MPL-2.0 and pinned here by hash - runs
+# in a hidden internal page (huginnmt://engine) that can't reach the network. Pages are
+# translated on this computer; nothing you read is sent anywhere.
+TRANSLATE_SCHEME = "huginnmt"
+TRANSLATE_DIR = "translation"
+TRANSLATE_RECORDS_URL = "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/translations-models/records"
+TRANSLATE_ATTACHMENTS_URL = "https://firefox-settings-attachments.cdn.mozilla.net/"
+TRANSLATE_RUNTIME = {                     # Bergamot v0.6.0, as Firefox ships it
+    "wasm": {"url": TRANSLATE_ATTACHMENTS_URL + "main-workspace/translations-wasm/05082c31-aee8-4249-9e01-c1865afd7520.wasm",
+             "sha256": "a3a89d9ad0a4ed8f27bf3e403701b23f5709816f6376438503f2fa5b0182c2dc",
+             "name": "bergamot-translator-v0.6.0.wasm", "size": 4_960_506},
+    "glue": {"url": "https://raw.githubusercontent.com/mozilla-firefox/firefox/48d55cf7ec80093903e2ef7f58b61a84a22ef716/"
+                    "toolkit/components/translations/bergamot-translator/bergamot-translator.js",
+             "sha256": "faff1ef6285b0d26f01787776fd49299dfb756ecb9688aa990c250e66797b47d",
+             "name": "bergamot-translator-v0.6.0.js", "size": 100_187},
+}
+TRANSLATE_MAX_MAJOR = 2                  # 3.x models are zstd-packed and need a newer engine
+TRANSLATE_ROLES = ("model", "lex", "vocab", "srcvocab", "trgvocab")
+TRANSLATE_RECORDS_MAX_AGE = 3 * 86400
+TRANSLATE_ENGINES = 2                    # language routes kept loaded (each takes ~250 MB)
+TRANSLATE_IDLE_S = 300                   # an engine nobody used for this long is closed
+TRANSLATE_BATCH = (40, 5000)             # items, characters per engine call
+_TRANSLATE_OS = "WINNT" if IS_WINDOWS else "Darwin" if IS_MAC else "Linux"
+_TRANSLATE_CHINESE = {"zh": "zh-Hans", "zh-cn": "zh-Hans", "zh-sg": "zh-Hans", "zh-hans": "zh-Hans",
+                      "zh-tw": "zh-Hant", "zh-hk": "zh-Hant", "zh-mo": "zh-Hant", "zh-hant": "zh-Hant"}
+_TRANSLATE_ALIASES = {"no": "nb", "iw": "he", "in": "id", "tl": "fil", "ji": "yi"}
+
+
+def translation_language(code: str) -> str:
+    """A language tag as Firefox's model list writes it: 'pt-BR' -> 'pt', 'zh-TW' -> 'zh-Hant'."""
+    lower = str(code or "").strip().lower().replace("_", "-")
+    if not lower:
+        return ""
+    if lower in _TRANSLATE_CHINESE:
+        return _TRANSLATE_CHINESE[lower]
+    if lower.startswith("zh-"):
+        return "zh-Hant" if re.search(r"-(hant|tw|hk|mo)(-|$)", lower) else "zh-Hans"
+    base = lower.split("-")[0]
+    return _TRANSLATE_ALIASES.get(base, base)
+
+
+def language_name(code: str) -> str:
+    special = {"zh-Hans": "Chinese (Simplified)", "zh-Hant": "Chinese (Traditional)", "nb": "Norwegian Bokmål",
+               "nn": "Norwegian Nynorsk", "fil": "Filipino"}
+    if code in special:
+        return special[code]
+    locale = QLocale(code.replace("-", "_"))
+    if locale.language() == QLocale.Language.C:
+        return code
+    return QLocale.languageToString(locale.language())
+
+
+def system_translation_language() -> str:
+    """The language you use: the desktop's (not 'C' or 'POSIX', which say nothing)."""
+    for name in [QLocale.system().name()] + list(QLocale.system().uiLanguages()) + [os.environ.get("LANG", "")]:
+        code = translation_language(str(name).split(".")[0])
+        if re.fullmatch(r"[a-z]{2,3}(-Han[st])?", code) and code not in ("c", "posix"):
+            return code
+    return "en"
+
+
+def translation_filter_matches(expression) -> bool:
+    """A record's targeting rule, as Firefox would read it on this desktop's release build
+    (only the `env.x == 'v'` / `!=` forms, joined by || and &&; anything else doesn't match)."""
+    if not expression or not str(expression).strip():
+        return True
+    env = {"appinfo.OS": _TRANSLATE_OS, "channel": "release"}
+    for clause in str(expression).split("||"):
+        ok = True
+        for atom in clause.split("&&"):
+            match = re.fullmatch(r"\s*env\.([\w.]+)\s*(==|!=)\s*'([^']*)'\s*", atom)
+            if not match or match.group(1) not in env:
+                ok = False
+                break
+            value = env[match.group(1)]
+            if (value == match.group(3)) != (match.group(2) == "=="):
+                ok = False
+                break
+        if ok:
+            return True
+    return False
+
+
+def _translation_version(version) -> tuple[int, int] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)", str(version or ""))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+_TRANSLATE_CODE = re.compile(r"[a-z]{2,3}(-Han[st])?")
+_TRANSLATE_LOCATION = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._/-]*")
+
+
+def translation_model_set(records: list, source: str, target: str) -> dict | None:
+    """The newest complete set of files for a language pair: a model, its word list and a
+    vocabulary (one, or one per side), all of one released version this engine can run."""
+    if not _TRANSLATE_CODE.fullmatch(str(source or "")) or not _TRANSLATE_CODE.fullmatch(str(target or "")):
+        return None                                       # (codes become folder names)
+    by_version: dict[str, dict] = {}
+    for record in records:
+        if not isinstance(record, dict) or record.get("fromLang") != source or record.get("toLang") != target:
+            continue
+        version = _translation_version(record.get("version"))
+        attachment = record.get("attachment")
+        if (version is None or version[0] > TRANSLATE_MAX_MAJOR or record.get("fileType") not in TRANSLATE_ROLES
+                or not isinstance(attachment, dict) or not translation_filter_matches(record.get("filter_expression"))):
+            continue
+        location = str(attachment.get("location") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(attachment.get("hash", ""))) \
+                or not _TRANSLATE_LOCATION.fullmatch(location) or ".." in location:
+            continue
+        entry = by_version.setdefault(record["version"], {"from": source, "to": target, "version": record["version"],
+                                                           "files": {}})
+        entry["files"][record["fileType"]] = record
+    complete = [s for s in by_version.values() if "model" in s["files"] and "lex" in s["files"]
+                and ("vocab" in s["files"] or ("srcvocab" in s["files"] and "trgvocab" in s["files"]))]
+    complete.sort(key=lambda s: _translation_version(s["version"]), reverse=True)
+    return complete[0] if complete else None
+
+
+def translation_route(records: list, source: str, target: str) -> list[dict] | None:
+    """The models a translation takes: one, or two through English."""
+    if not source or not target or source == target:
+        return None
+    direct = translation_model_set(records, source, target)
+    if direct is not None:
+        return [direct]
+    if "en" in (source, target):
+        return None
+    first, second = translation_model_set(records, source, "en"), translation_model_set(records, "en", target)
+    return [first, second] if first is not None and second is not None else None
+
+
+def translation_languages(records: list) -> tuple[list[str], list[str]]:
+    """(languages it can translate from, languages it can translate to), through English too."""
+    pairs = {(r.get("fromLang"), r.get("toLang")) for r in records if isinstance(r, dict)}
+    pairs = {p for p in pairs if all(isinstance(x, str) for x in p) and translation_model_set(records, *p)}
+    into_en = {s for s, t in pairs if t == "en"}
+    from_en = {t for s, t in pairs if s == "en"}
+    sources = {s for s, _ in pairs} | ({"en"} if from_en else set())
+    targets = {t for _, t in pairs} | ({"en"} if into_en else set())
+    if into_en and from_en:                               # anything into English, then out of it
+        sources |= into_en
+        targets |= from_en
+    return sorted(sources, key=language_name), sorted(targets, key=language_name)
+
+
+# Language detection: the page's own lang= first, checked against its text. Text: by script,
+# then by the most common little words of each language.
+_DETECT_WORDS = {
+    "en": "the and of to in is that for it with as was on are be this by you not or have from at but they his her",
+    "es": "de la que el en y los del se las por un para con no una su al es lo como más pero sus le ya o este",
+    "fr": "de la le et les des en un du une que est pour qui dans par sur pas plus au ne se avec il ce sont",
+    "de": "der die und in den von zu das mit sich des auf für ist im dem nicht ein eine als auch es an werden",
+    "it": "di e il la che in un per non una è del le si con da sono al della lo ma come anche più gli nel",
+    "pt": "de a o que e do da em um para é com não uma os no se na por mais as dos como mas foi ao ele",
+    "nl": "de en van het een in is dat op te zijn met voor niet die aan er ook als bij maar om dan",
+    "pl": "i w nie na się z do że to jest jak o po co tak za od ale przez jego już może",
+    "sv": "och i att det som en på är av för med till den har inte om ett jag var men från",
+    "da": "og i at det en den til er som på de med for ikke af har jeg var men fra",
+    "nb": "og i det som på er til en at med for av ikke har de jeg var men fra også",
+    "fi": "ja on ei se että hän oli ole kun mutta niin myös tai jos kuin ovat",
+    "cs": "a se v na je že to s z do jak ale by o jsou pro jako také už",
+    "sk": "a sa v na je že to s z do ako ale by o sú pre aj už",
+    "tr": "ve bir bu da de için ile çok ne daha gibi olarak en kadar sonra",
+    "ro": "și în de la cu a pe un o care este din nu să pentru mai sunt",
+    "hu": "a az és hogy nem is egy van meg de ez már csak volt",
+    "id": "yang dan di ini itu dengan untuk dari tidak dalam akan ada juga",
+    "ca": "de la i el que a les en per amb un una del no és els al",
+    "et": "ja on ei et see oli ka kui aga mis ta või",
+    "lt": "ir yra kad su į iš o bet kaip tai ne",
+    "lv": "un ir ka ar no par uz bet kā tas arī",
+    "sl": "in je da na v se za so pa ki z kot",
+    "hr": "i je u da na se za su od a koji kao",
+}
+_DETECT_SETS = {lang: set(words.split()) for lang, words in _DETECT_WORDS.items()}
+
+
+def detect_text_language(text: str) -> tuple[str, float]:
+    """(language, confidence 0-1) from a sample of a page's text."""
+    sample = str(text or "")[:6000]
+    letters = [c for c in sample if c.isalpha()]
+    if len(letters) < 20:
+        return "", 0.0
+
+    def share(pattern: str) -> float:
+        return len(re.findall(pattern, sample)) / len(letters)
+    if share(r"[぀-ヿ]") > 0.05:
+        return "ja", 0.9
+    if share(r"[가-힯]") > 0.2:
+        return "ko", 0.9
+    if share(r"[一-鿿]") > 0.2:
+        traditional = len(re.findall("[們個這說為國會時來對與經後過還麼開關]", sample))
+        simplified = len(re.findall("[们个这说为国会时来对与经后过还么开关]", sample))
+        return ("zh-Hant" if traditional > simplified else "zh-Hans"), 0.85
+    if share(r"[Ѐ-ӿ]") > 0.3:
+        if share(r"[іїєґІЇЄҐ]") > 0.01:
+            return "uk", 0.85
+        if share(r"[ъ]") > 0.008 and share(r"[ыэ]") < 0.002:
+            return "bg", 0.75
+        return "ru", 0.8
+    for pattern, lang in ((r"[Ͱ-Ͽ]", "el"), (r"[֐-׿]", "he"), (r"[฀-๿]", "th"),
+                          (r"[ऀ-ॿ]", "hi"), (r"[ঀ-৿]", "bn"), (r"[஀-௿]", "ta")):
+        if share(pattern) > 0.3:
+            return lang, 0.85
+    if share(r"[؀-ۿ]") > 0.3:
+        return ("fa" if share(r"[پچژگ]") > 0.005 else "ar"), 0.8
+    words = re.findall(r"[^\W\d_]+", sample.lower())
+    if len(words) < 8:
+        return "", 0.0
+    scores = sorted(((sum(1 for w in words if w in vocab) / len(words), lang) for lang, vocab in _DETECT_SETS.items()),
+                    reverse=True)
+    (best, lang), (second, _) = scores[0], scores[1]
+    if best < 0.08:
+        return "", 0.0
+    return lang, min(1.0, best * 3) * (0.5 if best - second < 0.03 else 1.0)
+
+
+def detect_page_language(declared: str, text: str) -> str:
+    """The page's language: what it says it is, unless its text clearly says otherwise."""
+    declared = translation_language(declared)
+    found, confidence = detect_text_language(text)
+    if declared and (not found or confidence < 0.6 or found == declared
+                     or found.split("-")[0] == declared.split("-")[0]):
+        return declared
+    if found and confidence >= 0.45:
+        return found
+    return declared
+
+
+TRANSLATE_DETECT_JS = r"""(() => {
+  const meta = document.querySelector('meta[http-equiv="content-language" i]');
+  const root = document.querySelector('main, article, [role="main"]') || document.body;
+  return JSON.stringify({lang: document.documentElement.lang || (meta && meta.content) || '',
+                         text: root ? (root.innerText || '').slice(0, 5000) : '',
+                         translated: !!(window.__huginnTr && window.__huginnTr.active)});
+})()"""
+
+
+class TranslationStore(QObject):
+    """Firefox's model list and the files a translation needs, downloaded once each and
+    checked against their SHA-256 (data_dir/translation)."""
+    progress = Signal(int, int)                          # bytes so far, bytes in all
+
+    def __init__(self, folder: str, parent: QObject | None = None, records_url: str = TRANSLATE_RECORDS_URL,
+                 attachments_url: str = TRANSLATE_ATTACHMENTS_URL, runtime: dict | None = None) -> None:
+        super().__init__(parent)
+        self.folder = folder
+        self.records_url = records_url
+        self.attachments_url = attachments_url if attachments_url.endswith("/") else attachments_url + "/"
+        self.runtime = runtime or TRANSLATE_RUNTIME
+        self.net = QNetworkAccessManager(self)
+        self.user_agent = ""                              # Huginn's own, like a page load (set by the window)
+        self._records: list | None = None
+        self._records_at = 0.0
+        self._waiting: list = []
+        self._downloads: list = []
+        self._load_cached_records()
+
+    # -- the model list
+    def _load_cached_records(self) -> None:
+        try:
+            with open(os.path.join(self.folder, "records.json"), encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                self._records, self._records_at = data["data"], float(data.get("at") or 0)
+        except (OSError, ValueError):
+            pass
+
+    def records(self) -> list | None:
+        return self._records
+
+    def fetch_records(self, done) -> None:
+        """done(error or ""): the list, from Mozilla when the copy here is old or missing."""
+        if self._records is not None and time.time() - self._records_at < TRANSLATE_RECORDS_MAX_AGE:
+            done("")
+            return
+        self._waiting.append(done)
+        if len(self._waiting) > 1:
+            return
+        reply = self.net.get(self._request(self.records_url))
+
+        def finished() -> None:
+            error = ""
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                error = "Huginn couldn't reach Mozilla for the list of languages."
+            else:
+                try:
+                    data = json.loads(bytes(reply.readAll()).decode("utf-8"))
+                    records = data.get("data") if isinstance(data, dict) else None
+                    if not isinstance(records, list):
+                        raise ValueError
+                    self._records, self._records_at = records, time.time()
+                    os.makedirs(self.folder, exist_ok=True)
+                    with open(os.path.join(self.folder, "records.json.tmp"), "w", encoding="utf-8") as f:
+                        json.dump({"at": self._records_at, "data": records}, f)
+                    os.replace(os.path.join(self.folder, "records.json.tmp"), os.path.join(self.folder, "records.json"))
+                except (ValueError, UnicodeDecodeError, OSError):
+                    error = "Mozilla's list of languages didn't make sense."
+            reply.deleteLater()
+            if error and self._records is not None:
+                error = ""                                  # an older list still works
+            waiting, self._waiting = self._waiting, []
+            for callback in waiting:
+                callback(error)
+        reply.finished.connect(finished)
+
+    def _request(self, url: str) -> QNetworkRequest:
+        request = QNetworkRequest(QUrl(url))
+        if self.user_agent:                               # (Mozilla's servers turn some robots away)
+            request.setRawHeader(b"User-Agent", self.user_agent.encode("ascii", "replace"))
+        return request
+
+    def route(self, source: str, target: str) -> list[dict] | None:
+        return translation_route(self._records or [], source, target)
+
+    def languages(self) -> tuple[list[str], list[str]]:
+        return translation_languages(self._records or [])
+
+    # -- files
+    def model_path(self, model_set: dict, record: dict) -> str:
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", str(record.get("name") or record["fileType"]))
+        return os.path.join(self.folder, "models", f"{model_set['from']}_{model_set['to']}", model_set["version"],
+                            f"{record['attachment']['hash'][:16]}-{name}")
+
+    def runtime_path(self, part: str) -> str:
+        return os.path.join(self.folder, "runtime", self.runtime[part]["name"])
+
+    def needed(self, route: list[dict]) -> list[dict]:
+        """What isn't here yet: [{url, sha256, path, size}]."""
+        wanted = [{"url": self.runtime[p]["url"], "sha256": self.runtime[p]["sha256"], "path": self.runtime_path(p),
+                   "size": int(self.runtime[p].get("size") or 0)} for p in ("wasm", "glue")]
+        for model_set in route:
+            for record in model_set["files"].values():
+                attachment = record["attachment"]
+                wanted.append({"url": self.attachments_url + str(attachment["location"]).lstrip("/"),
+                               "sha256": attachment["hash"], "path": self.model_path(model_set, record),
+                               "size": int(attachment.get("size") or 0)})
+        return [w for w in wanted if not os.path.isfile(w["path"])]
+
+    def download(self, files: list[dict], done) -> None:
+        """One file at a time, each checked before it's kept. done(error or "")."""
+        total = sum(f["size"] for f in files) or 1
+        state = {"base": 0}
+        queue = list(files)
+
+        def next_file() -> None:
+            if not queue:
+                done("")
+                return
+            item = queue.pop(0)
+            reply = self.net.get(self._request(item["url"]))
+            self._downloads.append(reply)
+            reply.downloadProgress.connect(lambda got, _all: self.progress.emit(min(total, state["base"] + got), total))
+
+            def finished() -> None:
+                self._downloads.remove(reply)
+                reply.deleteLater()
+                if reply.error() != QNetworkReply.NetworkError.NoError:
+                    done("The download didn't finish. Check your connection and try again.")
+                    return
+                data = bytes(reply.readAll())
+                if hashlib.sha256(data).hexdigest() != item["sha256"]:
+                    done("A downloaded file wasn't what Mozilla published, so Huginn didn't keep it.")
+                    return
+                try:
+                    os.makedirs(os.path.dirname(item["path"]), exist_ok=True)
+                    with open(item["path"] + ".part", "wb") as f:
+                        f.write(data)
+                    os.replace(item["path"] + ".part", item["path"])
+                except OSError:
+                    done("Huginn couldn't save the language files.")
+                    return
+                state["base"] += item["size"] or len(data)
+                self.progress.emit(min(total, state["base"]), total)
+                next_file()
+            reply.finished.connect(finished)
+        next_file()
+
+    def cancel(self) -> None:
+        for reply in list(self._downloads):
+            reply.abort()
+
+    def installed(self) -> list[dict]:
+        """Language pairs on this computer: [{pair, from, to, size}]."""
+        out = []
+        base = os.path.join(self.folder, "models")
+        try:
+            pairs = sorted(os.listdir(base))
+        except OSError:
+            return out
+        for pair in pairs:
+            folder = os.path.join(base, pair)
+            size = 0
+            for root, _dirs, names in os.walk(folder):
+                size += sum(os.path.getsize(os.path.join(root, n)) for n in names)
+            source, _, target = pair.partition("_")
+            out.append({"pair": pair, "from": source, "to": target, "size": size})
+        return out
+
+    def remove(self, pair: str) -> None:
+        path = os.path.join(self.folder, "models", os.path.basename(pair))
+        shutil.rmtree(path, ignore_errors=True)
+
+    def file_for(self, request_path: str) -> str | None:
+        """The engine page asks for /runtime/<name> or /models/<pair>/<version>/<file>: only
+        files under the translation folder."""
+        parts = [p for p in request_path.split("/") if p]
+        if not parts or parts[0] not in ("runtime", "models") or any(p in (".", "..") for p in parts):
+            return None
+        path = os.path.realpath(os.path.join(self.folder, *parts))
+        root = os.path.realpath(self.folder)
+        return path if path.startswith(root + os.sep) and os.path.isfile(path) else None
+
+
+TRANSLATE_ENGINE_HTML = r"""<!doctype html><meta charset="utf-8"><title>Huginn translation engine</title>
+<script>
+// Firefox's settings for its models: greedy decoding, int8 maths, sentences split at 128 tokens.
+const CONFIG = `beam-size: 1
+normalize: 1.0
+word-penalty: 0
+max-length-break: 128
+mini-batch-words: 1024
+workspace: 128
+max-length-factor: 2.0
+skip-cost: true
+cpu-threads: 0
+quiet: true
+quiet-translation: true
+gemm-precision: int8shiftAlphaAll
+alignment: soft
+`;
+const ALIGN = {model: 256, lex: 64, vocab: 64, srcvocab: 64, trgvocab: 64};
+window.huginnEngine = {
+  state: 'new', error: '',
+  async start(cfg) {
+    this.state = 'starting';
+    try {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = cfg.glue;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('the engine loader is missing'));
+        document.head.appendChild(script);
+      });
+      const wasm = await (await fetch(cfg.wasm)).arrayBuffer();
+      const log = console.log;
+      console.log = () => {};
+      try {
+        this.bergamot = await new Promise((resolve, reject) => {
+          const module = loadBergamot({INITIAL_MEMORY: 234291200, wasmBinary: wasm, print() {}, printErr() {},
+                                       onAbort: reason => reject(new Error('the engine stopped: ' + reason)),
+                                       onRuntimeInitialized: () => resolve(module)});
+        });
+      } finally { console.log = log; }
+      const b = this.bergamot;
+      const memory = async (role, url) => {
+        const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+        const aligned = new b.AlignedMemory(bytes.byteLength, ALIGN[role]);
+        aligned.getByteArrayView().set(bytes);
+        return aligned;
+      };
+      this.service = new b.BlockingService({cacheSize: 0});
+      this.models = [];
+      for (const spec of cfg.models) {
+        const vocabs = new b.AlignedMemoryList();
+        if (spec.files.vocab) vocabs.push_back(await memory('vocab', spec.files.vocab));
+        else {
+          vocabs.push_back(await memory('srcvocab', spec.files.srcvocab));
+          vocabs.push_back(await memory('trgvocab', spec.files.trgvocab));
+        }
+        this.models.push(new b.TranslationModel(spec.from, spec.to, CONFIG, await memory('model', spec.files.model),
+                                                await memory('lex', spec.files.lex), vocabs, null));
+      }
+      this.state = 'ready';
+    } catch (e) {
+      this.state = 'failed';
+      this.error = String((e && e.message) || e);
+    }
+  },
+  // [{text, html}] -> the translations (leading and trailing spaces kept aside, as Firefox does)
+  run(items) {
+    const b = this.bergamot, out = items.map(i => i.text), at = [], edges = [];
+    const texts = new b.VectorString(), options = new b.VectorResponseOptions();
+    let responses = null;
+    try {
+      items.forEach((item, i) => {
+        const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(item.text);
+        if (!m[2]) return;
+        at.push(i); edges.push([m[1], m[3]]);
+        texts.push_back(m[2]);
+        options.push_back({qualityScores: false, alignment: !!item.html, html: !!item.html});
+      });
+      if (!at.length) return JSON.stringify(out);
+      responses = this.models.length === 1 ? this.service.translate(this.models[0], texts, options)
+                                           : this.service.translateViaPivoting(this.models[0], this.models[1], texts, options);
+      at.forEach((i, k) => { out[i] = edges[k][0] + responses.get(k).getTranslatedText() + edges[k][1]; });
+      return JSON.stringify(out);
+    } catch (e) {
+      return JSON.stringify({error: String((e && e.message) || e)});
+    } finally {
+      texts.delete(); options.delete();
+      if (responses) responses.delete();
+    }
+  },
+};
+</script>"""
+
+
+class TranslatorSchemeHandler(QWebEngineUrlSchemeHandler):
+    """huginnmt://engine/: the engine page and its files (only in the engine's own profile)."""
+
+    def __init__(self, store: TranslationStore, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.store = store
+
+    def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
+        url = job.requestUrl()
+        if url.host() != "engine":
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        if url.path() in ("", "/"):
+            buffer = QBuffer(job)
+            buffer.setData(QByteArray(TRANSLATE_ENGINE_HTML.encode("utf-8")))
+            buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            job.reply(b"text/html", buffer)
+            return
+        path = self.store.file_for(url.path())
+        if path is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        handle = QFile(path, job)
+        if not handle.open(QIODevice.OpenModeFlag.ReadOnly):
+            job.fail(QWebEngineUrlRequestJob.Error.RequestFailed)
+            return
+        mime = (b"application/wasm" if path.endswith(".wasm") else b"text/javascript" if path.endswith(".js")
+                else b"application/octet-stream")
+        job.reply(mime, handle)
+
+
+class _EngineOnly(QWebEngineUrlRequestInterceptor):
+    """The engine's profile reaches nothing but its own files."""
+
+    def interceptRequest(self, info) -> None:
+        if info.requestUrl().scheme() != TRANSLATE_SCHEME:
+            info.block(True)
+
+
+class TranslationEngine(QObject):
+    """Runs translations: one hidden engine page per language route (Firefox loads one route
+    per engine too), started on first use and closed when idle."""
+
+    def __init__(self, store: TranslationStore, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.profile: QWebEngineProfile | None = None
+        self.engines: dict[str, dict] = {}
+        self._sweep = QTimer(self)
+        self._sweep.setInterval(60_000)
+        self._sweep.timeout.connect(self._close_idle)
+
+    def _make_profile(self) -> QWebEngineProfile:
+        if self.profile is None:
+            profile = QWebEngineProfile(self)                # off the record, its own
+            profile.setUrlRequestInterceptor(_EngineOnly(profile))
+            profile.installUrlSchemeHandler(TRANSLATE_SCHEME.encode(), TranslatorSchemeHandler(self.store, profile))
+            profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+            self.profile = profile
+        return self.profile
+
+    @staticmethod
+    def route_key(route: list[dict]) -> str:
+        return ">".join(f"{s['from']}-{s['to']}@{s['version']}" for s in route)
+
+    def _config(self, route: list[dict]) -> dict:
+        base = f"{TRANSLATE_SCHEME}://engine/"
+
+        def url_of(path: str) -> str:
+            rel = os.path.relpath(path, self.store.folder).replace(os.sep, "/")
+            return base + "/".join(quote(p) for p in rel.split("/"))
+        return {"glue": url_of(self.store.runtime_path("glue")), "wasm": url_of(self.store.runtime_path("wasm")),
+                "models": [{"from": s["from"], "to": s["to"],
+                            "files": {role: url_of(self.store.model_path(s, record)) for role, record in s["files"].items()}}
+                           for s in route]}
+
+    def translate(self, route: list[dict], items: list[dict], done) -> None:
+        """items [{text, html}] -> done(list of translations, or None and an error)."""
+        key = self.route_key(route)
+        engine = self.engines.get(key)
+        if engine is None:
+            engine = self._start(key, route)
+        engine["used"] = time.monotonic()
+        engine["queue"].append((items, done))
+        self._pump(engine)
+
+    def _start(self, key: str, route: list[dict]) -> dict:
+        idle = sorted((e for e in self.engines.values() if not e["queue"] and not e["busy"]), key=lambda e: e["used"])
+        while len(self.engines) >= TRANSLATE_ENGINES and idle:
+            self._close(idle.pop(0)["key"])
+        page = QWebEnginePage(self._make_profile(), self)
+        engine = {"key": key, "page": page, "state": "loading", "queue": [], "busy": False, "used": time.monotonic(),
+                  "error": ""}
+        self.engines[key] = engine
+        config = json.dumps(self._config(route))
+        started = time.monotonic()
+
+        def poll() -> None:
+            if self.engines.get(key) is not engine:
+                return
+
+            def got(result) -> None:
+                if self.engines.get(key) is not engine:
+                    return
+                try:
+                    result = json.loads(result) if isinstance(result, str) and result else None
+                except ValueError:
+                    result = None
+                state = result.get("state") if isinstance(result, dict) else None
+                if state == "ready":
+                    engine["state"] = "ready"
+                    self._pump(engine)
+                elif state == "failed" or time.monotonic() - started > 90:
+                    self._fail(engine, (result or {}).get("error") if isinstance(result, dict) else "")
+                else:
+                    QTimer.singleShot(120, self, poll)
+            page.runJavaScript("JSON.stringify({state: huginnEngine.state, error: huginnEngine.error})", 0, got)
+
+        def loaded(ok: bool) -> None:
+            if not ok:
+                self._fail(engine, "the engine page didn't load")
+                return
+            page.runJavaScript(f"huginnEngine.start({config}); 1", 0)
+            QTimer.singleShot(150, self, poll)
+        page.loadFinished.connect(loaded)
+        page.load(QUrl(f"{TRANSLATE_SCHEME}://engine/"))
+        self._sweep.start()
+        return engine
+
+    def _fail(self, engine: dict, error: str) -> None:
+        engine["state"] = "failed"
+        engine["error"] = error or "the engine didn't start"
+        queue, engine["queue"] = engine["queue"], []
+        self._close(engine["key"])
+        for _items, done in queue:
+            done(None, engine["error"])
+
+    def _pump(self, engine: dict) -> None:
+        if engine["state"] != "ready" or engine["busy"] or not engine["queue"]:
+            return
+        items, done = engine["queue"].pop(0)
+        engine["busy"] = True
+        payload = json.dumps([{"text": str(i.get("text", "")), "html": bool(i.get("html"))} for i in items])
+
+        def got(result) -> None:
+            engine["busy"] = False
+            engine["used"] = time.monotonic()
+            try:
+                out = json.loads(result) if isinstance(result, str) else None
+            except ValueError:
+                out = None
+            if isinstance(out, list) and len(out) == len(items):
+                done(out, "")
+                if self.engines.get(engine["key"]) is engine:
+                    self._pump(engine)
+                return
+            error = (out or {}).get("error") if isinstance(out, dict) else ""
+            if self.engines.get(engine["key"]) is engine:   # a fresh engine for whatever comes next
+                self._fail(engine, error or "the engine didn't answer")
+            done(None, error or "the engine didn't answer")
+        engine["page"].runJavaScript(f"huginnEngine.run({payload})", 0, got)
+
+    def _close(self, key: str) -> None:
+        engine = self.engines.pop(key, None)
+        if engine is not None:
+            engine["page"].deleteLater()
+        if not self.engines:
+            self._sweep.stop()
+
+    def _close_idle(self) -> None:
+        now = time.monotonic()
+        for key, engine in list(self.engines.items()):
+            if not engine["queue"] and not engine["busy"] and now - engine["used"] > TRANSLATE_IDLE_S:
+                self._close(key)
+
+    def close_all(self) -> None:
+        for key in list(self.engines):
+            self._close(key)
+
+
+# The page's side (Huginn's hidden script world). collect() hands over the next blocks of
+# text (what's on screen first), each as HTML whose inline elements are tagged data-h=N;
+# apply() puts translations back into the page's own elements (so links and buttons keep
+# working, and text nodes are reused where they can be); restore() puts back the original.
+TRANSLATE_PAGE_JS = r"""(() => {
+if (window.__huginnTr) return 'ready';
+const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'CODE', 'PRE', 'TEXTAREA', 'INPUT', 'SELECT',
+  'OPTION', 'SVG', 'MATH', 'CANVAS', 'VIDEO', 'AUDIO', 'IFRAME', 'OBJECT', 'EMBED', 'KBD', 'SAMP', 'VAR', 'HEAD']);
+const INLINE = new Set(['A', 'ABBR', 'B', 'BDI', 'BDO', 'BR', 'CITE', 'DATA', 'DFN', 'EM', 'FONT', 'I', 'IMG', 'LABEL',
+  'MARK', 'Q', 'S', 'SMALL', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TIME', 'U', 'WBR', 'DEL', 'INS', 'BIG', 'TT', 'STRIKE']);
+const VOID = new Set(['BR', 'IMG', 'WBR']);
+const ATTRS = ['alt', 'title', 'placeholder', 'aria-label'];
+const items = new Map();          // id -> {kind, node, map}
+const sent = new WeakSet();       // blocks and text nodes handed over (or done)
+const originals = new Map();      // element -> its original child nodes
+const values = new Map();         // text node -> its original text
+const attrs = [];                 // [element, name, original value]
+let queue = [], next = 1, applying = false, scanned = false, observer = null, title = null;
+const dirty = new Set();
+
+function excluded(el) {
+  return SKIP.has(el.tagName) || el.getAttribute('translate') === 'no' || el.classList.contains('notranslate')
+    || el.isContentEditable || el.getAttribute('aria-hidden') === 'true';
+}
+function hasBlock(el) {
+  for (const c of el.children) {
+    if (excluded(c)) continue;
+    if (!INLINE.has(c.tagName) || hasBlock(c)) return true;
+  }
+  return false;
+}
+function visibleText(s) { return /[^\s\d\p{P}\p{S}]/u.test(s); }
+function scan(root) {
+  if (!root || root.nodeType !== 1) return;
+  const walk = el => {
+    if (excluded(el) || sent.has(el)) return;
+    if (!hasBlock(el) && !INLINE.has(el.tagName)) {
+      if (visibleText(el.textContent)) queue.push({kind: 'html', node: el});
+      return;
+    }
+    if (INLINE.has(el.tagName) && !hasBlock(el)) {
+      if (visibleText(el.textContent)) queue.push({kind: 'html', node: el});
+      return;
+    }
+    for (const c of el.childNodes) {         // mixed: its own text, its inline parts, its blocks
+      if (c.nodeType === 3) {
+        if (!sent.has(c) && visibleText(c.nodeValue)) queue.push({kind: 'text', node: c});
+      } else if (c.nodeType === 1) walk(c);
+    }
+  };
+  walk(root);
+  for (const el of root.querySelectorAll ? root.querySelectorAll('[alt],[title],[placeholder],[aria-label]') : []) {
+    if (el.closest('[translate="no"],.notranslate') || el.__huginnAttrs) continue;
+    el.__huginnAttrs = true;
+    for (const name of ATTRS) {
+      const value = el.getAttribute(name);
+      if (value && visibleText(value) && name !== 'title' || (name === 'title' && value && visibleText(value)))
+        queue.push({kind: 'attr', node: el, name});
+    }
+  }
+}
+function rank() {
+  const h = window.innerHeight || 800;
+  const place = item => {
+    const el = item.node.nodeType === 3 ? item.node.parentElement : item.node;
+    if (!el || !el.isConnected) return 1e9;
+    const r = el.getBoundingClientRect();
+    if (!r.width && !r.height) return 5e8;
+    return r.bottom < 0 ? 2e8 - r.bottom : r.top > h ? 1e8 + r.top : r.top;
+  };
+  queue = queue.map(i => [place(i), i]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
+}
+function escape(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function serialize(el, map) {
+  let out = '';
+  for (const c of el.childNodes) {
+    if (c.nodeType === 3) out += escape(c.nodeValue);
+    else if (c.nodeType === 1) {
+      const k = map.push(c) - 1;
+      const tag = c.tagName.toLowerCase();
+      if (excluded(c) || VOID.has(c.tagName)) out += c.tagName === 'BR' ? `<br data-h="${k}">` : `<wbr data-h="${k}">`;
+      else out += `<${tag} data-h="${k}">` + serialize(c, map) + `</${tag}>`;
+    }
+  }
+  return out;
+}
+function collect(max, budget) {
+  if (!scanned) { scanned = true; scan(document.body); rank(); }
+  if (dirty.size) {
+    for (const el of dirty) if (el.isConnected) scan(el);
+    dirty.clear();
+    rank();
+  }
+  const out = [];
+  if (title === null && document.title && visibleText(document.title)) {
+    title = document.title;
+    out.push({id: 0, text: title, html: false});
+  }
+  let size = 0;
+  while (queue.length && out.length < max && size < budget) {
+    const item = queue.shift();
+    if (item.kind !== 'attr' && (sent.has(item.node) || !item.node.isConnected)) continue;
+    let text;
+    if (item.kind === 'text') text = item.node.nodeValue;
+    else if (item.kind === 'attr') text = item.node.getAttribute(item.name) || '';
+    else { item.map = []; text = serialize(item.node, item.map); }
+    if (item.kind !== 'attr') sent.add(item.node);
+    const id = next++;
+    items.set(id, item);
+    out.push({id, text, html: item.kind === 'html'});
+    size += text.length;
+  }
+  return JSON.stringify(out);
+}
+function remember(el) { if (!originals.has(el)) originals.set(el, Array.from(el.childNodes)); }
+function rebuild(owner, src, map, used) {
+  // owner: the page's element; src: the translation's matching element. Text goes into the
+  // owner's own text nodes where there are enough of them.
+  remember(owner);
+  const spare = Array.from(owner.childNodes).filter(n => n.nodeType === 3);
+  const kids = [];
+  for (const c of Array.from(src.childNodes)) {
+    if (c.nodeType === 3) {
+      const node = spare.shift() || document.createTextNode('');
+      if (!values.has(node)) values.set(node, node.nodeValue);
+      node.nodeValue = c.nodeValue;
+      kids.push(node);
+    } else if (c.nodeType === 1) {
+      const k = c.getAttribute('data-h');
+      const orig = k !== null ? map[+k] : null;
+      if (orig && !used.has(orig)) {
+        used.add(orig);
+        if (!(excluded(orig) || VOID.has(orig.tagName))) rebuild(orig, c, map, used);
+        kids.push(orig);
+      } else {
+        const holder = document.createElement('span');
+        holder.textContent = c.textContent;
+        kids.push(...holder.childNodes);
+      }
+    }
+  }
+  for (const k of map) {                    // links, images and code aren't lost, even if the engine dropped them
+    if (k.parentNode === owner && !used.has(k) && (excluded(k) || ['A', 'IMG', 'BUTTON'].includes(k.tagName))) {
+      used.add(k);
+      kids.push(document.createTextNode(' '), k);
+    }
+  }
+  owner.replaceChildren(...kids);
+}
+function apply(results) {
+  applying = true;
+  try {
+    for (const [id, text, plain] of results) {
+      if (id === 0) { document.title = text; continue; }
+      const item = items.get(id);
+      if (!item) continue;
+      items.delete(id);
+      try {
+        if (item.kind === 'text') {
+          if (!values.has(item.node)) values.set(item.node, item.node.nodeValue);
+          item.node.nodeValue = text;
+        } else if (item.kind === 'attr') {
+          attrs.push([item.node, item.name, item.node.getAttribute(item.name)]);
+          item.node.setAttribute(item.name, text);
+        } else if (item.node.isConnected && plain) {   // the engine couldn't keep its markup: text alone
+          remember(item.node);
+          item.node.replaceChildren(document.createTextNode(text));
+        } else if (item.node.isConnected) {
+          const t = document.createElement('template');
+          t.innerHTML = text;
+          rebuild(item.node, t.content, item.map, new Set());
+        }
+      } catch (e) {}
+    }
+  } finally {
+    applying = false;
+    observer.takeRecords();
+  }
+  return 'ok';
+}
+function nearestBlock(node) {
+  let el = node.nodeType === 1 ? node : node.parentElement;
+  while (el && el !== document.body && INLINE.has(el.tagName)) el = el.parentElement;
+  return el;
+}
+observer = new MutationObserver(list => {
+  if (applying) return;
+  for (const m of list) {
+    if (m.type === 'childList') m.addedNodes.forEach(n => {
+      if (n.nodeType === 1) dirty.add(n);
+      else if (n.nodeType === 3 && n.parentElement) { const b = nearestBlock(n); if (b) { sent.delete(b); dirty.add(b); } }
+    });
+    else if (m.type === 'characterData' && !values.has(m.target)) {
+      const b = nearestBlock(m.target);
+      if (b && sent.has(b)) { sent.delete(b); dirty.add(b); }
+    }
+  }
+});
+observer.observe(document.documentElement, {childList: true, subtree: true, characterData: true});
+function restore() {
+  applying = true;
+  observer.disconnect();
+  try {
+    for (const [el, kids] of originals) { try { el.replaceChildren(...kids); } catch (e) {} }
+    for (const [node, value] of values) node.nodeValue = value;
+    for (const [el, name, value] of attrs.reverse()) { if (value === null) el.removeAttribute(name); else el.setAttribute(name, value); }
+    if (title !== null) document.title = title;
+  } finally { applying = false; }
+  for (const el of document.querySelectorAll('*')) delete el.__huginnAttrs;
+  delete window.__huginnTr;
+  return 'restored';
+}
+window.__huginnTr = {active: true, collect, apply, restore,
+                     pending: () => { if (dirty.size) { for (const el of dirty) if (el.isConnected) scan(el); dirty.clear(); rank(); }
+                                      return queue.length; }};
+return 'ready';
+})()"""
+
+
+# ---------------------------------------------------------------------------- Bifröst sync
+# Bifröst keeps Favorites, the Reading List, passwords and open tabs in step across your own
+# devices, with no account and no server. One random 256-bit group key, shared when you pair a
+# device, seals everything (AES-256-GCM); keys for each purpose come from it by HKDF. Devices
+# meet in a sync folder you choose (each writes only its own sealed file, so Syncthing, Nextcloud
+# or a USB stick never see a conflict) and/or directly on the local network (keyed beacons that
+# change every minute, then a mutual challenge-response before sealed states are swapped).
+# Pairing is an X25519 exchange with a commitment, confirmed by a 6-digit code shown on both
+# devices - or a pairing key you copy across (also as a QR code). Merging: per item, the newest
+# change wins; deletions are remembered for 60 days.
+BIFROST_DIR = "bifrost"
+BIFROST_FORMAT = "Huginn Bifrost"
+BIFROST_COLLECTIONS = ("bookmarks", "reading", "passwords", "tabs")
+BIFROST_PORT = 45781                      # UDP: beacons on the local network
+BIFROST_BEACON_S = 30
+BIFROST_SYNC_S = 120
+BIFROST_PAIR_TIMEOUT = 15                     # seconds for each step of pairing on the network
+BIFROST_TOMBSTONE_DAYS = 180                # (a device away longer than this may bring deleted things back)
+BIFROST_MAX_BLOB = 64 * 1024 * 1024
+BIFROST_KEY_PREFIX = "HB1"
+
+
+def _hkdf(key: bytes, info: bytes, length: int = 32) -> bytes:
+    """HKDF-SHA256 (RFC 5869), no salt."""
+    prk = hmac.new(b"\0" * 32, key, hashlib.sha256).digest()
+    out, block, counter = b"", b"", 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+def bifrost_keys(secret: bytes) -> dict:
+    return {"data": _hkdf(secret, b"huginn bifrost data v1"), "auth": _hkdf(secret, b"huginn bifrost auth v1"),
+            "group": hashlib.sha256(b"huginn bifrost group v1" + secret).hexdigest()[:16]}
+
+
+def bifrost_key_text(secret: bytes, password_key: bytes | None = None) -> str:
+    """The pairing key as text: HB1-XXXX-... (base32, with a check). With the password key
+    (passwords sync), HB2-..."""
+    raw = secret + (password_key or b"")
+    check = hashlib.sha256(b"check" + raw).digest()[:3]
+    body = base64.b32encode(raw + check).decode("ascii").rstrip("=")
+    prefix = "HB2" if password_key else BIFROST_KEY_PREFIX
+    return prefix + "-" + "-".join(body[i:i + 4] for i in range(0, len(body), 4))
+
+
+def bifrost_key_from_text(text: str) -> tuple[bytes, bytes | None] | None:
+    """(group key, password key or None) from a pairing key, or None if it isn't one."""
+    text = str(text or "").upper().strip()
+    match = re.match(r"\s*(HB[12])\b", text)
+    if not match:
+        return None
+    body = re.sub(r"[^A-Z2-7]", "", text[match.end():])
+    try:
+        raw = base64.b32decode(body + "=" * (-len(body) % 8))
+    except (ValueError, base64.binascii.Error):
+        return None
+    size = 67 if match.group(1) == "HB2" else 35
+    if len(raw) != size or not hmac.compare_digest(hashlib.sha256(b"check" + raw[:-3]).digest()[:3], raw[-3:]):
+        return None
+    return raw[:32], (raw[32:64] if size == 67 else None)
+
+
+def bifrost_seal(secret: bytes, device: str, payload: dict) -> bytes:
+    keys = bifrost_keys(secret)
+    nonce = os.urandom(12)
+    aad = f"bifrost1|{keys['group']}|{device}".encode()
+    body = zlib.compress(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 6)
+    sealed = nonce + AESGCM(keys["data"]).encrypt(nonce, body, aad)
+    return json.dumps({"format": BIFROST_FORMAT, "v": 1, "group": keys["group"], "device": device,
+                       "data": _b64e(sealed)}).encode("utf-8")
+
+
+def bifrost_open(secret: bytes, blob: bytes) -> dict | None:
+    """A device's sealed state, or None if it isn't one of ours (or was altered)."""
+    keys = bifrost_keys(secret)
+    try:
+        envelope = json.loads(blob.decode("utf-8"))
+        if envelope.get("format") != BIFROST_FORMAT or envelope.get("group") != keys["group"]:
+            return None
+        device = str(envelope["device"])
+        sealed = _b64d(envelope["data"])
+        aad = f"bifrost1|{keys['group']}|{device}".encode()
+        body = AESGCM(keys["data"]).decrypt(sealed[:12], sealed[12:], aad)
+        inflater = zlib.decompressobj()
+        text = inflater.decompress(body, BIFROST_MAX_BLOB * 4)
+        if inflater.unconsumed_tail:
+            return None                                       # (far bigger than any real state)
+        payload = json.loads(text.decode("utf-8"))
+    except (ValueError, KeyError, TypeError, InvalidTag, zlib.error, UnicodeDecodeError, base64.binascii.Error):
+        return None
+    if not isinstance(payload, dict) or payload.get("device") != device or not isinstance(payload.get("records"), list):
+        return None
+    return payload
+
+
+def bifrost_hash(data) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:24]
+
+
+def bifrost_scan(known: dict, current: dict, device: str, collections, now: float | None = None,
+                 digest=None, wrap=None) -> int:
+    """Notes what changed here since the last look: new and changed items get this device and
+    a time later than the item's last; items gone get a tombstone. `current` is
+    {collection: {id: data}}; digest/wrap give an item's hash and stored form (passwords are
+    kept sealed). Returns how many changed."""
+    now = now or time.time()
+    changed = 0
+    for collection in collections:
+        if collection not in current:                    # (e.g. passwords while the vault is locked)
+            continue
+        have = known.setdefault(collection, {})
+        items = current[collection]
+        for item_id, data in items.items():
+            h = digest(collection, item_id, data) if digest else bifrost_hash(data)
+            record = have.get(item_id)
+            if record is None or record.get("del") or record.get("h") != h:
+                stamp = max(now, float((record or {}).get("m") or 0) + 0.001)   # (never older than what it replaces)
+                have[item_id] = {"h": h, "m": stamp, "d": device, "x": wrap(collection, item_id, data) if wrap else data}
+                changed += 1
+        for item_id, record in list(have.items()):
+            if item_id not in items and not record.get("del"):
+                have[item_id] = {"h": "", "m": max(now, float(record.get("m") or 0) + 0.001), "d": device, "x": None,
+                                 "del": True}
+                changed += 1
+    cutoff = now - BIFROST_TOMBSTONE_DAYS * 86400
+    for have in known.values():
+        for item_id, record in list(have.items()):
+            if record.get("del") and record.get("m", 0) < cutoff:
+                del have[item_id]
+    return changed
+
+
+def bifrost_records(known: dict, collections) -> list[dict]:
+    return [{"c": c, "i": i, "m": r["m"], "d": r["d"], "h": r.get("h", ""), "x": r.get("x"),
+             **({"del": True} if r.get("del") else {})}
+            for c in collections for i, r in known.get(c, {}).items()]
+
+
+def bifrost_merge(known: dict, records: list, collections, now: float | None = None) -> dict:
+    """Takes what's newer from another device. Returns {collection: {id: data or None}} to
+    apply here (None: delete). A time far in the future (a clock that's wrong, or worse)
+    counts as no later than tomorrow."""
+    latest = (now or time.time()) + 86400
+    changes: dict[str, dict] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        collection, item_id = record.get("c"), record.get("i")
+        if collection not in collections or not isinstance(item_id, str) or not 0 < len(item_id) <= 64:
+            continue
+        try:
+            when = float(record.get("m"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(when) or when <= 0:
+            continue
+        stamp = (min(when, latest), str(record.get("d") or "")[:32])
+        deleted = bool(record.get("del"))
+        data = None if deleted else record.get("x")
+        if not deleted and not isinstance(data, dict):
+            continue
+        have = known.setdefault(collection, {})
+        mine = have.get(item_id)
+        if mine is not None and (float(mine.get("m", 0)), str(mine.get("d", ""))) >= stamp:
+            continue
+        h = record.get("h") if isinstance(record.get("h"), str) and 0 < len(record["h"]) <= 64 else bifrost_hash(data)
+        have[item_id] = {"h": "" if deleted else h, "m": stamp[0], "d": stamp[1], "x": data,
+                         **({"del": True} if deleted else {})}
+        changes.setdefault(collection, {})[item_id] = data
+    return changes
+
+
+def bifrost_item_id(*parts: str) -> str:
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+class BifrostKeyKeeper:
+    """Where the group key lives: Windows' protected storage, the macOS Keychain, the Linux
+    Secret Service (secret-tool) - or, without those, a file only you can read."""
+    SERVICE = "Huginn Bifrost"
+
+    def __init__(self, folder: str, mode: str | None = None) -> None:
+        self.folder = folder
+        if mode is None:
+            mode = ("dpapi" if IS_WINDOWS else "keychain" if IS_MAC and shutil.which("security")
+                    else "secret-tool" if IS_LINUX and shutil.which("secret-tool") else "file")
+        self.mode = mode
+
+    def describe(self) -> str:
+        return {"dpapi": "in Windows' protected storage for your account", "keychain": "in your macOS Keychain",
+                "secret-tool": "in your desktop's keyring", "file": "in a file only your account can read"}[self.mode]
+
+    def _file(self) -> str:
+        return os.path.join(self.folder, "key.dpapi" if self.mode == "dpapi" else "key")
+
+    def save(self, secret: bytes) -> None:
+        os.makedirs(self.folder, exist_ok=True)
+        if self.mode == "file" and IS_LINUX and shutil.which("secret-tool"):
+            self.mode = "secret-tool"                     # (a keyring that wasn't there earlier may be now)
+        if self.mode == "keychain":                       # (through stdin: never on a command line, where
+            command = f'add-generic-password -U -s "{self.SERVICE}" -a group -w {secret.hex()}\n'   # ps shows it)
+            subprocess.run(["security", "-i"], input=command.encode(), check=True, capture_output=True, timeout=20)
+            return
+        if self.mode == "secret-tool":
+            try:
+                subprocess.run(["secret-tool", "store", "--label", self.SERVICE, "service", "huginn-bifrost",
+                                "key", "group"], input=secret.hex().encode(), check=True, capture_output=True,
+                               timeout=20)
+                return
+            except (OSError, subprocess.SubprocessError):
+                self.mode = "file"                       # no keyring running: the file below
+        data = dpapi_protect(secret) if self.mode == "dpapi" else secret.hex().encode()
+        path = self._file()
+        try:
+            os.remove(path + ".tmp")
+        except OSError:
+            pass
+        handle = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(handle, "wb") as f:              # (only your account can read it from the start)
+            f.write(data)
+        os.replace(path + ".tmp", path)
+
+    def load(self) -> bytes | None:
+        try:
+            if self.mode == "keychain":
+                out = subprocess.run(["security", "find-generic-password", "-s", self.SERVICE, "-a", "group", "-w"],
+                                     capture_output=True, timeout=20)
+                return bytes.fromhex(out.stdout.decode().strip()) if out.returncode == 0 else None
+            if self.mode == "secret-tool":
+                out = subprocess.run(["secret-tool", "lookup", "service", "huginn-bifrost", "key", "group"],
+                                     capture_output=True, timeout=20)
+                if out.returncode == 0 and out.stdout.strip():
+                    return bytes.fromhex(out.stdout.decode().strip())
+                if not os.path.isfile(self._file()):
+                    return None                           # (nothing saved yet: the keyring is still the place)
+                self.mode = "file"                        # (saved to the file when the keyring wasn't there)
+            with open(self._file(), "rb") as f:
+                data = f.read()
+            secret = dpapi_unprotect(data) if self.mode == "dpapi" else bytes.fromhex(data.decode().strip())
+            return secret if len(secret) == 32 else None
+        except (OSError, ValueError, subprocess.SubprocessError, VaultError):
+            return None
+
+    def delete(self) -> None:
+        if self.mode == "keychain":
+            subprocess.run(["security", "delete-generic-password", "-s", self.SERVICE, "-a", "group"],
+                           capture_output=True, timeout=20)
+        elif self.mode == "secret-tool":
+            subprocess.run(["secret-tool", "clear", "service", "huginn-bifrost", "key", "group"],
+                           capture_output=True, timeout=20)
+        for name in ("key", "key.dpapi"):
+            try:
+                os.remove(os.path.join(self.folder, name))
+            except OSError:
+                pass
+
+
+def _bifrost_recv(sock, size: int) -> bytes:
+    data = bytearray(size)
+    view, got = memoryview(data), 0
+    while got < size:
+        n = sock.recv_into(view[got:], min(65536, size - got))
+        if not n:
+            raise ConnectionError("closed")
+        got += n
+    return bytes(data)
+
+
+def _bifrost_send_frame(sock, data: bytes) -> None:
+    sock.sendall(len(data).to_bytes(4, "big") + data)
+
+
+def _bifrost_recv_frame(sock) -> bytes:
+    size = int.from_bytes(_bifrost_recv(sock, 4), "big")
+    if size > BIFROST_MAX_BLOB:
+        raise ConnectionError("too big")
+    return _bifrost_recv(sock, size)
+
+
+def _bifrost_read_file(path: str) -> bytes | None:
+    """A device's file from the sync folder: only a regular file (not a link or a pipe that
+    would never finish), and not a huge one."""
+    try:
+        if os.path.islink(path):
+            return None
+        handle = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > BIFROST_MAX_BLOB:
+            return None
+        with os.fdopen(handle, "rb") as f:
+            handle = -1
+            return f.read(BIFROST_MAX_BLOB + 1)
+    except OSError:
+        return None
+    finally:
+        if handle != -1:
+            os.close(handle)
+
+
+def bifrost_web_url(url) -> str:
+    """An address from another device, if it's a web page (never file:, data:, internal pages)."""
+    text = str(url or "")[:2048]
+    q = QUrl(text)
+    return text if q.isValid() and q.scheme() in ("http", "https") and q.host() else ""
+
+
+def bifrost_pair_code(shared: bytes, transcript: bytes) -> str:
+    number = int.from_bytes(hashlib.sha256(b"huginn bifrost code" + shared + transcript).digest()[:4], "big") % 1_000_000
+    return f"{number:06d}"
+
+
+class Bifrost(QObject):
+    """The sync engine for one device. `local` reads and writes this device's data:
+    scan(collections) -> {collection: {id: data}} (a collection left out can't be read now),
+    apply({collection: {id: data or None}}) -> set of collections it couldn't change now,
+    tabs() -> [{url, title}], device_name() -> str."""
+    changed = Signal()                       # status, devices or their tabs
+    offersChanged = Signal()                 # devices on this network offering to pair
+    pairingState = Signal(str, str)          # "code" (the 6 digits), "done", "failed" (why)
+    _received = Signal(bytes, str)           # (from the network threads)
+    _beacon = Signal(bytes, str)
+    _pair_event = Signal(str, str)
+    _paired = Signal(bytes, str, bytes)        # group key, the other device's name, password key (or b"")
+
+    def __init__(self, folder: str, local, parent: QObject | None = None, keeper: BifrostKeyKeeper | None = None,
+                 port: int = BIFROST_PORT, broadcast: str = "255.255.255.255") -> None:
+        super().__init__(parent)
+        self.folder = folder
+        self.local = local
+        self.keeper = keeper or BifrostKeyKeeper(folder)
+        self.port = port
+        self.broadcast = broadcast
+        self.secret: bytes | None = self.keeper.load()
+        self._auth_key = bifrost_keys(self.secret)["auth"] if self.secret else b""
+        self.config = self._load_config()
+        self.known: dict = {}
+        self.pending: dict = {}
+        self.remote_tabs: dict = {}
+        self.devices: dict = {}
+        self.last_sync = 0.0
+        self.last_error = ""
+        self.offers: dict[str, dict] = {}
+        self._pk_pending: bytes | None = None
+        self._clients = threading.BoundedSemaphore(4)
+        self._seen_beacons: dict[bytes, float] = {}
+        self._outgoing = b""
+        self._sent_nonces: list[bytes] = []
+        self._recent_peers: dict[str, float] = {}
+        self._threads_stop = threading.Event()
+        self._connections = threading.BoundedSemaphore(8)   # devices talking at once, at most
+        self._udp = None
+        self._server = None
+        self._offer = None
+        self._join = None
+        self._load_state()
+        self._timer = QTimer(self)
+        self._timer.setInterval(BIFROST_SYNC_S * 1000)
+        self._timer.timeout.connect(self.sync_now)
+        self._soon = QTimer(self)
+        self._soon.setSingleShot(True)
+        self._soon.setInterval(4000)
+        self._soon.timeout.connect(self.sync_now)
+        self._beacon_timer = QTimer(self)
+        self._beacon_timer.setInterval(BIFROST_BEACON_S * 1000)
+        self._beacon_timer.timeout.connect(self._send_beacon)
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(lambda *_: self._soon.start())
+        self._received.connect(self._on_received)
+        self._beacon.connect(self._on_beacon)
+        self._pair_event.connect(self._on_pair_event)
+        self._paired.connect(self._on_paired)
+        if self.secret is not None:
+            self._start()
+
+    # -- settings and state
+    def _load_config(self) -> dict:
+        try:
+            with open(os.path.join(self.folder, "config.json"), encoding="utf-8") as f:
+                config = json.load(f)
+        except (OSError, ValueError):
+            config = {}
+        if not isinstance(config, dict):
+            config = {}
+        config.setdefault("device", secrets.token_hex(8))
+        config.setdefault("folder", "")
+        config.setdefault("lan", True)
+        if not isinstance(config.get("collections"), list):     # passwords only where the key is kept safely
+            config["collections"] = [c for c in BIFROST_COLLECTIONS if c != "passwords" or self.keeper.mode != "file"]
+        return config
+
+    def _save_config(self) -> None:
+        os.makedirs(self.folder, exist_ok=True)
+        path = os.path.join(self.folder, "config.json")
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(self.config, f)
+        os.replace(path + ".tmp", path)
+
+    @property
+    def device(self) -> str:
+        return self.config["device"]
+
+    def _load_state(self) -> None:
+        """What this device knows, sealed with the group key (passwords are in it)."""
+        if self.secret is None:
+            return
+        try:
+            with open(os.path.join(self.folder, "state.sealed"), "rb") as f:
+                state = bifrost_open(self.secret, f.read())
+        except OSError:
+            state = None
+        if state is not None:
+            self.known = state.get("known") if isinstance(state.get("known"), dict) else {}
+            self.pending = {c: list(v) for c, v in (state.get("pending") or {}).items() if isinstance(v, list)}
+            self.remote_tabs = state.get("remote_tabs") if isinstance(state.get("remote_tabs"), dict) else {}
+            self.devices = state.get("devices") if isinstance(state.get("devices"), dict) else {}
+            self.last_sync = float(state.get("last_sync") or 0)
+
+    def _save_state(self) -> None:
+        if self.secret is None:
+            return
+        os.makedirs(self.folder, exist_ok=True)
+        blob = bifrost_seal(self.secret, self.device, {"device": self.device, "records": [], "known": self.known,
+                                                        "pending": self.pending, "remote_tabs": self.remote_tabs,
+                                                        "devices": self.devices, "last_sync": self.last_sync})
+        path = os.path.join(self.folder, "state.sealed")
+        with open(path + ".tmp", "wb") as f:
+            f.write(blob)
+        os.replace(path + ".tmp", path)
+
+    def configured(self) -> bool:
+        return self.secret is not None
+
+    def group(self) -> str:
+        return bifrost_keys(self.secret)["group"] if self.secret else ""
+
+    def collections(self) -> list[str]:
+        return [c for c in self.config["collections"] if c in BIFROST_COLLECTIONS]
+
+    def record_collections(self) -> list[str]:
+        return [c for c in self.collections() if c != "tabs"]
+
+    def set_collection(self, collection: str, on: bool, *_) -> None:
+        chosen = [c for c in self.collections() if c != collection] + ([collection] if on else [])
+        self.config["collections"] = [c for c in BIFROST_COLLECTIONS if c in chosen]
+        self._save_config()
+        self.schedule()
+        self.changed.emit()
+
+    def set_folder(self, path: str) -> None:
+        self.config["folder"] = path or ""
+        self._save_config()
+        self._watch()
+        self.schedule()
+        self.changed.emit()
+
+    def set_lan(self, on: bool, *_) -> None:
+        self.config["lan"] = bool(on)
+        self._save_config()
+        self._stop_network()
+        if on and self.secret is not None:
+            self._start_network()
+        self.changed.emit()
+
+    def key_text(self) -> str:
+        if not self.secret:
+            return ""
+        key = self._password_key_now({"passwords": {}}, make=True) if "passwords" in self.collections() else None
+        return bifrost_key_text(self.secret, key)
+
+    # -- joining and leaving
+    def create(self) -> None:
+        self._become(secrets.token_bytes(32), maker=True)
+
+    def join(self, secret: bytes, password_key: bytes | None = None) -> None:
+        """Joining a group; its password key comes with it from pairing (or a key that carries
+        one), and is put in the vault as soon as that's unlocked."""
+        self._pk_pending = password_key if password_key and len(password_key) == 32 else None
+        self._become(secret)
+
+    def _become(self, secret: bytes, maker: bool = False) -> None:
+        self._stop()
+        self.keeper.save(secret)
+        self.secret = secret
+        self._auth_key = bifrost_keys(secret)["auth"]
+        group = bifrost_keys(secret)["group"]
+        if maker:
+            self.config["pk_maker"] = group               # (only the device that made the group makes its password key)
+        elif self.config.get("pk_maker") != group:
+            self.config["pk_maker"] = ""
+        self.known, self.pending, self.remote_tabs, self.devices, self.last_sync = {}, {}, {}, {}, 0.0
+        self._save_config()
+        self._save_state()
+        self._start()
+        self.sync_now()
+        self.changed.emit()
+
+    def leave(self) -> None:
+        """This device stops syncing; its file goes from the sync folder, the key from here."""
+        self._stop()
+        own = self._own_file()
+        if own:
+            try:
+                os.remove(own)
+            except OSError:
+                pass
+        self.keeper.delete()
+        for name in ("state.sealed",):
+            try:
+                os.remove(os.path.join(self.folder, name))
+            except OSError:
+                pass
+        self.secret, self._auth_key, self._pk_pending = None, b"", None
+        self.known, self.pending, self.remote_tabs, self.devices = {}, {}, {}, {}
+        self.changed.emit()
+
+    def _start(self) -> None:
+        self._timer.start()
+        self._watch()
+        if self.config.get("lan"):
+            self._start_network()
+
+    def _stop(self) -> None:
+        self._timer.stop()
+        self._soon.stop()
+        self._stop_network()
+        self.cancel_pairing()
+
+    def schedule(self) -> None:
+        """Something changed here: sync in a moment."""
+        if self.secret is not None:
+            self._soon.start()
+
+    # -- syncing
+    def _group_folder(self) -> str:
+        folder = self.config.get("folder") or ""
+        return os.path.join(folder, f"bifrost-{self.group()}") if folder and self.secret else ""
+
+    def _own_file(self) -> str:
+        folder = self._group_folder()
+        return os.path.join(folder, f"{self.device}.huginnsync") if folder else ""
+
+    def _watch(self) -> None:
+        for path in self._watcher.directories():
+            self._watcher.removePath(path)
+        folder = self._group_folder()
+        if folder:
+            try:
+                os.makedirs(folder, exist_ok=True)
+                self._watcher.addPath(folder)
+            except OSError:
+                pass
+
+    def sync_now(self, *_) -> None:
+        if self.secret is None:
+            return
+        self._soon.stop()
+        self.last_error = ""
+        changes = self._take_local()
+        folder = self._group_folder()
+        if folder:
+            try:
+                os.makedirs(folder, exist_ok=True)
+                names = sorted(os.listdir(folder))
+            except OSError:
+                names = []
+                self.last_error = "The sync folder isn't there."
+            for name in names:
+                if not name.endswith(".huginnsync") or name == f"{self.device}.huginnsync":
+                    continue
+                blob = _bifrost_read_file(os.path.join(folder, name))
+                if blob is not None:
+                    self._merge_blob(blob, "folder", changes)
+        self._apply(changes)
+        self._publish()
+        self.last_sync = time.time()
+        self._save_state()
+        if self.config.get("lan") and self._udp is not None:
+            self._send_beacon()
+        self.changed.emit()
+
+    # -- passwords are sealed again, with a key kept inside the password vault: the group key
+    # (which the system hands to any program you run) can't read them without your master password
+    def password_key(self) -> bytes | None:
+        return self.local.password_key(self.group()) if self.secret else None
+
+    def _foreign_key_ids(self) -> set:
+        return {r["x"]["k"] for r in self.known.get("passwords", {}).values()
+                if isinstance(r.get("x"), dict) and isinstance(r["x"].get("k"), str)}
+
+    def password_note(self) -> str:
+        if "passwords" not in self.collections() or self.secret is None:
+            return ""
+        if self._pk_pending is not None:
+            return "Unlock your passwords on this device to start syncing them."
+        vault = self.local._vault() if hasattr(self.local, "_vault") else None
+        if vault is not None and vault.exists() and vault.locked():
+            return "Passwords sync while they're unlocked on this device."
+        key = self.password_key()
+        foreign = self._foreign_key_ids()
+        if key is None and foreign:
+            return "To sync passwords here, pair this device again (Add a Device on one that syncs them)."
+        if key is not None and foreign - {self._key_id(key)}:
+            return "Some passwords were sealed with another group's key: pair that device again to sync them."
+        return ""
+
+    def _password_key_now(self, current: dict, make: bool = False) -> bytes | None:
+        """The password key: the vault's, or one that came with pairing, or (on the device that
+        made the group, or when giving the key to a new device) a new one if none exists yet."""
+        if self.secret is None:
+            return None
+        group = self.group()
+        key = self.local.password_key(group)
+        if key is not None or "passwords" not in current:
+            return key
+        if self._pk_pending is not None and self.local.set_password_key(group, self._pk_pending):
+            key, self._pk_pending = self._pk_pending, None
+            return key
+        if self._pk_pending is None and not self._foreign_key_ids() \
+                and (make or self.config.get("pk_maker") == group) \
+                and self.local.set_password_key(group, secrets.token_bytes(32)):
+            return self.local.password_key(group)
+        return None
+
+    @staticmethod
+    def _key_id(key: bytes) -> str:
+        return hmac.new(key, b"huginn bifrost password key id", hashlib.sha256).hexdigest()[:8]
+
+    def _seal_password(self, key: bytes, item_id: str, data: dict) -> dict:
+        nonce = os.urandom(12)
+        body = json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return {"k": self._key_id(key), "s": _b64e(nonce + AESGCM(key).encrypt(nonce, body, b"bifrost pw|" + item_id.encode()))}
+
+    def _open_password(self, key: bytes, item_id: str, sealed) -> dict | None:
+        try:
+            raw = _b64d(sealed["s"])
+            data = json.loads(AESGCM(key).decrypt(raw[:12], raw[12:], b"bifrost pw|" + item_id.encode()))
+            return data if isinstance(data, dict) else None
+        except (KeyError, TypeError, ValueError, InvalidTag, base64.binascii.Error):
+            return None
+
+    def _take_local(self) -> dict:
+        """Pending changes from others first (a locked vault, before), then what changed here."""
+        collections = self.record_collections()
+        current = self.local.scan(collections)
+        key = self._password_key_now(current)
+        if "passwords" in current and key is None:
+            del current["passwords"]                       # (can't be sealed: as if locked)
+        changes: dict = {}
+        for collection, ids in list(self.pending.items()):
+            if collection in current:
+                have = self.known.get(collection, {})
+                changes.setdefault(collection, {}).update({i: (have.get(i) or {}).get("x") for i in ids})
+                del self.pending[collection]
+        if changes:
+            self._apply(changes)
+            current = self.local.scan(collections)
+            if "passwords" in current and key is None:
+                del current["passwords"]
+
+        def digest(collection: str, item_id: str, data) -> str:
+            if collection == "passwords":
+                body = json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+                return hmac.new(key, body, hashlib.sha256).hexdigest()[:24]
+            return bifrost_hash(data)
+
+        def wrap(collection: str, item_id: str, data):
+            return self._seal_password(key, item_id, data) if collection == "passwords" else data
+        bifrost_scan(self.known, current, self.device, collections, digest=digest, wrap=wrap)
+        return {}
+
+    def _merge_blob(self, blob: bytes, via: str, changes: dict) -> bool:
+        payload = bifrost_open(self.secret, blob[:BIFROST_MAX_BLOB])
+        if payload is None or payload.get("device") == self.device:
+            return False
+        device = str(payload["device"])
+        for collection, items in bifrost_merge(self.known, payload["records"], self.record_collections()).items():
+            changes.setdefault(collection, {}).update(items)
+        name = str(payload.get("name") or "Another device")[:60]
+        try:
+            at = min(float(payload.get("at") or 0), time.time() + 86400)
+        except (TypeError, ValueError):
+            at = 0.0
+        if not math.isfinite(at):
+            at = 0.0
+        self.devices[device] = {"name": name, "seen": max(at, float(self.devices.get(device, {}).get("seen") or 0)),
+                                "via": via}
+        tabs = payload.get("tabs")
+        if isinstance(tabs, list) and at >= float(self.remote_tabs.get(device, {}).get("at") or 0):
+            self.remote_tabs[device] = {"name": name, "at": at,
+                                        "tabs": [{"url": bifrost_web_url(t.get("url")), "title": str(t.get("title") or "")[:300]}
+                                                 for t in tabs[:500] if isinstance(t, dict) and bifrost_web_url(t.get("url"))]}
+        return True
+
+    def _apply(self, changes: dict) -> None:
+        if not changes:
+            return
+        changes = {c: dict(items) for c, items in changes.items()}
+        for collection in ("bookmarks", "reading"):         # web pages only, whatever another device sent
+            for item_id, data in list(changes.get(collection, {}).items()):
+                if data is not None and not bifrost_web_url(data.get("url")):
+                    del changes[collection][item_id]
+        held: set = set()
+        if changes.get("passwords"):
+            key = self.password_key()
+            if key is None:
+                held = set(changes.pop("passwords"))
+            else:
+                opened = {}
+                for item_id, sealed in changes["passwords"].items():
+                    if sealed is None:
+                        opened[item_id] = None
+                    elif isinstance(sealed, dict) and sealed.get("k") == self._key_id(key):
+                        data = self._open_password(key, item_id, sealed)
+                        if data is not None and bifrost_web_url(data.get("url")):
+                            opened[item_id] = data
+                    elif isinstance(sealed, dict) and sealed.get("k"):
+                        held.add(item_id)                  # (sealed with a key this device doesn't have yet)
+                changes["passwords"] = opened
+        if held:
+            self.pending["passwords"] = sorted(set(self.pending.get("passwords", [])) | held)
+        blocked = self.local.apply(changes) or set()
+        for collection in blocked:                       # (e.g. passwords while the vault is locked)
+            ids = set(self.pending.get(collection, [])) | set(changes.get(collection, {}))
+            self.pending[collection] = sorted(ids)
+
+    def _payload(self) -> dict:
+        return {"device": self.device, "name": self.local.device_name(), "at": time.time(),
+                "records": bifrost_records(self.known, self.record_collections()),
+                "tabs": self.local.tabs() if "tabs" in self.collections() else []}
+
+    def _publish(self) -> None:
+        payload = self._payload()
+        digest = bifrost_hash({k: v for k, v in payload.items() if k != "at"})
+        blob = bifrost_seal(self.secret, self.device, payload)
+        self._outgoing = blob
+        own = self._own_file()
+        if own and digest == getattr(self, "_written", ("", 0.0))[0] and os.path.isfile(own) \
+                and time.time() - self._written[1] < 600:
+            return                                        # nothing new (and our own write isn't news to us)
+        if own:
+            self._written = (digest, time.time())
+            try:                                          # a new file of our own, never one planted there
+                handle, temp = tempfile.mkstemp(dir=os.path.dirname(own), prefix=".huginn-", suffix=".part")
+                with os.fdopen(handle, "wb") as f:
+                    f.write(blob)
+                os.replace(temp, own)                     # (replaces a link itself, never what it points at)
+            except OSError:
+                self.last_error = "Huginn couldn't write to the sync folder."
+
+    # -- the local network
+    def _start_network(self) -> None:
+        if self._server is not None or self.secret is None:
+            return
+        if self._udp is not None:                         # (listening for pairing offers only, until now)
+            self._stop_network()
+        self._threads_stop = threading.Event()
+        try:
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT") and not IS_WINDOWS:
+                udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            udp.bind(("", self.port))
+            udp.settimeout(0.5)
+            server = socket.create_server(("0.0.0.0", 0))
+            server.settimeout(0.5)
+        except OSError:
+            self.last_error = "The local network isn't available to Huginn."
+            return
+        self._udp, self._server = udp, server
+        stop = self._threads_stop
+        threading.Thread(target=self._udp_loop, args=(udp, stop), daemon=True).start()
+        threading.Thread(target=self._accept_loop, args=(server, stop), daemon=True).start()
+        self._beacon_timer.start()
+        QTimer.singleShot(300, self, self._send_beacon)
+
+    def start_discovery(self) -> None:
+        """While joining: listen for devices offering to pair (the network is otherwise only
+        used once this device is in a group)."""
+        if self._udp is not None:
+            return
+        self._threads_stop = threading.Event()
+        try:
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT") and not IS_WINDOWS:
+                udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            udp.bind(("", self.port))
+            udp.settimeout(0.5)
+        except OSError:
+            return
+        self._udp = udp
+        threading.Thread(target=self._udp_loop, args=(udp, self._threads_stop), daemon=True).start()
+
+    def stop_discovery(self) -> None:
+        if self._server is None:                          # (a device in a group keeps listening)
+            self._stop_network()
+            self.offers.clear()
+
+    def _stop_network(self) -> None:
+        self._beacon_timer.stop()
+        self._threads_stop.set()
+        for sock in (self._udp, self._server):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self._udp = self._server = None
+
+    def _udp_loop(self, udp, stop) -> None:
+        """Beacons are checked here, off the window's thread: only our devices' get through,
+        each once (a recorded one can't be played back)."""
+        while not stop.is_set():
+            try:
+                data, (host, _port) = udp.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            data = bytes(data)
+            if data.startswith(b"HP1") and 13 < len(data) <= 73:
+                self._beacon.emit(data, host)
+            elif data.startswith(b"HB1") and len(data) == 29 and self._auth_key:
+                nonce, tag, port = data[3:11], data[11:27], data[27:29]
+                bucket = int(time.time() // 60)
+                if nonce in self._sent_nonces or nonce in self._seen_beacons:
+                    continue
+                if any(hmac.compare_digest(tag, self._beacon_tag(b, nonce, port)) for b in (bucket - 1, bucket, bucket + 1)):
+                    now = time.time()
+                    self._seen_beacons[nonce] = now
+                    if len(self._seen_beacons) > 500:
+                        self._seen_beacons = {n: t for n, t in self._seen_beacons.items() if now - t < 240}
+                    self._beacon.emit(data, host)
+
+    def _beacon_tag(self, bucket: int, nonce: bytes, port: bytes) -> bytes:
+        return hmac.new(self._auth_key, b"beacon" + str(bucket).encode() + nonce + port, hashlib.sha256).digest()[:16]
+
+    def _send_beacon(self) -> None:
+        if self._udp is None or self._server is None or self.secret is None:
+            return
+        nonce = os.urandom(8)
+        self._sent_nonces = (self._sent_nonces + [nonce])[-20:]
+        port = self._server.getsockname()[1].to_bytes(2, "big")
+        packet = b"HB1" + nonce + self._beacon_tag(int(time.time() // 60), nonce, port) + port
+        try:
+            self._udp.sendto(packet, (self.broadcast, self.port))
+        except OSError:
+            pass
+
+    def _on_beacon(self, data: bytes, host: str) -> None:
+        now = time.time()
+        if data.startswith(b"HP1"):                           # someone offering to pair
+            session, port = data[3:11].hex(), int.from_bytes(data[11:13], "big")
+            if self._offer is not None and session == self._offer["session"]:
+                return
+            for old in [k for k, o in self.offers.items() if now - o["seen"] > 30]:
+                del self.offers[old]
+            known = self.offers.get(session)
+            if known is not None and known["host"] != host:
+                return                                        # (the session belongs to whoever announced it first)
+            if known is None and len(self.offers) >= 16:
+                return
+            name = data[13:73].decode("utf-8", "replace")
+            self.offers[session] = {"session": session, "name": name, "host": host, "port": port, "seen": now}
+            if known is None:
+                self.offersChanged.emit()
+            return
+        if self.secret is None or not data.startswith(b"HB1"):
+            return                                            # (checked in the network thread already)
+        port = int.from_bytes(data[27:29], "big")
+        peer = f"{host}:{port}"
+        self._recent_peers = {p: t for p, t in self._recent_peers.items() if now - t < 60}
+        if now - self._recent_peers.get(peer, 0) < 15:
+            return
+        if not self._clients.acquire(blocking=False):
+            return                                            # (already talking to plenty of devices)
+        self._recent_peers[peer] = now
+        if not self._outgoing:
+            self._publish()
+        threading.Thread(target=self._exchange_client, args=(host, port, self._outgoing, self.secret), daemon=True).start()
+
+    def _auth(self, secret: bytes, label: bytes, a: bytes, b: bytes) -> bytes:
+        return hmac.new(bifrost_keys(secret)["auth"], label + a + b, hashlib.sha256).digest()
+
+    def _exchange_client(self, host: str, port: int, blob: bytes, secret: bytes) -> None:
+        try:
+            self._exchange_connect(host, port, blob, secret)
+        finally:
+            self._clients.release()
+
+    def _exchange_connect(self, host: str, port: int, blob: bytes, secret: bytes) -> None:
+        try:
+            with socket.create_connection((host, port), timeout=10) as sock:
+                mine = os.urandom(32)
+                sock.sendall(b"HBS1" + mine)
+                theirs = _bifrost_recv(sock, 32)
+                if not hmac.compare_digest(_bifrost_recv(sock, 32), self._auth(secret, b"server", mine, theirs)):
+                    return
+                sock.sendall(self._auth(secret, b"client", mine, theirs))
+                _bifrost_send_frame(sock, blob)
+                received = _bifrost_recv_frame(sock)
+            self._received.emit(received, host)
+        except (OSError, ConnectionError):
+            pass
+
+    def _accept_loop(self, server, stop) -> None:
+        while not stop.is_set():
+            try:
+                sock, (host, _port) = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not self._connections.acquire(blocking=False):
+                sock.close()                                  # (more than any household has devices)
+                continue
+            threading.Thread(target=self._exchange_server, args=(sock, host), daemon=True).start()
+
+    def _exchange_server(self, sock, host: str) -> None:
+        try:
+            self._exchange_serve(sock, host)
+        finally:
+            self._connections.release()
+
+    def _exchange_serve(self, sock, host: str) -> None:
+        secret = self.secret
+        try:
+            with sock:
+                sock.settimeout(10)
+                if secret is None or _bifrost_recv(sock, 4) != b"HBS1":
+                    return
+                theirs = _bifrost_recv(sock, 32)
+                mine = os.urandom(32)
+                sock.sendall(mine + self._auth(secret, b"server", theirs, mine))
+                if not hmac.compare_digest(_bifrost_recv(sock, 32), self._auth(secret, b"client", theirs, mine)):
+                    return                                    # not a device of ours: nothing more is said
+                received = _bifrost_recv_frame(sock)
+                _bifrost_send_frame(sock, self._outgoing or bifrost_seal(secret, self.device, {"device": self.device,
+                                                                                                "records": []}))
+            self._received.emit(received, host)
+        except (OSError, ConnectionError):
+            pass
+
+    def _on_received(self, blob: bytes, host: str) -> None:
+        if self.secret is None:
+            return
+        self._take_local()
+        changes: dict = {}
+        if self._merge_blob(blob, "network", changes):
+            self._apply(changes)
+            self._publish()
+            self.last_sync = time.time()
+            self._save_state()
+            self.changed.emit()
+
+    # -- pairing
+    def offer_pairing(self) -> None:
+        """'Add a Device': this device (making a group first if need be) offers to pair on the
+        local network until a device joins or it's cancelled."""
+        if self.secret is None:
+            self.create()
+        self.cancel_pairing()
+        try:
+            server = socket.create_server(("0.0.0.0", 0))
+            server.settimeout(0.5)
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except OSError:
+            self.pairingState.emit("failed", "The local network isn't available to Huginn.")
+            return
+        offer = {"session": secrets.token_hex(8), "server": server, "udp": udp, "stop": threading.Event(),
+                 "confirm": threading.Event(), "ok": False}
+        self._offer = offer
+        pk = self._password_key_now({"passwords": {}}, make=True) if "passwords" in self.collections() else None
+        threading.Thread(target=self._offer_loop, args=(offer, self.secret, self.local.device_name(), pk),
+                         daemon=True).start()
+
+    def confirm_pairing(self, ok: bool) -> None:
+        """The person compared the numbers (on either side): they match (ok) or they don't.
+        The key goes over only once both people have said they match."""
+        session = self._offer or self._join
+        if session is not None and session.get("shown") and not session["confirm"].is_set():
+            session["ok"] = bool(ok)
+            session["confirm"].set()
+            if ok:
+                self.pairingState.emit("confirmed", "")
+
+    def cancel_pairing(self) -> None:
+        for session in (self._offer, self._join):
+            if session is not None:
+                session["stop"].set()
+                session.get("confirm", threading.Event()).set()
+                for key in ("server", "udp", "sock"):
+                    try:
+                        if session.get(key) is not None:
+                            session[key].close()
+                    except OSError:
+                        pass
+        self._offer = self._join = None
+
+    @staticmethod
+    def _pair_wait(sock, session: dict, limit: float = 180) -> str:
+        """Waits for this side's person to compare the numbers, watching for the other side
+        giving up meanwhile: 'yes', 'no', 'left' (the other device said no, or went), 'timeout'."""
+        end = time.monotonic() + limit
+        while time.monotonic() < end:
+            if session["confirm"].wait(0.25):
+                return "yes" if session["ok"] and not session["stop"].is_set() else "no"
+            try:
+                sock.settimeout(0)
+                try:
+                    peek = sock.recv(1, socket.MSG_PEEK)
+                except (BlockingIOError, InterruptedError):
+                    peek = None
+                finally:
+                    sock.settimeout(BIFROST_PAIR_TIMEOUT)
+            except OSError:
+                return "left"
+            if peek == b"" or peek == b"N":
+                return "left"
+        return "timeout"
+
+    @staticmethod
+    def _pair_mac(session_key: bytes, transcript: bytes) -> bytes:
+        return hmac.new(session_key, b"huginn bifrost joiner confirms" + transcript, hashlib.sha256).digest()
+
+    def _offer_loop(self, offer: dict, secret: bytes, name: str, pk: bytes | None) -> None:
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+        server, stop = offer["server"], offer["stop"]
+        port = server.getsockname()[1]
+        packet = b"HP1" + bytes.fromhex(offer["session"]) + port.to_bytes(2, "big") + name.encode("utf-8")[:60]
+        started, sent = time.time(), 0.0
+        while not stop.is_set() and time.time() - started < 300:
+            if time.time() - sent > 2:
+                try:
+                    offer["udp"].sendto(packet, (self.broadcast, self.port))
+                except OSError:
+                    pass
+                sent = time.time()
+            try:
+                sock, _addr = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            shown = False
+            try:
+                with sock:
+                    sock.settimeout(BIFROST_PAIR_TIMEOUT)
+                    if _bifrost_recv(sock, 4) != b"HBP2":
+                        continue
+                    commitment = _bifrost_recv(sock, 32)
+                    key = X25519PrivateKey.generate()
+                    mine = key.public_key().public_bytes_raw()
+                    sock.sendall(mine)
+                    theirs = _bifrost_recv(sock, 32)
+                    if not hmac.compare_digest(hashlib.sha256(theirs).digest(), commitment):
+                        continue
+                    shared = key.exchange(X25519PublicKey.from_public_bytes(theirs))
+                    transcript = hashlib.sha256(b"huginn bifrost pair v2" + mine + theirs).digest()
+                    session_key = _hkdf(shared + transcript, b"huginn bifrost pair key v2")
+                    offer["sock"] = sock                         # (so cancelling stops a wait below)
+                    offer["shown"] = True                        # (confirming means something only from now)
+                    self._pair_event.emit("code", bifrost_pair_code(shared, transcript))
+                    shown = True
+                    answer = self._pair_wait(sock, offer)
+                    if answer != "yes":
+                        if answer == "no":
+                            try:
+                                sock.sendall(b"NO")
+                            except OSError:
+                                pass
+                        if not stop.is_set():
+                            self._pair_event.emit("failed", {
+                                "left": "The other device said the numbers don't match, or stopped pairing.",
+                                "timeout": "Pairing took too long. Try again."}.get(
+                                answer, "Pairing was cancelled. If the numbers didn't match, someone else "
+                                        "may have tried to join: nothing was sent."))
+                        return
+                    sock.settimeout(BIFROST_PAIR_TIMEOUT + 180)   # (the other person may still be comparing)
+                    reply = _bifrost_recv(sock, 2)
+                    if reply != b"OK" or not hmac.compare_digest(_bifrost_recv(sock, 32),
+                                                                  self._pair_mac(session_key, transcript)):
+                        if not stop.is_set():
+                            self._pair_event.emit("failed", "The other device said the numbers don't match. "
+                                                            "Nothing was sent.")
+                        return
+                    nonce = os.urandom(12)
+                    payload = {"secret": secret.hex(), "name": name}
+                    if pk is not None:
+                        payload["pk"] = pk.hex()
+                    body = json.dumps(payload).encode()
+                    sock.settimeout(BIFROST_PAIR_TIMEOUT)
+                    _bifrost_send_frame(sock, nonce + AESGCM(session_key).encrypt(nonce, body, transcript))
+                    if _bifrost_recv(sock, 2) == b"OK":
+                        self._pair_event.emit("done", "")
+                        return
+            except (OSError, ConnectionError, ValueError):
+                if shown and not stop.is_set():
+                    self._pair_event.emit("failed", "The other device stopped pairing.")
+                    return
+                continue
+        if not stop.is_set():
+            self._pair_event.emit("failed", "No device joined in time.")
+
+    def join_offer(self, session: str) -> None:
+        """'Join': pair with a device that's offering on this network."""
+        offer = self.offers.get(session)
+        if offer is None:
+            self.pairingState.emit("failed", "That device isn't offering any more.")
+            return
+        self.cancel_pairing()
+        self._join = {"stop": threading.Event(), "confirm": threading.Event(), "ok": False}
+        threading.Thread(target=self._join_loop, args=(offer, self._join), daemon=True).start()
+
+    def _join_loop(self, offer: dict, state: dict) -> None:
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+        stop = state["stop"]
+        try:
+            with socket.create_connection((offer["host"], offer["port"]), timeout=10) as sock:
+                state["sock"] = sock
+                sock.settimeout(BIFROST_PAIR_TIMEOUT)
+                key = X25519PrivateKey.generate()
+                mine = key.public_key().public_bytes_raw()
+                sock.sendall(b"HBP2" + hashlib.sha256(mine).digest())       # committed before seeing theirs
+                theirs = _bifrost_recv(sock, 32)
+                sock.sendall(mine)
+                shared = key.exchange(X25519PublicKey.from_public_bytes(theirs))
+                transcript = hashlib.sha256(b"huginn bifrost pair v2" + theirs + mine).digest()
+                session_key = _hkdf(shared + transcript, b"huginn bifrost pair key v2")
+                state["shown"] = True
+                self._pair_event.emit("code", bifrost_pair_code(shared, transcript))
+                answer = self._pair_wait(sock, state)
+                if answer != "yes":
+                    if answer == "no":
+                        try:
+                            sock.sendall(b"NO")
+                        except OSError:
+                            pass
+                    if not stop.is_set():
+                        self._pair_event.emit("failed", {
+                            "left": "The other device said the numbers don't match, or stopped pairing.",
+                            "timeout": "Pairing took too long. Try again."}.get(
+                            answer, "Pairing was cancelled. Nothing was joined."))
+                    return
+                sock.sendall(b"OK" + self._pair_mac(session_key, transcript))
+                sock.settimeout(BIFROST_PAIR_TIMEOUT + 180)       # (the other person may still be comparing)
+                frame = _bifrost_recv_frame(sock)
+                body = json.loads(AESGCM(session_key).decrypt(frame[:12], frame[12:], transcript))
+                secret = bytes.fromhex(body["secret"])
+                pk = bytes.fromhex(body["pk"]) if body.get("pk") else b""
+                if len(secret) != 32 or len(pk) not in (0, 32):
+                    raise ValueError
+                sock.sendall(b"OK")
+            if not stop.is_set():
+                self._paired.emit(secret, str(body.get("name") or "")[:60], pk)
+        except (OSError, ConnectionError, ValueError, KeyError, TypeError, InvalidTag):
+            if not stop.is_set():
+                self._pair_event.emit("failed", "Pairing didn't finish. Try again, and check the numbers match.")
+
+    def _on_pair_event(self, state: str, detail: str) -> None:
+        if state in ("done", "failed"):
+            self.cancel_pairing()
+            if state == "done":
+                self.sync_now()
+        self.pairingState.emit(state, detail)
+
+    def _on_paired(self, secret: bytes, name: str, pk: bytes) -> None:
+        self._join = None
+        self.join(secret, pk or None)
+        self.pairingState.emit("done", name)
+
+
+# A QR code (ISO/IEC 18004) for Bifröst's pairing key: byte mode, error correction level M,
+# versions 1-10, the mask with the lowest penalty. Small on purpose; nothing else uses it.
+_QR_ECC_M = (10, 16, 26, 18, 24, 16, 18, 22, 22, 26)          # error-correction codewords per block
+_QR_BLOCKS_M = (1, 1, 1, 2, 2, 4, 4, 4, 5, 5)
+
+
+def _qr_raw_modules(version: int) -> int:
+    result = (16 * version + 128) * version + 64
+    if version >= 2:
+        aligns = version // 7 + 2
+        result -= (25 * aligns - 10) * aligns - 55
+        if version >= 7:
+            result -= 36
+    return result
+
+
+def _qr_data_codewords(version: int) -> int:
+    return _qr_raw_modules(version) // 8 - _QR_ECC_M[version - 1] * _QR_BLOCKS_M[version - 1]
+
+
+def _qr_gf_mul(x: int, y: int) -> int:
+    z = 0
+    for i in range(7, -1, -1):
+        z = (z << 1) ^ ((z >> 7) * 0x11D)
+        z ^= ((y >> i) & 1) * x
+    return z & 0xFF
+
+
+def _qr_rs_divisor(degree: int) -> list[int]:
+    result = [0] * (degree - 1) + [1]
+    root = 1
+    for _ in range(degree):
+        for j in range(degree):
+            result[j] = _qr_gf_mul(result[j], root)
+            if j + 1 < degree:
+                result[j] ^= result[j + 1]
+        root = _qr_gf_mul(root, 0x02)
+    return result
+
+
+def _qr_rs_remainder(data: list[int], divisor: list[int]) -> list[int]:
+    result = [0] * len(divisor)
+    for b in data:
+        factor = b ^ result.pop(0)
+        result.append(0)
+        for i, coef in enumerate(divisor):
+            result[i] ^= _qr_gf_mul(coef, factor)
+    return result
+
+
+def _qr_alignment(version: int) -> list[int]:
+    if version == 1:
+        return []
+    count = version // 7 + 2
+    step = (version * 8 + count * 3 + 5) // (count * 4 - 4) * 2
+    return [6] + [version * 4 + 10 - i * step for i in range(count - 1)][::-1]
+
+
+def qr_matrix(text: str) -> list[list[bool]]:
+    """The QR code's modules (True = dark), without the quiet zone."""
+    data = text.encode("utf-8")
+    for version in range(1, 11):
+        count_bits = 8 if version < 10 else 16
+        if 4 + count_bits + 8 * len(data) <= _qr_data_codewords(version) * 8:
+            break
+    else:
+        raise ValueError("too long for a QR code here")
+    capacity = _qr_data_codewords(version) * 8
+    bits = [0, 1, 0, 0] + [(len(data) >> i) & 1 for i in range(count_bits - 1, -1, -1)]
+    for byte in data:
+        bits += [(byte >> i) & 1 for i in range(7, -1, -1)]
+    bits += [0] * min(4, capacity - len(bits))
+    bits += [0] * (-len(bits) % 8)
+    codewords = [int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8)]
+    pad = 0xEC
+    while len(codewords) < capacity // 8:
+        codewords.append(pad)
+        pad ^= 0xEC ^ 0x11
+    # error correction, in blocks, interleaved
+    blocks_n, ecc_len = _QR_BLOCKS_M[version - 1], _QR_ECC_M[version - 1]
+    raw = _qr_raw_modules(version) // 8
+    short_blocks = blocks_n - raw % blocks_n
+    short_len = raw // blocks_n
+    divisor = _qr_rs_divisor(ecc_len)
+    blocks, k = [], 0
+    for i in range(blocks_n):
+        size = short_len - ecc_len + (0 if i < short_blocks else 1)
+        chunk = codewords[k:k + size]
+        k += size
+        ecc = _qr_rs_remainder(chunk, divisor)
+        if i < short_blocks:
+            chunk = chunk + [None]
+        blocks.append(chunk + ecc)
+    final = [block[i] for i in range(len(blocks[0])) for block in blocks if block[i] is not None]
+    # the grid and its fixed patterns
+    size = version * 4 + 17
+    grid = [[False] * size for _ in range(size)]
+    fixed = [[False] * size for _ in range(size)]
+
+    def put(x: int, y: int, dark: bool) -> None:
+        grid[y][x] = dark
+        fixed[y][x] = True
+    for i in range(size):
+        put(6, i, i % 2 == 0)
+        put(i, 6, i % 2 == 0)
+    for cx, cy in ((3, 3), (size - 4, 3), (3, size - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                x, y = cx + dx, cy + dy
+                if 0 <= x < size and 0 <= y < size:
+                    dist = max(abs(dx), abs(dy))
+                    put(x, y, dist not in (2, 4))
+    aligns = _qr_alignment(version)
+    for i, ax in enumerate(aligns):
+        for j, ay in enumerate(aligns):
+            if (i == 0 and j == 0) or (i == 0 and j == len(aligns) - 1) or (i == len(aligns) - 1 and j == 0):
+                continue
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    put(ax + dx, ay + dy, max(abs(dx), abs(dy)) != 1)
+
+    def format_bits(mask: int) -> None:
+        value = (0 << 3) | mask                           # level M is 00
+        rem = value
+        for _ in range(10):
+            rem = (rem << 1) ^ ((rem >> 9) * 0x537)
+        bits = ((value << 10) | rem) ^ 0x5412
+        bit = lambda i: ((bits >> i) & 1) != 0            # noqa: E731
+        for i in range(6):
+            put(8, i, bit(i))
+        put(8, 7, bit(6))
+        put(8, 8, bit(7))
+        put(7, 8, bit(8))
+        for i in range(9, 15):
+            put(14 - i, 8, bit(i))
+        for i in range(8):
+            put(size - 1 - i, 8, bit(i))
+        for i in range(8, 15):
+            put(8, size - 15 + i, bit(i))
+        put(8, size - 8, True)                             # the dark module
+    format_bits(0)                                         # (reserves the area; redrawn below)
+    if version >= 7:
+        rem = version
+        for _ in range(12):
+            rem = (rem << 1) ^ ((rem >> 11) * 0x1F25)
+        bits = (version << 12) | rem
+        for i in range(18):
+            dark = ((bits >> i) & 1) != 0
+            a, b = size - 11 + i % 3, i // 3
+            put(a, b, dark)
+            put(b, a, dark)
+    # the codewords, in the zigzag
+    stream = [((byte >> (7 - b)) & 1) != 0 for byte in final for b in range(8)]
+    i = 0
+    right = size - 1
+    while right >= 1:
+        if right == 6:
+            right = 5
+        for vert in range(size):
+            for j in range(2):
+                x = right - j
+                upward = ((right + 1) & 2) == 0
+                y = size - 1 - vert if upward else vert
+                if not fixed[y][x] and i < len(stream):
+                    grid[y][x] = stream[i]
+                    i += 1
+        right -= 2
+    masks = (lambda x, y: (x + y) % 2 == 0, lambda x, y: y % 2 == 0, lambda x, y: x % 3 == 0,
+             lambda x, y: (x + y) % 3 == 0, lambda x, y: (x // 3 + y // 2) % 2 == 0,
+             lambda x, y: x * y % 2 + x * y % 3 == 0, lambda x, y: (x * y % 2 + x * y % 3) % 2 == 0,
+             lambda x, y: ((x + y) % 2 + x * y % 3) % 2 == 0)
+    base = [row[:] for row in grid]
+
+    def masked(mask: int) -> list[list[bool]]:
+        out = [row[:] for row in base]
+        for y in range(size):
+            for x in range(size):
+                if not fixed[y][x] and masks[mask](x, y):
+                    out[y][x] = not out[y][x]
+        grid[:] = out
+        format_bits(mask)
+        return [row[:] for row in grid]
+
+    def penalty(g: list[list[bool]]) -> int:
+        score = 0
+        lines = g + [list(col) for col in zip(*g)]
+        for line in lines:                                 # runs of five or more
+            run, last = 0, None
+            for cell in line:
+                if cell == last:
+                    run += 1
+                    if run == 5:
+                        score += 3
+                    elif run > 5:
+                        score += 1
+                else:
+                    run, last = 1, cell
+            text_line = "".join("1" if c else "0" for c in line)
+            score += 40 * (text_line.count("10111010000") + text_line.count("00001011101"))
+        for y in range(size - 1):                          # 2x2 blocks
+            for x in range(size - 1):
+                if g[y][x] == g[y][x + 1] == g[y + 1][x] == g[y + 1][x + 1]:
+                    score += 3
+        dark = sum(sum(row) for row in g)
+        score += 10 * (abs(dark * 20 - size * size * 10) // (size * size))
+        return score
+    best = min(range(8), key=lambda m: penalty(masked(m)))
+    return masked(best)
+
+
+def qr_pixmap(text: str, scale: int = 6, dark: str = "#000000", light: str = "#FFFFFF") -> QPixmap:
+    matrix = qr_matrix(text)
+    border = 4
+    size = (len(matrix) + 2 * border) * scale
+    image = QImage(size, size, QImage.Format.Format_RGB32)
+    image.fill(QColor(light))
+    painter = QPainter(image)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(dark))
+    for y, row in enumerate(matrix):
+        for x, cell in enumerate(row):
+            if cell:
+                painter.drawRect((x + border) * scale, (y + border) * scale, scale, scale)
+    painter.end()
+    return QPixmap.fromImage(image)
+
+
+# ---------------------------------------------------------------------------- Mímir
+# Mímir, the assistant that runs on this computer: a small open model (Qwen3, Apache-2.0) in
+# Hugging Face's Transformers.js on ONNX Runtime's WebAssembly build, in a hidden internal page
+# (huginnmt://mimir) that can't reach the network. It summarizes the page you're on, answers
+# questions about it, and answers from pages you've visited (Muninn). Nothing leaves this
+# computer. It's downloaded once, when you ask for it: the engine from the npm registry (each
+# package checked against npm's SHA-512), the model from Hugging Face at a fixed revision
+# (each file checked against its SHA-256).
+MIMIR_DIR = "mimir"
+MIMIR_RUNTIME = (
+    {"url": "https://registry.npmjs.org/@huggingface/transformers/-/transformers-4.3.2.tgz",
+     "integrity": "sha512-V3+dqf3iWlRYJ9I9GreM3zGQd0lAXnnoPeddmkOQYWAEE4l/+Fi6p7tx/qVUJlKQgLXGim2W76rTOzz+eC0i7g==",
+     "size": 2_273_070, "files": {"package/dist/transformers.min.js": "transformers.min.js"}},
+    {"url": "https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.31.0-dev.20260914-8d85527a0.tgz",
+     "integrity": "sha512-Iy7rtadoBgxS/LLvDr3QW38DB1PNXRnr0GJMcL0TAt7c9qjgVQl83UlGCVyeAnK2InpmW8Uc3PL8XIuqtDeF6g==",
+     "size": 33_185_781, "files": {"package/dist/ort-wasm-simd-threaded.jsep.mjs": "ort-wasm-simd-threaded.jsep.mjs",
+                                   "package/dist/ort-wasm-simd-threaded.jsep.wasm": "ort-wasm-simd-threaded.jsep.wasm"}},
+)
+_MIMIR_QWEN3_TEXT = {"generation_config.json": (219, "9e9e031ae8bca36eefcdcdd0b35d83c61baa01e31d68d5f5a961c9ca1a4b95bf"),
+                     "tokenizer.json": (9_117_040, "e7a95fce95bf5b0946d0ddb3f9d7caa030b7e850bbe92b0edb26bcf563e9f3d5"),
+                     "tokenizer_config.json": (10_369, "7c5194eecfd95a4dcbd6b4b502af785d2541fd65a388d1cae7ad43693c67b802"),
+                     "chat_template.jinja": (4_116, "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5")}
+MIMIR_MODELS = {
+    "small": {"name": "Qwen3 0.6B", "repo": "onnx-community/Qwen3-0.6B-ONNX",
+              "revision": "79346d370dfae34801d26993fda9ae2372900fd0", "dtype": "q8",
+              "base": "https://huggingface.co/{repo}/resolve/{revision}/",
+              "files": {"config.json": (912, "8a04114ba59cc42b47d804d35d1d5c61d746ae4634f41f796768c6e302d39b9e"),
+                        **_MIMIR_QWEN3_TEXT,
+                        "onnx/model_quantized.onnx": (617_687_575,
+                                                      "ccf8734e59fdf7475b2dc0c117005e267a3a08342c1d951e0a79f0bce57bf62a")}},
+    "large": {"name": "Qwen3 1.7B", "repo": "onnx-community/Qwen3-1.7B-ONNX",
+              "revision": "3231b522c6e703b2f9b3cd8ea27426a1289a02f2", "dtype": "q8",
+              "base": "https://huggingface.co/{repo}/resolve/{revision}/",
+              "files": {"config.json": (943, "d443f9cfc878a105bd075083230394623e477574e47061784744534361214d00"),
+                        **_MIMIR_QWEN3_TEXT,
+                        "onnx/model_quantized.onnx": (1_742_387_852,
+                                                      "202ed81928b7f34c31505b46479c310e131fec307a045eab2537e7c494feb427")}},
+}
+MIMIR_PAGE_CHARS = 9000                   # of the page's text a question sees
+MIMIR_IDLE_S = 300
+MIMIR_PAGE_JS = r"""(() => {
+  const root = document.querySelector('article, main, [role="main"]') || document.body;
+  const text = root ? (root.innerText || '').replace(/\n{3,}/g, '\n\n').trim() : '';
+  return JSON.stringify({title: document.title || '', url: location.href, text: text.slice(0, %d)});
+})()""" % MIMIR_PAGE_CHARS
+MIMIR_SYSTEM = ("You are Mímir, the assistant built into the Huginn web browser. You run entirely on the user's own "
+                "computer. Be brief and plain, and answer in the language the user writes in.")
+
+
+def mimir_size(model: str) -> int:
+    return sum(size for size, _ in MIMIR_MODELS[model]["files"].values()) + sum(p["size"] for p in MIMIR_RUNTIME)
+
+
+def mimir_clean(text: str) -> str:
+    """The model's answer without any thinking it showed."""
+    text = re.sub(r"<think>.*?(</think>|$)", "", str(text or ""), flags=re.S)
+    return text.strip()
+
+
+def mimir_html(text: str, theme: dict) -> str:
+    """An answer as simple HTML: paragraphs, bullet lists, **bold**, [n] references."""
+    out, items = [], []
+
+    def flush() -> None:
+        if items:
+            out.append("<ul style='margin:2px 0 6px 0; -qt-list-indent: 1'>" + "".join(f"<li>{i}</li>" for i in items)
+                       + "</ul>")
+            items.clear()
+    for line in mimir_clean(text).splitlines():
+        line = html.escape(line.strip())
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"\[(\d{1,2})\]", rf"<span style='color:{theme['accent']}'>[\1]</span>", line)
+        bullet = re.match(r"^([-*•]|\d+[.)])\s+(.*)$", line)
+        if bullet:
+            items.append(bullet.group(2))
+            continue
+        flush()
+        if line.lstrip("#").strip():
+            out.append(f"<p style='margin:0 0 6px 0'>{line.lstrip('#').strip()}</p>")
+    flush()
+    return "".join(out)
+
+
+def mimir_messages(kind: str, question: str, page: dict | None = None, passages: list | None = None) -> list[dict]:
+    if kind == "summary":
+        task = ("Summarize this web page in 3 to 6 short bullet points, in the language the page is written in. "
+                "Use only what the page says.")
+        return [{"role": "system", "content": MIMIR_SYSTEM},
+                {"role": "user", "content": f"{task}\n\nTitle: {page['title']}\nAddress: {page['url']}\n\n{page['text']}"}]
+    if kind == "page":
+        return [{"role": "system", "content": MIMIR_SYSTEM + " Answer from the web page you're given; if it doesn't "
+                 "say, say so in one sentence."},
+                {"role": "user", "content": f"Title: {page['title']}\nAddress: {page['url']}\n\n{page['text']}\n\n"
+                 f"Question: {question}"}]
+    excerpts = "\n\n".join(f"[{n}] {p['title']} ({bare_display_host(QUrl(p['url']))}, "
+                           f"{time.strftime('%d %b %Y', time.localtime(p['time']))})\n{p['snippet']}"
+                           for n, p in enumerate(passages or [], 1))
+    return [{"role": "system", "content": MIMIR_SYSTEM + " Answer from these excerpts of pages the user visited, and "
+             "say which page by its number, like [2]. If they don't answer it, say you couldn't find it."},
+            {"role": "user", "content": f"{excerpts}\n\nQuestion: {question}"}]
+
+
+class MimirStore(QObject):
+    """Mímir's files: the engine and the chosen model, downloaded once, streamed to disk and
+    checked as they come (the larger model is nearly 2 GB)."""
+    progress = Signal(int, int)
+
+    def __init__(self, folder: str, parent: QObject | None = None, runtime=MIMIR_RUNTIME, models=None) -> None:
+        super().__init__(parent)
+        self.folder = folder
+        self.runtime = runtime
+        self.models = models or MIMIR_MODELS
+        self.net = QNetworkAccessManager(self)
+        self.user_agent = ""
+        self._replies: list = []
+        self._cancelled = False
+
+    def runtime_dir(self) -> str:
+        return os.path.join(self.folder, "runtime")
+
+    def model_dir(self, model: str) -> str:
+        return os.path.join(self.folder, "models", model)
+
+    def runtime_ready(self) -> bool:
+        return all(os.path.isfile(os.path.join(self.runtime_dir(), name))
+                   for package in self.runtime for name in package["files"].values())
+
+    def model_ready(self, model: str) -> bool:
+        spec = self.models.get(model)
+        return spec is not None and all(os.path.isfile(os.path.join(self.model_dir(model), *path.split("/")))
+                                        for path in spec["files"])
+
+    def installed(self) -> str:
+        """The model Mímir has (the larger one if both), or ''."""
+        if not self.runtime_ready():
+            return ""
+        return next((m for m in ("large", "small") if m in self.models and self.model_ready(m)), "")
+
+    def remove(self) -> None:
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        for reply in list(self._replies):
+            reply.abort()
+
+    def _get(self, url: str, path: str, check, size: int, done, base: list, total: int) -> None:
+        """Streams one download to path.part, hashing as it goes; check(hasher) says if it's right."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        request = QNetworkRequest(QUrl(url))
+        if self.user_agent:
+            request.setRawHeader(b"User-Agent", self.user_agent.encode("ascii", "replace"))
+        reply = self.net.get(request)
+        self._replies.append(reply)
+        handle = open(path + ".part", "wb")
+        hashers = {"sha256": hashlib.sha256(), "sha512": hashlib.sha512()}
+        state = {"got": 0}
+
+        def read() -> None:
+            data = bytes(reply.readAll())
+            if data:
+                handle.write(data)
+                for h in hashers.values():
+                    h.update(data)
+                state["got"] += len(data)
+                self.progress.emit(min(total, base[0] + state["got"]), total)
+
+        def finished() -> None:
+            read()
+            handle.close()
+            self._replies.remove(reply)
+            reply.deleteLater()
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                os.remove(path + ".part")
+                done("Stopped." if self._cancelled else "The download didn't finish. Check your connection and try again.")
+                return
+            if not check(hashers):
+                os.remove(path + ".part")
+                done("A downloaded file wasn't what was published, so Huginn didn't keep it.")
+                return
+            os.replace(path + ".part", path)
+            base[0] += size or state["got"]
+            done("")
+        reply.readyRead.connect(read)
+        reply.finished.connect(finished)
+
+    def download(self, model: str, done) -> None:
+        """The engine (if needed) and a model. done(error or "")."""
+        import tarfile
+        self._cancelled = False
+        spec = self.models[model]
+        steps = []
+        if not self.runtime_ready():
+            for package in self.runtime:
+                steps.append(("runtime", package))
+        for path, (size, sha) in spec["files"].items():
+            if not os.path.isfile(os.path.join(self.model_dir(model), *path.split("/"))):
+                steps.append(("model", (path, size, sha)))
+        total = sum(p["size"] if kind == "runtime" else p[1] for kind, p in steps) or 1
+        base = [0]
+
+        def step(error: str = "") -> None:
+            if error:
+                done(error)
+                return
+            if not steps:
+                done("")
+                return
+            kind, item = steps.pop(0)
+            if kind == "runtime":
+                algorithm, _, expected = item["integrity"].partition("-")
+                archive = os.path.join(self.folder, "download.tgz")
+
+                def check(hashers) -> bool:
+                    return hmac.compare_digest(base64.b64encode(hashers[algorithm].digest()).decode(), expected)
+
+                def unpack(error: str = "") -> None:
+                    if error:
+                        done(error)
+                        return
+                    try:
+                        os.makedirs(self.runtime_dir(), exist_ok=True)
+                        with tarfile.open(archive, "r:gz") as tar:
+                            for member, name in item["files"].items():
+                                source = tar.extractfile(member)
+                                if source is None:
+                                    raise OSError(member)
+                                with open(os.path.join(self.runtime_dir(), name + ".part"), "wb") as f:
+                                    shutil.copyfileobj(source, f)
+                                os.replace(os.path.join(self.runtime_dir(), name + ".part"),
+                                           os.path.join(self.runtime_dir(), name))
+                    except (OSError, tarfile.TarError, KeyError):
+                        done("The engine's package couldn't be opened.")
+                        return
+                    finally:
+                        try:
+                            os.remove(archive)
+                        except OSError:
+                            pass
+                    step()
+                self._get(item["url"], archive, check, item["size"], unpack, base, total)
+            else:
+                path, size, sha = item
+                url = spec["base"].format(repo=spec["repo"], revision=spec["revision"]) + path
+                self._get(url, os.path.join(self.model_dir(model), *path.split("/")),
+                          lambda hashers, sha=sha: hashers["sha256"].hexdigest() == sha, size, step, base, total)
+        step()
+
+    def file_for(self, request_path: str) -> str | None:
+        """/lib/<name> (the engine) or /models/<model>/<path>: only files under Mímir's folder."""
+        parts = [unquote(p) for p in request_path.split("/") if p]
+        if not parts or any(p in (".", "..") or any(c in p for c in "/\\%\0") for p in parts):
+            return None
+        if parts[0] == "lib" and len(parts) == 2:
+            path = os.path.join(self.runtime_dir(), parts[1])
+        elif parts[0] == "models" and len(parts) >= 3:
+            path = os.path.join(self.folder, "models", *parts[1:])
+        else:
+            return None
+        real, root = os.path.realpath(path), os.path.realpath(self.folder)
+        return real if real.startswith(root + os.sep) and os.path.isfile(real) else None
+
+
+MIMIR_ENGINE_HTML = r"""<!doctype html><meta charset="utf-8"><title>Mímir</title>
+<script type="module">
+window.mimir = {
+  state: 'new', error: '', out: '', done: true,
+  async start(cfg) {
+    this.state = 'starting';
+    try {
+      const tf = await import('/lib/transformers.min.js');
+      const env = tf.env;
+      env.allowRemoteModels = false;
+      env.allowLocalModels = true;
+      env.localModelPath = '/models/';
+      env.useBrowserCache = false;
+      env.backends.onnx.wasm.wasmPaths = {mjs: '/lib/ort-wasm-simd-threaded.jsep.mjs',
+                                          wasm: '/lib/ort-wasm-simd-threaded.jsep.wasm'};
+      env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2) - 1));
+      this.tf = tf;
+      this.tokenizer = await tf.AutoTokenizer.from_pretrained(cfg.model);
+      this.model = await tf.AutoModelForCausalLM.from_pretrained(cfg.model, {dtype: cfg.dtype, device: 'wasm'});
+      this.state = 'ready';
+    } catch (e) {
+      this.state = 'failed';
+      this.error = String((e && e.message) || e);
+    }
+  },
+  ask(messages, maxTokens) {
+    this.out = ''; this.done = false; this.error = '';
+    this.stop = new this.tf.InterruptableStoppingCriteria();
+    (async () => {
+      try {
+        const inputs = this.tokenizer.apply_chat_template(messages, {add_generation_prompt: true, return_dict: true,
+                                                                     enable_thinking: false});
+        const streamer = new this.tf.TextStreamer(this.tokenizer, {skip_prompt: true, skip_special_tokens: true,
+                                                                   callback_function: text => { this.out += text; }});
+        await this.model.generate({...inputs, max_new_tokens: maxTokens, do_sample: true, temperature: 0.7,
+                                   top_p: 0.8, top_k: 20, repetition_penalty: 1.05, streamer,
+                                   stopping_criteria: this.stop});
+      } catch (e) {
+        this.error = String((e && e.message) || e);
+      }
+      this.done = true;
+    })();
+    return 1;
+  },
+  cancel() { if (this.stop) this.stop.interrupt(); return 1; },
+};
+</script>"""
+
+
+class MimirSchemeHandler(QWebEngineUrlSchemeHandler):
+    """huginnmt://mimir/: the engine page and its files, cross-origin isolated (so the engine
+    can use several threads). Only in the engine's own profile."""
+    HEADERS = {b"Cross-Origin-Opener-Policy": b"same-origin", b"Cross-Origin-Embedder-Policy": b"require-corp",
+               b"Cross-Origin-Resource-Policy": b"same-origin"}
+
+    def __init__(self, store: MimirStore, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.store = store
+
+    def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
+        url = job.requestUrl()
+        if url.host() != "mimir":
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        if hasattr(job, "setAdditionalResponseHeaders"):
+            job.setAdditionalResponseHeaders({QByteArray(k): [QByteArray(v)] for k, v in self.HEADERS.items()})
+        if url.path() in ("", "/"):
+            buffer = QBuffer(job)
+            buffer.setData(QByteArray(MIMIR_ENGINE_HTML.encode("utf-8")))
+            buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            job.reply(b"text/html", buffer)
+            return
+        path = self.store.file_for(url.path())
+        if path is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        handle = QFile(path, job)
+        if not handle.open(QIODevice.OpenModeFlag.ReadOnly):
+            job.fail(QWebEngineUrlRequestJob.Error.RequestFailed)
+            return
+        mime = (b"application/wasm" if path.endswith(".wasm") else b"text/javascript" if path.endswith((".js", ".mjs"))
+                else b"application/json" if path.endswith(".json") else b"application/octet-stream")
+        job.reply(mime, handle)
+
+
+class MimirEngine(QObject):
+    """The hidden page Mímir thinks in: started on first use, closed when idle."""
+
+    def __init__(self, store: MimirStore, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.profile: QWebEngineProfile | None = None
+        self.page: QWebEnginePage | None = None
+        self.model = ""
+        self.state = "off"
+        self.error = ""
+        self.used = 0.0
+        self._waiting: list = []
+        self._job = None
+        self._idle = QTimer(self)
+        self._idle.setInterval(60_000)
+        self._idle.timeout.connect(self._close_if_idle)
+
+    def _make_profile(self) -> QWebEngineProfile:
+        if self.profile is None:
+            profile = QWebEngineProfile(self)
+            profile.setUrlRequestInterceptor(_EngineOnly(profile))
+            profile.installUrlSchemeHandler(TRANSLATE_SCHEME.encode(), MimirSchemeHandler(self.store, profile))
+            profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+            self.profile = profile
+        return self.profile
+
+    def busy(self) -> bool:
+        return self._job is not None
+
+    def start(self, model: str, ready) -> None:
+        """ready(error or '') once the model is loaded."""
+        self.used = time.monotonic()
+        if self.page is not None and self.model == model and self.state == "ready":
+            ready("")
+            return
+        self._waiting.append(ready)
+        if self.page is not None and self.model == model and self.state == "starting":
+            return
+        self.close()
+        self._waiting = [ready]
+        self.model, self.state = model, "starting"
+        page = QWebEnginePage(self._make_profile(), self)
+        self.page = page
+        config = json.dumps({"model": model, "dtype": self.store.models[model]["dtype"]})
+        started = time.monotonic()
+
+        def poll() -> None:
+            if self.page is not page:
+                return
+
+            def got(result) -> None:
+                if self.page is not page:
+                    return
+                try:
+                    data = json.loads(result) if isinstance(result, str) and result else {}
+                except ValueError:
+                    data = {}
+                if data.get("state") == "ready":
+                    self.state = "ready"
+                    self._finish_start("")
+                elif data.get("state") == "failed" or time.monotonic() - started > 300:
+                    self.error = data.get("error") or "Mímir didn't start."
+                    self.close()
+                    self._finish_start(self.error)
+                else:
+                    QTimer.singleShot(250, self, poll)
+            page.runJavaScript("JSON.stringify({state: mimir.state, error: mimir.error})", 0, got)
+
+        def loaded(ok: bool) -> None:
+            if self.page is not page:
+                return
+            if not ok:
+                self.close()
+                self._finish_start("Mímir's page didn't load.")
+                return
+            page.runJavaScript(f"mimir.start({config}); 1", 0)
+            QTimer.singleShot(250, self, poll)
+        page.loadFinished.connect(loaded)
+        page.load(QUrl(f"{TRANSLATE_SCHEME}://mimir/"))
+        self._idle.start()
+
+    def _finish_start(self, error: str) -> None:
+        waiting, self._waiting = self._waiting, []
+        for ready in waiting:
+            ready(error)
+
+    def ask(self, messages: list[dict], on_text, on_done, max_tokens: int = 400) -> None:
+        """Streams an answer: on_text(the answer so far), then on_done(answer, error)."""
+        page = self.page
+        if page is None or self.state != "ready":
+            on_done("", "Mímir isn't running.")
+            return
+        self.used = time.monotonic()
+        job = {"on_text": on_text, "on_done": on_done, "seen": ""}
+        self._job = job
+        page.runJavaScript(f"mimir.ask({json.dumps(messages)}, {int(max_tokens)})", 0)
+
+        def poll() -> None:
+            if self._job is not job or self.page is not page:
+                return
+
+            def got(result) -> None:
+                if self._job is not job:
+                    return
+                try:
+                    data = json.loads(result) if isinstance(result, str) and result else {}
+                except ValueError:
+                    data = {}
+                out = str(data.get("out") or "")
+                if out != job["seen"]:
+                    job["seen"] = out
+                    on_text(out)
+                if data.get("done"):
+                    self._job = None
+                    self.used = time.monotonic()
+                    on_done(out, str(data.get("error") or ""))
+                else:
+                    QTimer.singleShot(120, self, poll)
+            page.runJavaScript("JSON.stringify({out: mimir.out, done: mimir.done, error: mimir.error})", 0, got)
+        QTimer.singleShot(120, self, poll)
+
+    def stop(self) -> None:
+        if self.page is not None and self._job is not None:
+            self.page.runJavaScript("mimir.cancel()", 0)
+
+    def close(self) -> None:
+        job, self._job = self._job, None
+        if self.page is not None:
+            self.page.deleteLater()
+        self.page, self.state = None, "off"
+        self._idle.stop()
+        if job is not None:
+            job["on_done"](job["seen"], "Mímir was closed.")
+
+    def _close_if_idle(self) -> None:
+        if self._job is None and time.monotonic() - self.used > MIMIR_IDLE_S:
+            self.close()
 
 
 def purge_cookie_db(storage_path: str, keep: set[str]) -> int:
@@ -5159,6 +8876,124 @@ def generate_password() -> str:
             return word
 
 
+# Breach check (Passwords > More > Check for Breaches): Have I Been Pwned's range search. Only
+# the first 5 characters of each password's SHA-1 fingerprint are sent; the service answers
+# with every leaked password whose fingerprint starts the same (hundreds, padded with decoys
+# so the answer's size gives nothing away), and the match is made here. Only when you ask.
+HIBP_RANGE_URL = "https://api.pwnedpasswords.com/range/{}"
+HIBP_PARALLEL = 4
+
+
+def password_sha1(password: str) -> str:
+    return hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+
+
+def parse_hibp_range(text: str) -> dict[str, int]:
+    """'SUFFIX:COUNT' lines -> {suffix: times seen}; the padding's made-up lines say 0."""
+    found = {}
+    for line in text.splitlines():
+        suffix, _, count = line.strip().partition(":")
+        if len(suffix) == 35 and count.strip().isdigit() and int(count) > 0:
+            found[suffix.upper()] = int(count)
+    return found
+
+
+def breach_seen(entry: dict) -> int:
+    """How often the login's current password was seen in breaches (0: not seen, or not checked)."""
+    breach = entry.get("breach")
+    if not isinstance(breach, dict) or not entry.get("password"):
+        return 0
+    if breach.get("sha1") != password_sha1(entry["password"])[:12]:
+        return 0                                       # changed since the check
+    return int(breach.get("seen", 0) or 0)
+
+
+class BreachCheck(QObject):
+    """Looks every saved password up in Have I Been Pwned's range search (see above)."""
+    progress = Signal(int, int)                        # prefixes done, of
+    finished = Signal(object, str)                     # {entry id: times seen}, error ("" if fine)
+
+    def __init__(self, parent: QObject | None = None, url: str | None = None) -> None:
+        super().__init__(parent)
+        self.url = url or HIBP_RANGE_URL
+        self._net: QNetworkAccessManager | None = None
+        self._wanted: dict[str, dict[str, list[str]]] = {}
+        self._queue: list[str] = []
+        self._replies: set = set()
+        self._results: dict[str, int] = {}
+        self._done = self._total = 0
+        self._error = ""
+        self.running = False
+
+    def start(self, entries: list[dict]) -> None:
+        self._wanted, self._results = {}, {}
+        for e in entries:
+            if e.get("password"):
+                digest = password_sha1(e["password"])
+                self._wanted.setdefault(digest[:5], {}).setdefault(digest[5:], []).append(e["id"])
+                self._results[e["id"]] = 0
+        self._queue = sorted(self._wanted)
+        self._done, self._total, self._error, self.running = 0, len(self._queue), "", True
+        if not self._queue:
+            self._finish()
+            return
+        if self._net is None:
+            self._net = QNetworkAccessManager(self)
+        for _ in range(min(HIBP_PARALLEL, len(self._queue))):
+            self._next()
+
+    def _next(self) -> None:
+        if not self._queue or self._error:
+            return
+        prefix = self._queue.pop(0)
+        request = QNetworkRequest(QUrl(self.url.format(prefix)))
+        request.setTransferTimeout(20000)
+        request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, BROWSER_NAME)
+        request.setRawHeader(b"Add-Padding", b"true")
+        request.setAttribute(QNetworkRequest.Attribute.CookieLoadControlAttribute, QNetworkRequest.LoadControl.Manual)
+        request.setAttribute(QNetworkRequest.Attribute.CookieSaveControlAttribute, QNetworkRequest.LoadControl.Manual)
+        reply = self._net.get(request)
+        self._replies.add(reply)
+        reply.finished.connect(partial(self._got, reply, prefix))
+
+    def _got(self, reply, prefix: str) -> None:
+        self._replies.discard(reply)
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            if not self._error and reply.error() != QNetworkReply.NetworkError.OperationCanceledError:
+                self._error = "Have I Been Pwned couldn't be reached. Check your connection and try again."
+        else:
+            found = parse_hibp_range(bytes(reply.readAll()).decode("ascii", "replace"))
+            for suffix, ids in self._wanted.get(prefix, {}).items():
+                for entry_id in ids:
+                    self._results[entry_id] = found.get(suffix, 0)
+            self._done += 1
+            self.progress.emit(self._done, self._total)
+        reply.deleteLater()
+        if self._error or not self.running:
+            if not self._replies:
+                self._finish()
+            return
+        if self._queue:
+            self._next()
+        elif not self._replies:
+            self._finish()
+
+    def cancel(self) -> None:
+        self.running = False
+        self._queue = []
+        for reply in list(self._replies):
+            reply.abort()
+
+    def _finish(self) -> None:
+        if self._error:
+            self.running = False
+            self.finished.emit({}, self._error)
+            return
+        was_running, self.running = self.running, False
+        if was_running:
+            self.finished.emit(dict(self._results), "")
+
+
 def password_is_weak(password: str) -> bool:
     lower = password.lower()
     if len(password) < 10 or lower in COMMON_PASSWORDS or lower.rstrip("0123456789!") in COMMON_PASSWORDS:
@@ -5241,6 +9076,7 @@ class PasswordVault:
         self.dpapi = dpapi if dpapi is not None else ((dpapi_protect, dpapi_unprotect) if IS_WINDOWS else None)
         self.entries: list[dict] = []
         self.never: set[str] = set()                 # sites the user said never to save for
+        self.extras: dict = {}                       # other secrets kept under the master password (Bifröst's)
         self.confirmed_at = 0.0
         self._key: bytes | None = None
         self._header: dict = {}
@@ -5281,7 +9117,7 @@ class PasswordVault:
         self._header = {"format": VAULT_FORMAT, "version": 1,
                         "kdf": {"name": "scrypt", **SCRYPT_PARAMS, "salt": _b64e(salt)},
                         "master": seal(derive_key(master, salt), key, b"master")}
-        self._key, self.entries, self.never = key, [], set()
+        self._key, self.entries, self.never, self.extras = key, [], set(), {}
         if windows:
             self._seal_windows()
         self.confirmed_at = time.time()
@@ -5323,7 +9159,7 @@ class PasswordVault:
         return True
 
     def lock(self) -> None:
-        self._key, self.entries, self.never, self.confirmed_at = None, [], set(), 0.0
+        self._key, self.entries, self.never, self.extras, self.confirmed_at = None, [], set(), {}, 0.0
 
     def _load(self, key: bytes) -> None:
         header = self._read_header()
@@ -5334,6 +9170,7 @@ class PasswordVault:
         self._key = key
         self.entries = [e for e in payload.get("entries", []) if isinstance(e, dict)]
         self.never = set(payload.get("never", []))
+        self.extras = payload.get("extras") if isinstance(payload.get("extras"), dict) else {}
 
     def _seal_windows(self) -> None:
         if self.dpapi is None:
@@ -5366,6 +9203,8 @@ class PasswordVault:
     def save(self) -> None:
         self._require_unlocked()
         payload = {"entries": self.entries, "never": sorted(self.never), "saved": time.time()}
+        if self.extras:
+            payload["extras"] = self.extras
         self._header["data"] = seal(self._key, json.dumps(payload).encode("utf-8"), b"data")
         folder = os.path.dirname(self.path) or "."
         os.makedirs(folder, exist_ok=True)
@@ -5454,13 +9293,25 @@ class PasswordVault:
         self.save()
 
     def health(self) -> dict[str, set[str]]:
-        """Entry ids whose password is reused on another site, or weak."""
+        """Entry ids whose password is reused on another site, weak, or (as of the last breach
+        check, and only while the password is still the one that was checked) seen in a breach."""
         by_password: dict[str, set[str]] = {}
         for e in self.entries:
             by_password.setdefault(e["password"], set()).add(login_site(QUrl(e["url"]).host()))
         reused = {e["id"] for e in self.entries if len(by_password[e["password"]]) > 1}
         weak = {e["id"] for e in self.entries if password_is_weak(e["password"])}
-        return {"reused": reused, "weak": weak}
+        breached = {e["id"] for e in self.entries if breach_seen(e) > 0}
+        return {"reused": reused, "weak": weak, "breached": breached}
+
+    def record_breaches(self, seen: dict[str, int]) -> None:
+        """Keeps a breach check's answer with each login (inside the encrypted vault), tied to the
+        password it was about: change the password and the warning goes."""
+        self._require_unlocked()
+        now = time.time()
+        for e in self.entries:
+            if e["id"] in seen:
+                e["breach"] = {"seen": int(seen[e["id"]]), "sha1": password_sha1(e["password"])[:12], "at": now}
+        self.save()
 
     # -- import / export -----------------------------------------------------------------------------
     def import_logins(self, logins: list[dict]) -> dict:
@@ -8870,6 +12721,13 @@ def register_start_scheme() -> None:
     scheme.setSyntax(QWebEngineUrlScheme.Syntax.Path)
     scheme.setFlags(QWebEngineUrlScheme.Flag.SecureScheme | QWebEngineUrlScheme.Flag.LocalScheme)
     QWebEngineUrlScheme.registerScheme(scheme)
+    engine = QWebEngineUrlScheme(TRANSLATE_SCHEME.encode())          # the translation engine's own page
+    engine.setSyntax(QWebEngineUrlScheme.Syntax.Host)
+    flags = QWebEngineUrlScheme.Flag.SecureScheme | QWebEngineUrlScheme.Flag.LocalScheme
+    if hasattr(QWebEngineUrlScheme.Flag, "FetchApiAllowed"):
+        flags |= QWebEngineUrlScheme.Flag.FetchApiAllowed
+    engine.setFlags(flags)
+    QWebEngineUrlScheme.registerScheme(engine)
 
 
 # --------------------------------------------------------------------------------------
@@ -9242,6 +13100,7 @@ class AddressField(QWidget):
     pageMenuRequested = Signal()
     readerRequested = Signal()
     audioRequested = Signal()
+    translateRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -9256,11 +13115,14 @@ class AddressField(QWidget):
         self.page_glyph = "page"                  # "private" in Private Browsing windows
         self.reader_state = None                  # None: no article here; False: available; True: on
         self.audio_state = None                   # None, "playing" or "muted"
+        self.translate_state = None               # None, "offer", "busy" or "on"
 
         self.page_button = self._field_button("Page menu: privacy, zoom and settings")
         self.edit = AddressEdit()
         self.audio_button = self._field_button("Mute this tab")
         self.reader_button = self._field_button(f"Show Reader ({READER_KEY})")
+        self.translate_button = self._field_button("Translate this page")
+        self.translate_button.hide()
         self.action_button = self._field_button("Reload this page (Ctrl+R)")
         self.audio_button.hide()
         self.reader_button.hide()
@@ -9270,10 +13132,12 @@ class AddressField(QWidget):
         layout.addWidget(self.page_button)
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.audio_button)
+        layout.addWidget(self.translate_button)
         layout.addWidget(self.reader_button)
         layout.addWidget(self.action_button)
         self.audio_button.clicked.connect(lambda *_: self.audioRequested.emit())
         self.reader_button.clicked.connect(lambda *_: self.readerRequested.emit())
+        self.translate_button.clicked.connect(lambda *_: self.translateRequested.emit())
 
         self.page_button.clicked.connect(lambda *_: self.pageMenuRequested.emit())
         self.action_button.clicked.connect(
@@ -9327,10 +13191,21 @@ class AddressField(QWidget):
         self.audio_button.setIcon(self._icons.icon("speaker_muted" if muted else "speaker",
                                                    secondary if muted else self._theme["accent"]))
         self.audio_button.setToolTip("Unmute this tab" if muted else "Mute this tab")
+        self.translate_button.setVisible(self.translate_state is not None and not editing)
+        self.translate_button.setIcon(self._icons.icon("translate", secondary if self.translate_state == "offer"
+                                                       else self._theme["accent"]))
+        self.translate_button.setToolTip({"offer": "Translate this page", "busy": "Translating…",
+                                          "on": "Translated: show the original or change languages"}.get(
+                                             self.translate_state, "Translate this page"))
 
     def set_reader(self, state) -> None:
         if state != self.reader_state:
             self.reader_state = state
+            self._update_buttons()
+
+    def set_translate(self, state) -> None:
+        if state != self.translate_state:
+            self.translate_state = state
             self._update_buttons()
 
     def set_audio(self, state) -> None:
@@ -9917,6 +13792,12 @@ class WebPage(QWebEnginePage):
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame) -> bool:
         browser = self._view.browser
+        app = getattr(browser, "app", None)
+        if (app is not None and is_main_frame and url.scheme() in ("http", "https")
+                and nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+                and not web_app_in_scope(app, url)):          # sign-in redirects aren't clicks: they stay
+            QTimer.singleShot(0, browser, partial(browser.open_in_huginn, QUrl(url)))
+            return False
         if is_main_frame and url.scheme() in ("http", "https") and hasattr(browser, "apply_autoplay"):
             browser.apply_autoplay(self, url)              # before the page exists, so it applies to it
         if (is_main_frame and url.scheme() == START_SCHEME and url.path() in WELCOME_LINKS
@@ -9938,6 +13819,10 @@ class WebPage(QWebEnginePage):
             if blocked is not None:
                 QTimer.singleShot(0, self, lambda: self.setUrl(blocked))
                 return False
+        kind = QWebEnginePage.NavigationType
+        if is_main_frame and not (nav_type in (kind.NavigationTypeRedirect, kind.NavigationTypeOther)
+                                  and self._view.trail_nav is not None):
+            self._view.trail_nav = nav_type                 # Trails: a link, an address typed... (not what follows)
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
     def javaScriptAlert(self, origin, message) -> None:
@@ -9977,6 +13862,14 @@ class WebView(QWebEngineView):
         self.pending: dict | None = None          # a restored tab not loaded yet: {"url", "title"}
         self.pinned = False
         self.burner = False                       # a burner tab: own throwaway profile, nothing kept
+        self.trail_node: str | None = None        # Trails: the step this tab is on,
+        self.trail_nav = None                     # how its next page is being reached,
+        self.trail_from: str | None = None        # and (a new tab) the step it was opened from
+        self.trail_steps: dict[int, str] = {}       # its history's entries -> their steps
+        self.page_lang = ""                         # the page's language, as detected
+        self.tr: dict | None = None                 # its translation: from, to, state, gen
+        self.tr_gen = 0
+        self.tr_declined: str | None = None         # Show Original: don't translate this language again by itself
         self.is_panel = False
         self.zoom_host: str | None = None          # the site whose remembered zoom is applied
         self.video_speed = 1.0
@@ -10008,7 +13901,9 @@ class WebView(QWebEngineView):
     def createWindow(self, window_type) -> QWebEngineView:
         # target=_blank, window.open() and "Open link in new tab" all become tabs.
         background = window_type == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
-        return self.browser.add_tab(None, background=background, after_current=True, profile=self.page().profile())
+        view = self.browser.add_tab(None, background=background, after_current=True, profile=self.page().profile())
+        view.trail_from = self.trail_node                # Trails: opened from this page
+        return view
 
     def contextMenuEvent(self, event) -> None:
         menu = prepare_menu(self.createStandardContextMenu())
@@ -11012,6 +14907,29 @@ class Muninn:
         except sqlite3.Error:
             return []
         return [{"url": u, "title": t or u, "snippet": (s or "").strip(), "time": tm} for u, t, s, tm in rows]
+
+    def passages(self, question: str, limit: int = 5) -> list[dict]:
+        """For Mímir: pages matching any of a question's words (best first), with longer excerpts."""
+        stop = set().union(*_DETECT_SETS.values()) | {"what", "was", "were", "which", "where", "when", "how", "who",
+                                                       "why", "did", "does", "do", "about", "page", "pages", "article",
+                                                       "read", "find", "remember", "saw", "that", "there", "some"}
+        words = [w for w in dict.fromkeys(re.findall(r"\w+", question.lower())) if len(w) > 2 and w not in stop][:10]
+        if not words:
+            return []
+        try:
+            if self.fts:
+                rows = self.con.execute(
+                    "SELECT url, title, snippet(pages, 2, '', '', '…', 48), time FROM pages WHERE pages MATCH ? "
+                    "ORDER BY rank LIMIT ?", (" OR ".join(f'"{w}"*' for w in words), limit)).fetchall()
+            else:
+                where = " OR ".join("(lower(body) LIKE ? OR lower(title) LIKE ?)" for _ in words)
+                args = [a for w in words for a in (f"%{w}%", f"%{w}%")]
+                rows = [(u, t, (b or "")[:400], tm) for u, t, b, tm in self.con.execute(
+                    f"SELECT url, title, body, time FROM pages WHERE {where} ORDER BY time DESC LIMIT ?",
+                    (*args, limit)).fetchall()]
+        except sqlite3.Error:
+            return []
+        return [{"url": u, "title": t or u, "snippet": (s or "").strip(), "time": float(tm or 0)} for u, t, s, tm in rows]
 
     @staticmethod
     def quote(snippet: str, length: int) -> str:
@@ -12287,6 +16205,36 @@ class SheetScrim(QWidget):
         return False
 
 
+def clear_layout(layout) -> None:
+    """Empties a layout that's about to be filled again (its widgets go at once, not when Qt
+    gets round to deleting them)."""
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget() is not None:
+            item.widget().hide()
+            item.widget().deleteLater()
+        elif item.layout() is not None:
+            clear_layout(item.layout())
+
+
+def fit_sheet(dialog: QWidget, again: bool = True) -> None:
+    """A sheet that rebuilt its contents: its height for its real width (wrapped text and
+    all), and still centred in the window on Linux. Once more a moment later: widgets added
+    to a sheet on screen only appear on the next turn of the event loop."""
+    if again:
+        QTimer.singleShot(0, dialog, partial(fit_sheet, dialog, False))
+    layout = dialog.layout()
+    if layout is not None:
+        layout.activate()
+    dialog.adjustSize()
+    if layout is not None and layout.hasHeightForWidth():
+        needed = layout.totalHeightForWidth(dialog.width())
+        if needed > dialog.height():
+            dialog.resize(dialog.width(), needed)
+    if not dialog.isWindow() and dialog.parentWidget() is not None and dialog.isVisible():
+        _centre_in_window(dialog, dialog.parentWidget())
+
+
 def _centre_in_window(dialog: QWidget, window: QWidget) -> None:
     top = TOOLBAR_HEIGHT + 6
     dialog.setMaximumHeight(max(160, window.height() - top - 14))
@@ -13337,9 +17285,16 @@ class PrivacySettingsDialog(QDialog):
                   f"Keeps the words of pages you visit on this {DEVICE}, so the address field, Ctrl+K and the "
                   "sidebar can find a page by what was on it. Never from private windows or burner tabs, or pages "
                   "with a password or card field."), self._switch("rememberPages"))
+        if IS_LINUX and not self.window_.private:
+            self._row(g, "Share tabs with the desktop", "Lets your desktop's dock and search see your open tabs, "
+                      "favorites, history and what Muninn remembers, and open web apps (Huginn OS uses it). "
+                      "Never private windows or burner tabs.", self._switch("shareWithDesktop"))
         if not self.window_.private:
             self._row(g, "Delete cookies when Huginn closes", "Signs you out of sites you haven't chosen "
                       "“Keep Me Signed In” for (page menu).", self._switch("clearCookiesOnQuit"))
+            self._row(g, "Forget on close", "Sites whose cookies and stored data go when their last tab closes "
+                      "(page menu > Forget … When Its Tabs Close).",
+                      self._button("Manage…", lambda: self.window_.show_forget_sites()))
         return page
 
     def _permissions_page(self) -> QWidget:
@@ -13770,14 +17725,17 @@ class PasswordsDialog(QDialog):
             site.setObjectName("RowTitle")
             user = QLabel(entry["username"] or "No username")
             user.setObjectName("RowSubtitle")
+            user.setTextFormat(Qt.TextFormat.PlainText)        # (usernames come from websites)
             col.addWidget(site)
             col.addWidget(user)
             h.addLayout(col, 1)
-            flags = [label for key, label in (("reused", "Reused"), ("weak", "Weak")) if entry["id"] in health[key]]
+            flags = [label for key, label in (("breached", "In a breach"), ("reused", "Reused"), ("weak", "Weak"))
+                     if entry["id"] in health[key]]
             if flags:
                 badge = QLabel(" · ".join(flags))
                 badge.setObjectName("RowSubtitle")
-                badge.setStyleSheet(f"color: {self.window_.theme['caution']};")
+                colour = "danger" if entry["id"] in health["breached"] else "caution"
+                badge.setStyleSheet(f"color: {self.window_.theme[colour]};")
                 h.addWidget(badge)
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, entry["id"])
@@ -13789,6 +17747,8 @@ class PasswordsDialog(QDialog):
         reused = len(health["reused"])
         weak = len(health["weak"])
         parts = [f"{total} password{'s' if total != 1 else ''}"]
+        if health["breached"]:
+            parts.append(f"{len(health['breached'])} in breaches")
         if reused:
             parts.append(f"{reused} reused")
         if weak:
@@ -13900,9 +17860,55 @@ class PasswordsDialog(QDialog):
         BrowserWindow._add_action(menu, "Import Passwords…", self.import_file)
         BrowserWindow._add_action(menu, "Export Passwords…", self.export, unlocked and bool(vault.entries))
         menu.addSeparator()
+        BrowserWindow._add_action(menu, "Check for Breaches…", self.check_breaches, unlocked and bool(vault.entries))
         BrowserWindow._add_action(menu, "Change Master Password…", self.change_master, unlocked)
         BrowserWindow._add_action(menu, "Lock Passwords", self.manager.lock, unlocked)
         self.window_._popup_under(menu, self.more_button)
+
+    def check_breaches(self, *_, ask: bool = True) -> None:
+        vault = self.manager.vault
+        if vault.locked() or not vault.entries:
+            return
+        if getattr(self, "breach_check", None) is not None and self.breach_check.running:
+            return
+        if ask:
+            sheet = SheetDialog(self.window_, "Check for breaches?",
+                                f"{BROWSER_NAME} looks each password up in Have I Been Pwned's list of passwords "
+                                "leaked in data breaches. Only the first 5 characters of each password's fingerprint "
+                                "(its SHA-1 hash) are sent; the service answers with hundreds of leaked fingerprints "
+                                f"that start the same way, and the match is made on this {DEVICE}. Your passwords "
+                                "never leave it.", ok="Check")
+            if not self.window_.run_dialog(sheet):
+                return
+        self.breach_check = BreachCheck(self)
+        self.breach_check.progress.connect(
+            lambda done, total: self.summary.setText(f"Checking for breaches… {done} of {total}"))
+        self.breach_check.finished.connect(self._breaches_checked)
+        self.summary.setText("Checking for breaches…")
+        self.breach_check.start([dict(e) for e in vault.entries])
+
+    def _breaches_checked(self, seen: dict, error: str) -> None:
+        vault = self.manager.vault
+        if error:
+            self.reload_list()
+            self.window_.run_dialog(SheetDialog(self.window_, "The check didn't finish", error, cancel=None))
+            return
+        if vault.locked():
+            return
+        vault.record_breaches(seen)
+        self.reload_list()
+        found = [e for e in vault.entries if breach_seen(e) > 0]
+        if not found:
+            title, text = "No breaches found", ("None of your saved passwords appear in Have I Been Pwned's list of "
+                                                 "leaked passwords.")
+        else:
+            sites = sorted({login_site(QUrl(e["url"]).host()) for e in found})
+            listed = ", ".join(sites[:6]) + (f" and {len(sites) - 6} more" if len(sites) > 6 else "")
+            title = f"{len(found)} password{'s' if len(found) != 1 else ''} found in breaches"
+            text = (f"{'These have' if len(found) != 1 else 'This has'} been leaked before, so attackers try "
+                    f"{'them' if len(found) != 1 else 'it'} first: {listed}. Change {'them' if len(found) != 1 else 'it'} "
+                    "on those sites (Suggest makes a strong one); they're marked \u201cIn a breach\u201d in the list.")
+        self.window_.run_dialog(SheetDialog(self.window_, title, text, cancel=None))
 
     def import_file(self, path: str | None = None) -> None:
         window = self.window_
@@ -14266,6 +18272,11 @@ class ValhallaSheet(_Sheet):
         self.empty = QLabel("Nothing here - tabs you close will rest here for a week.")
         self.empty.setObjectName("EmptyLabel")
         self.body.addWidget(self.empty)
+        if not window.private:
+            trails = QPushButton("Trails: how you got to each page…")
+            trails.setObjectName("LinkButton")
+            trails.clicked.connect(lambda *_: window.show_trails())
+            self.body.addWidget(trails, 0, Qt.AlignmentFlag.AlignLeft)
 
     def refresh(self) -> None:
         w = self.window_
@@ -14308,6 +18319,918 @@ class ValhallaSheet(_Sheet):
         if data:
             self.window_.restore_from_valhalla(*data)
             self.refresh()
+
+
+class HeimdallSheet(_Sheet):
+    """Heimdall's list: the pages he watches, when he last looked, and what changed."""
+
+    def __init__(self, window: "BrowserWindow", heimdall: Heimdall) -> None:
+        super().__init__(window, "Heimdall", f"Pages Heimdall watches for you while {BROWSER_NAME} is open. He "
+                         "visits each one on his own, without your cookies, and tells you when it changes.",
+                         width=600)
+        self.window_ = window
+        self.heimdall = heimdall
+        self.area = QScrollArea()
+        self.area.setObjectName("SheetScroll")
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.Shape.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.holder = QWidget()
+        self.holder.setObjectName("SheetScrollBody")
+        self.rows = QVBoxLayout(self.holder)
+        self.rows.setContentsMargins(0, 0, 0, 0)
+        self.rows.setSpacing(0)
+        self.area.setWidget(self.holder)
+        self.body.addWidget(self.area)
+        self.empty = QLabel("Nothing watched yet. On a page you'd like to keep an eye on, choose Watch Page for "
+                            "Changes in its page menu. Select part of the page first to watch just that part, "
+                            "such as a price.")
+        self.empty.setObjectName("SheetBody")
+        self.empty.setWordWrap(True)
+        self.body.addWidget(self.empty)
+        heimdall.changed.connect(self._changed)
+        self.refresh()
+
+    def _changed(self) -> None:
+        if self.isVisible():
+            self.refresh()
+
+    def refresh(self) -> None:
+        while self.rows.count():
+            item = self.rows.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()                      # (gone now, not when Qt gets to deleting it)
+                item.widget().deleteLater()
+        theme = self.window_.theme
+        watches = sorted(self.heimdall.watches, key=lambda w: (not w.get("unread"), -float(w.get("changed") or 0),
+                                                               -float(w.get("added") or 0)))
+        for n, watch in enumerate(watches):
+            if n:
+                line = QFrame()
+                line.setObjectName("RowDivider")
+                self.rows.addWidget(line)
+            self.rows.addWidget(self._row(watch, theme))
+        self.rows.addStretch(1)
+        self.empty.setVisible(not watches)
+        self.area.setVisible(bool(watches))
+        self.area.setFixedHeight(max(1, min(420, 92 * len(watches) + 4)))
+        fit_sheet(self)
+
+    def _row(self, watch: dict, theme: dict) -> QWidget:
+        w = self.window_
+        row = QWidget()
+        row.setProperty("watchId", watch["id"])
+        v = QVBoxLayout(row)
+        v.setContentsMargins(2, 8, 2, 8)
+        v.setSpacing(2)
+        top = QHBoxLayout()
+        title = QLabel()
+        title.setObjectName("RowTitle")
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        name = watch.get("title") or bare_host(QUrl(watch["url"]))
+        title.setText(title.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, 340))
+        title.setToolTip(watch["url"])
+        top.addWidget(title, 1)
+        every = QComboBox()
+        for minutes, label in HEIMDALL_EVERY:
+            every.addItem(label, minutes)
+        index = every.findData(int(watch.get("every") or HEIMDALL_DEFAULT_EVERY))
+        every.setCurrentIndex(index if index >= 0 else 1)
+        every.currentIndexChanged.connect(lambda i, c=every, wid=watch["id"]: self.heimdall.set_every(wid, c.itemData(i)))
+        top.addWidget(every)
+        v.addLayout(top)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        status = QLabel()
+        status.setObjectName("RowSubtitle")
+        status.setTextFormat(Qt.TextFormat.RichText)
+        place = html.escape(bare_host(QUrl(watch["url"])))
+        if watch.get("selector"):
+            place += " · " + html.escape(f"the part with “{(watch.get('snippet') or '')[:40]}”")
+        if self.heimdall.current is not None and self.heimdall.current["id"] == watch["id"]:
+            note = "Looking now…"
+        elif watch.get("error"):
+            note = f"<span style='color:{theme['danger']}'>{html.escape(watch['error'])}</span>"
+        elif watch.get("unread"):
+            note = f"<b style='color:{theme['accent']}'>Changed {heimdall_ago(watch.get('changed') or 0)}</b>"
+        elif watch.get("changed"):
+            note = f"Last changed {heimdall_ago(watch['changed'])}"
+        elif watch.get("checked"):
+            note = f"No changes yet · looked {heimdall_ago(watch['checked'])}"
+        else:
+            note = "Waiting for his first look"
+        status.setText(f"{place} — {note}")
+        status.setWordWrap(True)
+        v.addWidget(status)
+        bottom.addStretch(1)
+        for text, slot, enabled in (
+                ("Changes", partial(w.show_heimdall_changes, watch["id"]), bool(watch.get("changes"))),
+                ("Open", partial(w.open_heimdall_page, watch["id"]), True),
+                ("Check Now", partial(self.heimdall.check_now, watch["id"]), True),
+                ("Remove", partial(self.heimdall.remove, watch["id"]), True)):
+            button = QPushButton(text)
+            button.setObjectName("LinkButton")
+            button.setEnabled(enabled)
+            button.clicked.connect(lambda *_, s=slot: s())
+            bottom.addWidget(button)
+        v.addLayout(bottom)
+        return row
+
+
+class HeimdallChangesSheet(_Sheet):
+    """What changed on a watched page: what was added, and what was taken off, newest first."""
+
+    def __init__(self, window: "BrowserWindow", watch: dict) -> None:
+        name = watch.get("title") or bare_host(QUrl(watch["url"]))
+        super().__init__(window, f"Changes on {name}", "", width=600, ok="Done", cancel=None)
+        self.window_ = window
+        self.watch = watch
+        note = QLabel()
+        note.setObjectName("SheetBody")
+        note.setWordWrap(True)
+        note.setTextFormat(Qt.TextFormat.PlainText)
+        note.setText(bare_host(QUrl(watch["url"])) + (f" · the part with “{watch.get('snippet', '')[:60]}”"
+                                                       if watch.get("selector") else ""))
+        self.body.addWidget(note)
+        self.view = QTextBrowser()
+        self.view.setObjectName("ChangesView")
+        self.view.setOpenLinks(False)
+        self.view.setFrameShape(QFrame.Shape.NoFrame)
+        self.view.setMinimumHeight(260)
+        self.view.setHtml(self.render(watch, window.theme))
+        self.body.addWidget(self.view)
+        open_page = QPushButton("Open Page")
+        open_page.setObjectName("LinkButton")
+        open_page.clicked.connect(lambda *_: (self.accept(), window.open_heimdall_page(watch["id"])))
+        self.body.addWidget(open_page, 0, Qt.AlignmentFlag.AlignLeft)
+
+    @staticmethod
+    def render(watch: dict, theme: dict) -> str:
+        added_colour = "#4CD27E" if theme.get("dark") else "#1E7F45"
+        quiet = theme["text_secondary"]
+        parts = []
+        for change in watch.get("changes", []):
+            when = time.strftime("%A %d %B, %H:%M", time.localtime(float(change.get("at") or 0)))
+            parts.append(f"<p style='margin:10px 0 4px 0; color:{quiet}; font-weight:600'>{html.escape(when)}</p>")
+            for line in change.get("added", []):
+                parts.append(f"<p style='margin:2px 0; color:{added_colour}'>+&nbsp;{html.escape(line)}</p>")
+            for line in change.get("removed", []):
+                parts.append(f"<p style='margin:2px 0; color:{quiet}'>−&nbsp;<s>{html.escape(line)}</s></p>")
+            if change.get("more"):
+                parts.append(f"<p style='margin:2px 0; color:{quiet}'><i>and {int(change['more'])} more lines</i></p>")
+        if not parts:
+            parts.append(f"<p style='color:{quiet}'>No changes yet.</p>")
+        return "".join(parts)
+
+
+class TrailsSheet(_Sheet):
+    """Trails: the week's browsing as trees - each page under the page you came to it from."""
+
+    def __init__(self, window: "BrowserWindow", trails: Trails) -> None:
+        super().__init__(window, "Trails", "How you got from page to page. Each page is under the one you "
+                         "came from; typing an address starts a new trail. Click a page to open it.", width=640)
+        self.window_ = window
+        self.trails = trails
+        self.focus_id: str | None = None
+        top = QHBoxLayout()
+        self.day = QComboBox()
+        self.day.currentIndexChanged.connect(lambda *_: self.refresh())
+        top.addWidget(self.day)
+        self.search = QLineEdit()
+        self.search.setObjectName("SidebarSearch")
+        self.search.setPlaceholderText("Search this day's trails")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda *_: self.refresh())
+        top.addWidget(self.search, 1)
+        self.body.addLayout(top)
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("TrailsTree")
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderHidden(True)
+        self.tree.setFrameShape(QFrame.Shape.NoFrame)
+        self.tree.setIconSize(QSize(16, 16))
+        self.tree.setIndentation(18)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.setFixedHeight(380)
+        self.tree.itemActivated.connect(self._open)
+        self.tree.itemClicked.connect(self._open)
+        self.body.addWidget(self.tree)
+        self.empty = QLabel("No trails yet - pages you visit will show here, under the pages you found them from.")
+        self.empty.setObjectName("SheetBody")
+        self.empty.setWordWrap(True)
+        self.body.addWidget(self.empty)
+        self._refresh_later = QTimer(self)
+        self._refresh_later.setSingleShot(True)
+        self._refresh_later.setInterval(400)
+        self._refresh_later.timeout.connect(self.refresh)
+        trails.changed.connect(lambda: self._refresh_later.start() if self.isVisible() else None)
+
+    def show_days(self, focus_day: str | None = None) -> None:
+        days = self.trails.available_days()
+        today = trail_day(time.time())
+        if today not in days:
+            days.insert(0, today)
+        self.day.blockSignals(True)
+        self.day.clear()
+        for day in days:
+            self.day.addItem(trail_day_label(day, today), day)
+        index = self.day.findData(focus_day) if focus_day else 0
+        self.day.setCurrentIndex(max(0, index))
+        self.day.blockSignals(False)
+
+    def refresh(self) -> None:
+        w = self.window_
+        day = self.day.currentData() or trail_day(time.time())
+        steps = self.trails.load(day)
+        ids = {s["id"] for s in steps}
+        query = self.search.text().strip()
+        shown: set[str] | None = None
+        if query:                                          # the matches, and the trails that led to them
+            shown = set()
+            for step in steps:
+                if match_score(query, step.get("title", ""), step["url"]):
+                    shown.update(s["id"] for s in self.trails.path_to(step["id"]))
+        focus_path = {s["id"] for s in self.trails.path_to(self.focus_id)} if self.focus_id else set()
+        self.tree.clear()
+        palette = self.tree.palette()                     # (the branch arrows stay Qt's own)
+        for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+            palette.setColor(group, QPalette.ColorRole.Highlight, qc(w.theme["hover"]))
+            palette.setColor(group, QPalette.ColorRole.HighlightedText, qc(w.theme["text"]))
+        palette.setColor(QPalette.ColorRole.Text, qc(w.theme["text"]))
+        self.tree.setPalette(palette)
+        items: dict[str, QTreeWidgetItem] = {}
+        quiet = qc(w.theme["text_secondary"])
+        focus_item = None
+        for step in steps:                                 # in time order, so parents come first
+            if shown is not None and step["id"] not in shown:
+                continue
+            parent = items.get(step.get("parent")) if step.get("parent") in ids else None
+            item = QTreeWidgetItem(parent) if parent is not None else QTreeWidgetItem()
+            item.setText(0, step.get("title") or bare_display_host(QUrl(step["url"])) or step["url"])
+            note = time.strftime("%H:%M", time.localtime(step["t"]))
+            if step.get("via") == "tab" and parent is not None:
+                note = "new tab · " + note
+            item.setText(1, note)
+            item.setForeground(1, quiet)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setIcon(0, w._favicon_for(step["url"]))
+            item.setToolTip(0, step["url"])
+            item.setData(0, Qt.ItemDataRole.UserRole, step["url"])
+            if step["id"] in focus_path:
+                font = QFont(self.tree.font())
+                font.setWeight(QFont.Weight.DemiBold)
+                item.setFont(0, font)
+                if step["id"] == self.focus_id:
+                    focus_item = item
+            if parent is None:
+                self.tree.addTopLevelItem(item)
+            items[step["id"]] = item
+        # newest trails on top
+        tops = [self.tree.takeTopLevelItem(0) for _ in range(self.tree.topLevelItemCount())]
+        self.tree.addTopLevelItems(tops[::-1])
+        self.tree.expandAll()
+        if focus_item is not None:
+            self.tree.setCurrentItem(focus_item)
+            self.tree.scrollToItem(focus_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.empty.setVisible(not items)
+        self.tree.setVisible(bool(items))
+        fit_sheet(self)
+
+    def _open(self, item: QTreeWidgetItem, *_) -> None:
+        url = item.data(0, Qt.ItemDataRole.UserRole)
+        if url and self.isVisible():                       # (a click can also be an activation)
+            self.accept()
+            main = self.window_.main_window or self.window_
+            main.ensure_shown()
+            main.add_tab(QUrl(url))
+            main.raise_()
+            main.activateWindow()
+
+
+class BifrostLocal:
+    """What Bifröst syncs, as this device has it: Favorites, the Reading List, the password
+    vault (only while it's unlocked) and the main window's open tabs."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        self.window = window
+
+    def device_name(self) -> str:
+        name = str(self.window.settings.value("bifrostName", "") or "").strip()
+        return name or QSysInfo.machineHostName() or "This device"
+
+    def _vault(self):
+        manager = self.window.passwords
+        return manager.vault if manager is not None and manager.vault.available() else None
+
+    def password_key(self, group: str) -> bytes | None:
+        """The group's password key, kept inside the password vault (so only while it's unlocked)."""
+        vault = self._vault()
+        if vault is None or not vault.exists() or vault.locked():
+            return None
+        keys = vault.extras.get("bifrostPasswordKeys")
+        try:
+            key = bytes.fromhex(str(keys.get(group) or "")) if isinstance(keys, dict) else b""
+        except ValueError:
+            return None
+        return key if len(key) == 32 else None
+
+    def set_password_key(self, group: str, key: bytes) -> bool:
+        vault = self._vault()
+        if vault is None or not vault.exists() or vault.locked() or len(key) != 32:
+            return False
+        keys = vault.extras.get("bifrostPasswordKeys")
+        keys = {g: k for g, k in keys.items() if g != group} if isinstance(keys, dict) else {}
+        keys = dict(list(keys.items())[-3:])                  # (a few earlier groups, in case you go back)
+        keys[group] = key.hex()
+        vault.extras["bifrostPasswordKeys"] = keys
+        vault.save()
+        return True
+
+    def scan(self, collections) -> dict:
+        store, out = self.window.store, {}
+        if "bookmarks" in collections:
+            out["bookmarks"] = {bifrost_item_id("b", b["url"]): {"url": b["url"], "title": b.get("title") or b["url"],
+                                                                **({"folder": b["folder"]} if b.get("folder") else {})}
+                                for b in store.bookmarks}
+        if "reading" in collections:
+            out["reading"] = {bifrost_item_id("r", e["url"]): {"url": e["url"], "title": e.get("title") or e["url"],
+                                                              "read": bool(e.get("read")),
+                                                              "time": round(float(e.get("time") or 0), 1)}
+                              for e in store.reading_list}
+        vault = self._vault()
+        if "passwords" in collections and vault is not None and vault.exists() and not vault.locked():
+            out["passwords"] = {bifrost_item_id("p", e["url"], e["username"]): {
+                "url": e["url"], "username": e["username"], "password": e["password"], "title": e.get("title", ""),
+                "note": e.get("note", "")} for e in vault.entries}
+        return out
+
+    def apply(self, changes: dict) -> set:
+        store, blocked = self.window.store, set()
+        items = changes.get("bookmarks")
+        if items:
+            by_id = {bifrost_item_id("b", b["url"]): b for b in store.bookmarks}
+            for item_id, data in items.items():
+                mine = by_id.get(item_id)
+                if data is None:
+                    if mine is not None:
+                        store.bookmarks.remove(mine)
+                elif mine is not None:
+                    mine["title"] = str(data.get("title") or data["url"])
+                    if data.get("folder"):
+                        mine["folder"] = str(data["folder"])[:60]
+                    else:
+                        mine.pop("folder", None)
+                elif isinstance(data.get("url"), str) and data["url"]:
+                    entry = {"title": str(data.get("title") or data["url"]), "url": data["url"]}
+                    if data.get("folder"):
+                        entry["folder"] = str(data["folder"])[:60]
+                    store.bookmarks.append(entry)
+            store._bookmarks_changed()
+        items = changes.get("reading")
+        if items:
+            by_id = {bifrost_item_id("r", e["url"]): e for e in store.reading_list}
+            for item_id, data in items.items():
+                mine = by_id.get(item_id)
+                if data is None:
+                    if mine is not None:
+                        store.remove_reading(mine["url"])
+                elif mine is not None:
+                    mine["title"], mine["read"] = str(data.get("title") or data["url"]), bool(data.get("read"))
+                elif isinstance(data.get("url"), str) and data["url"]:
+                    store.reading_list.insert(0, {"url": data["url"], "title": str(data.get("title") or data["url"]),
+                                                  "time": float(data.get("time") or time.time()),
+                                                  "read": bool(data.get("read"))})
+            store.reading_list.sort(key=lambda e: -float(e.get("time") or 0))
+            store._save_timer.start()
+            store.readingChanged.emit()
+        items = changes.get("passwords")
+        if items:
+            vault = self._vault()
+            if vault is None or not vault.exists() or vault.locked():
+                blocked.add("passwords")
+            else:
+                by_id = {bifrost_item_id("p", e["url"], e["username"]): e for e in vault.entries}
+                now = time.time()
+                for item_id, data in items.items():
+                    mine = by_id.get(item_id)
+                    if data is None:
+                        if mine is not None:
+                            vault.entries.remove(mine)
+                    elif mine is not None:
+                        if mine["password"] != data.get("password"):
+                            mine["previous"] = mine["password"]
+                        mine.update({"password": str(data.get("password") or ""), "title": str(data.get("title") or ""),
+                                     "note": str(data.get("note") or ""), "updated": now})
+                    elif data.get("url") and data.get("password"):
+                        vault.entries.append({"id": uuid.uuid4().hex, "url": str(data["url"]),
+                                              "username": str(data.get("username") or ""),
+                                              "password": str(data["password"]), "title": str(data.get("title") or ""),
+                                              "note": str(data.get("note") or ""), "created": now, "updated": now,
+                                              "used": 0})
+                vault.save()
+                manager = self.window.passwords
+                if manager is not None:
+                    manager.changed.emit()
+        return blocked
+
+    def tabs(self) -> list[dict]:
+        out = []
+        for window in [self.window] + [w for w in self.window.all_windows()[1:] if not w.private and w.app is None]:
+            for view in window.views():
+                if view.burner:
+                    continue
+                url = QUrl(view.pending["url"]) if view.pending is not None else view.url()
+                if url.scheme() in ("http", "https"):
+                    out.append({"url": without_credentials(url).toString(), "title": view.tab_title()})
+        return out[:300]
+
+
+class BifrostSheet(_Sheet):
+    """Settings > Bifröst Sync."""
+
+    def __init__(self, window: "BrowserWindow", bifrost: Bifrost) -> None:
+        super().__init__(window, "Bifröst Sync", "", width=560, ok="Done")
+        self.window_ = window
+        self.bifrost = bifrost
+        self.content = QVBoxLayout()
+        self.content.setSpacing(8)
+        self.body.addLayout(self.content)
+        self._later = QTimer(self)
+        self._later.setSingleShot(True)
+        self._later.setInterval(150)
+        self._later.timeout.connect(self.refresh)
+        bifrost.changed.connect(lambda: self._later.start() if self.isVisible() else None)
+
+    def _clear(self) -> None:
+        clear_layout(self.content)
+
+    def _label(self, text: str, name: str = "SheetBody", rich: bool = False) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName(name)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText if rich else Qt.TextFormat.PlainText)
+        return label
+
+    def _row(self, title: str, widget: QWidget, note: str = "") -> QWidget:
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        v = QVBoxLayout()
+        v.setSpacing(0)
+        v.addWidget(self._label(title, "RowTitle"))
+        if note:
+            v.addWidget(self._label(note, "RowSubtitle"))
+        h.addLayout(v, 1)
+        h.addWidget(widget)
+        return row
+
+    def _button(self, text: str, slot, primary: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("PrimaryButton" if primary else "SecondaryButton")
+        button.clicked.connect(lambda *_: slot())
+        return button
+
+    def refresh(self) -> None:
+        self._clear()
+        w, b = self.window_, self.bifrost
+        if not b.configured():
+            self.content.addWidget(self._label(
+                f"Keep your Favorites, Reading List, passwords and open tabs the same on your own devices, with no "
+                f"account and no server. Everything is encrypted with a key only your devices have; they meet on "
+                f"your local network or in a folder you already sync (Syncthing, Nextcloud, a USB stick)."))
+            row = QHBoxLayout()
+            row.addWidget(self._button("Join Another Device…", w.show_bifrost_join))
+            row.addStretch(1)
+            row.addWidget(self._button("Turn On Bifröst", lambda: (b.create(), self.refresh()), primary=True))
+            self.content.addLayout(row)
+            fit_sheet(self)
+            return
+        if b.last_error:
+            status = f"<span style='color:{w.theme['danger']}'>{html.escape(b.last_error)}</span>"
+        elif b.last_sync:
+            status = f"Synced {heimdall_ago(b.last_sync)}"
+        else:
+            status = "Not synced yet"
+        self.content.addWidget(self._label(f"<b>{html.escape(b.local.device_name())}</b> · {status}", rich=True))
+        names = {"bookmarks": ("Favorites", ""), "reading": ("Reading List", ""),
+                 "passwords": ("Passwords", "While they're unlocked on both devices" if b.keeper.mode != "file" else
+                               "Off unless you turn it on: with no keyring on this computer, the sync key is in a "
+                               "file, so anyone who can read your files could read synced passwords"),
+                 "tabs": ("Open Tabs", "Shown on your other devices")}
+        group = QFrame()
+        group.setObjectName("SettingsGroup")
+        g = QVBoxLayout(group)
+        g.setContentsMargins(12, 6, 12, 6)
+        for collection in BIFROST_COLLECTIONS:
+            switch = Switch()
+            switch.setChecked(collection in b.collections())
+            switch.toggled.connect(partial(b.set_collection, collection))
+            g.addWidget(self._row(*names[collection][:1], switch, names[collection][1]))
+        self.content.addWidget(group)
+        lan = Switch()
+        lan.setChecked(bool(b.config.get("lan")))
+        lan.toggled.connect(b.set_lan)
+        self.content.addWidget(self._row("Sync on this network", lan, "Directly between your devices when "
+                                         "they're on the same Wi-Fi or network"))
+        folder = b.config.get("folder") or ""
+        buttons = QWidget()
+        bh = QHBoxLayout(buttons)
+        bh.setContentsMargins(0, 0, 0, 0)
+        bh.addWidget(self._button("Choose…", w.choose_bifrost_folder))
+        if folder:
+            bh.addWidget(self._button("Stop Using", lambda: b.set_folder("")))
+        self.content.addWidget(self._row("Sync folder", buttons, folder or "None: for devices that aren't on the "
+                                         "same network, choose a folder that you sync between them"))
+        others = sorted(b.devices.items(), key=lambda kv: -float(kv[1].get("seen") or 0))
+        if others:
+            self.content.addWidget(self._label("Your other devices", "RowTitle"))
+        for device, info in others:
+            tabs = b.remote_tabs.get(device, {}).get("tabs", [])
+            button = QPushButton(f"Tabs ({len(tabs)})")
+            button.setObjectName("LinkButton")
+            button.setEnabled(bool(tabs))
+            button.clicked.connect(lambda *_, d=device: w.show_bifrost_tabs(d))
+            self.content.addWidget(self._row(info.get("name") or "Another device", button,
+                                             f"Synced {heimdall_ago(float(info.get('seen') or 0))}"))
+        row = QHBoxLayout()
+        row.addWidget(self._button("Leave…", w.leave_bifrost))
+        row.addStretch(1)
+        row.addWidget(self._button("Sync Now", b.sync_now))
+        row.addWidget(self._button("Add a Device…", w.show_bifrost_add))
+        self.content.addLayout(row)
+        self.content.addWidget(self._label(f"Your key is kept {b.keeper.describe()}.", "SheetNote"))
+        fit_sheet(self)
+
+
+class BifrostPairSheet(_Sheet):
+    """Add a Device / Join: the pairing, from this side."""
+
+    def __init__(self, window: "BrowserWindow", bifrost: Bifrost, joining: bool) -> None:
+        super().__init__(window, "Join Your Other Device" if joining else "Add a Device", "", width=520,
+                         ok=None, cancel="Close")
+        self.window_ = window
+        self.bifrost = bifrost
+        self.joining = joining
+        self.state = "waiting"
+        self.code = ""
+        self.detail = ""
+        self.content = QVBoxLayout()
+        self.content.setSpacing(10)
+        self.body.addLayout(self.content)
+        bifrost.pairingState.connect(self._on_state)
+        bifrost.offersChanged.connect(lambda: self.refresh() if self.state == "waiting" else None)
+        self.finished.connect(lambda *_: bifrost.cancel_pairing() if self.state != "done" else None)
+        self._tick = QTimer(self)
+        self._tick.setInterval(3000)
+        self._tick.timeout.connect(lambda: self.refresh() if self.state == "waiting" and self.joining else None)
+        self._tick.start()
+
+    def _on_state(self, state: str, detail: str) -> None:
+        if state == "code":
+            self.state, self.code = "code", detail
+        elif state == "confirmed":
+            if self.state != "code":
+                return
+            self.state = "confirmed"
+        else:
+            self.state, self.detail = state, detail
+        self.refresh()
+
+    def _clear(self) -> None:
+        clear_layout(self.content)
+
+    def _text(self, text: str, name: str = "SheetBody") -> QLabel:
+        label = QLabel(text)
+        label.setObjectName(name)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        self.content.addWidget(label)
+        return label
+
+    def _code_label(self) -> QLabel:
+        label = QLabel(f"{self.code[:3]} {self.code[3:]}")
+        label.setObjectName("PairCode")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.content.addWidget(label)
+        return label
+
+    def refresh(self) -> None:
+        self._clear()
+        b, w = self.bifrost, self.window_
+        if self.state == "done":
+            self._text("Paired. Your devices will keep each other up to date from now on." if not self.detail
+                       else f"Joined {self.detail}. Your devices will keep each other up to date from now on.")
+            if b._pk_pending is not None:
+                self._text("Your passwords sync once they're unlocked on this device (they stay sealed until then).",
+                           "SheetNote")
+                unlock = QPushButton("Unlock Passwords…")
+                unlock.setObjectName("SecondaryButton")
+                unlock.clicked.connect(lambda *_: (w.unlock_bifrost_passwords(), self.refresh()))
+                self.content.addWidget(unlock, 0, Qt.AlignmentFlag.AlignLeft)
+        elif self.state == "failed":
+            self._text(self.detail or "Pairing didn't finish.")
+        elif self.state == "code":
+            self._text("Check that the other device shows this same number. Pairing finishes once you've said "
+                       "they match on both devices.")
+            self._code_label()
+            row = QHBoxLayout()
+            no = QPushButton("They Don't Match")
+            no.setObjectName("SecondaryButton")
+            no.clicked.connect(lambda *_: b.confirm_pairing(False))
+            yes = QPushButton("They Match")
+            yes.setObjectName("PrimaryButton")
+            yes.clicked.connect(lambda *_: b.confirm_pairing(True))
+            row.addStretch(1)
+            row.addWidget(no)
+            row.addWidget(yes)
+            self.content.addLayout(row)
+        elif self.state == "confirmed":
+            self._code_label()
+            self._text("Waiting for the other device… Say they match there too." if not self.joining else
+                       "Waiting for the other device to say they match…")
+        elif not self.joining:
+            self._text("On your other device, open Bifröst Sync and choose Join Another Device. It needs to be on "
+                       "this network. You'll both see a number to compare.")
+            self._text("Or, for a device somewhere else: copy this pairing key to it (or scan the code with a "
+                       "phone and send yourself the text). Anyone with the key can join, so keep it to yourself.",
+                       "SheetNote")
+            key = b.key_text()
+            row = QHBoxLayout()
+            image = QLabel()
+            image.setPixmap(qr_pixmap("huginn-bifrost:" + key, 3))
+            row.addWidget(image)
+            v = QVBoxLayout()
+            groups = key.split("-")
+            field = QLabel("\n".join(" ".join(groups[i:i + 5]) for i in range(0, len(groups), 5)))
+            field.setObjectName("PairKey")
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            field.setProperty("pairingKey", key)
+            v.addWidget(field)
+            copy = QPushButton("Copy Pairing Key")
+            copy.setObjectName("SecondaryButton")
+            copy.clicked.connect(lambda *_: (QGuiApplication.clipboard().setText(key),
+                                             w.status_bubble.show_message("Pairing key copied", 2500)))
+            v.addWidget(copy, 0, Qt.AlignmentFlag.AlignLeft)
+            v.addStretch(1)
+            row.addLayout(v, 1)
+            self.content.addLayout(row)
+        else:
+            fresh = [o for o in b.offers.values() if time.time() - o["seen"] < 10]
+            if fresh:
+                self._text("Devices offering to pair on this network:")
+                for offer in fresh:
+                    row = QHBoxLayout()
+                    v = QVBoxLayout()
+                    v.setSpacing(0)
+                    name = QLabel(offer["name"] or "A device")
+                    name.setObjectName("RowTitle")
+                    name.setTextFormat(Qt.TextFormat.PlainText)
+                    v.addWidget(name)
+                    where = QLabel(f"at {offer['host']}")
+                    where.setObjectName("RowSubtitle")
+                    where.setTextFormat(Qt.TextFormat.PlainText)
+                    v.addWidget(where)
+                    row.addLayout(v, 1)
+                    join = QPushButton("Join")
+                    join.setObjectName("PrimaryButton")
+                    join.clicked.connect(lambda *_, s=offer["session"]: b.join_offer(s))
+                    row.addWidget(join)
+                    self.content.addLayout(row)
+            else:
+                self._text("Looking for your other device… On it, open Bifröst Sync and choose Add a Device.")
+            self._text("Or paste a pairing key:", "SheetNote")
+            row = QHBoxLayout()
+            field = QLineEdit()
+            field.setObjectName("SheetInput")
+            field.setPlaceholderText("HB1-…")
+            row.addWidget(field, 1)
+            join = QPushButton("Join")
+            join.setObjectName("SecondaryButton")
+            join.clicked.connect(lambda *_: w.join_bifrost_with_key(field.text(), self))
+            row.addWidget(join)
+            self.content.addLayout(row)
+        fit_sheet(self)
+
+
+class MimirSheet(_Sheet):
+    """Mímir: summarize the page, ask about it, or ask about pages you've visited."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window, "Mímir", "", width=600, ok="Done")
+        self.window_ = window
+        self.store, self.engine = window._mimir()
+        self.mode = "page"
+        self.view: "WebView | None" = None
+        self.sources: list[dict] = []
+        self.content = QVBoxLayout()
+        self.content.setSpacing(8)
+        self.body.addLayout(self.content)
+        self.answer = ""
+        self.status = ""
+        self.downloading = False
+        self.store.progress.connect(self._progress)
+        self.finished.connect(lambda *_: (self.engine.stop(), self.store.cancel() if self.downloading else None))
+
+    def _clear(self) -> None:
+        clear_layout(self.content)
+
+    def _label(self, text: str, name: str = "SheetBody") -> QLabel:
+        label = QLabel(text)
+        label.setObjectName(name)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        self.content.addWidget(label)
+        return label
+
+    def refresh(self) -> None:
+        self._clear()
+        w = self.window_
+        if not self.store.installed():
+            self._label("Mímir is a small AI model that runs entirely on this computer. It can summarize the page "
+                        "you're on, answer questions about it, and find things in pages you've visited. Nothing you "
+                        "ask leaves this computer.")
+            self._label("It needs a one-time download from Hugging Face and npm (open models and code, each file "
+                        "checked before it's used).", "SheetNote")
+            self.choice = QComboBox()
+            for key, label in (("small", "Quick: Qwen3 0.6B"), ("large", "Better answers, slower: Qwen3 1.7B")):
+                self.choice.addItem(f"{label} · about {mimir_size(key) / 1e9:.1f} GB", key)
+            self.content.addWidget(self.choice)
+            row = QHBoxLayout()
+            self.bar = QProgressBar()
+            self.bar.setRange(0, 1000)
+            self.bar.setTextVisible(False)
+            self.bar.setVisible(self.downloading)
+            row.addWidget(self.bar, 1)
+            if not self.downloading:
+                row.addStretch(1)
+            go = QPushButton("Stop" if self.downloading else "Download Mímir")
+            go.setObjectName("SecondaryButton" if self.downloading else "PrimaryButton")
+            go.clicked.connect(self._download)
+            row.addWidget(go)
+            self.content.addLayout(row)
+            self.status_label = self._label(self.status, "SheetNote")
+            self.status_label.setVisible(bool(self.status))
+            fit_sheet(self)
+            return
+        row = QHBoxLayout()
+        for key, text in (("page", "This Page"), ("history", "Your History")):
+            button = QPushButton(text)
+            button.setObjectName("PrimaryButton" if self.mode == key else "SecondaryButton")
+            button.clicked.connect(lambda *_, k=key: self._set_mode(k))
+            row.addWidget(button)
+        row.addStretch(1)
+        if self.mode == "page":
+            summary = QPushButton("Summarize This Page")
+            summary.setObjectName("SecondaryButton")
+            summary.setEnabled(not self.engine.busy())
+            summary.clicked.connect(lambda *_: self.run("summary"))
+            row.addWidget(summary)
+        self.content.addLayout(row)
+        ask = QHBoxLayout()
+        self.question = QLineEdit()
+        self.question.setObjectName("SheetInput")
+        self.question.setPlaceholderText("Ask about this page…" if self.mode == "page" else
+                                         "Ask about pages you've visited…")
+        self.question.returnPressed.connect(lambda: self.run(self.mode))
+        ask.addWidget(self.question, 1)
+        go = QPushButton("Stop" if self.engine.busy() else "Ask")
+        go.setObjectName("SecondaryButton")
+        go.clicked.connect(lambda *_: self.engine.stop() if self.engine.busy() else self.run(self.mode))
+        ask.addWidget(go)
+        self.content.addLayout(ask)
+        self.view_box = QTextBrowser()
+        self.view_box.setObjectName("ChangesView")
+        self.view_box.setOpenLinks(False)
+        self.view_box.setFrameShape(QFrame.Shape.NoFrame)
+        self.view_box.setMinimumHeight(240)
+        self.view_box.document().setIndentWidth(16)
+        self.view_box.setHtml(mimir_html(self.answer, w.theme) if self.answer else
+                              f"<p style='color:{w.theme['text_secondary']}'>{html.escape(self.status or '')}</p>")
+        self.content.addWidget(self.view_box)
+        for n, source in enumerate(self.sources, 1):
+            link = QPushButton(f"[{n}] {QFontMetrics(self.font()).elidedText(source['title'], Qt.TextElideMode.ElideRight, 480)}")
+            link.setObjectName("LinkButton")
+            link.setToolTip(source["url"])
+            link.clicked.connect(lambda *_, u=source["url"]: (self.accept(), w.add_tab(QUrl(u))))
+            self.content.addWidget(link)
+        foot = QHBoxLayout()
+        model = self.store.models.get(self.store.installed(), {}).get("name", "")
+        note = QLabel(f"{self.status} · " if self.status and self.answer else "")
+        note.setText(note.text() + f"Runs on this computer · {model}")
+        note.setObjectName("RowSubtitle")
+        foot.addWidget(note, 1)
+        remove = QPushButton("Remove Mímir…")
+        remove.setObjectName("LinkButton")
+        remove.clicked.connect(w.remove_mimir)
+        foot.addWidget(remove)
+        self.content.addLayout(foot)
+        fit_sheet(self)
+
+    def _set_mode(self, mode: str) -> None:
+        if self.engine.busy():
+            return
+        self.mode, self.answer, self.status, self.sources = mode, "", "", []
+        self.refresh()
+        self.question.setFocus()
+
+    def _progress(self, got: int, total: int) -> None:
+        if self.downloading and hasattr(self, "bar"):
+            try:
+                self.bar.setValue(int(1000 * got / max(1, total)))
+                self.status_label.setText(f"Downloading… {got / 1e6:.0f} of {total / 1e6:.0f} MB")
+                self.status_label.setVisible(True)
+            except RuntimeError:
+                pass
+
+    def _download(self) -> None:
+        if self.downloading:
+            self.store.cancel()
+            return
+        model = self.choice.currentData()
+        self.downloading, self.status = True, ""
+        self.refresh()
+
+        def done(error: str) -> None:
+            self.downloading = False
+            self.status = error
+            self.refresh()
+        self.store.download(model, done)
+
+    def run(self, kind: str) -> None:
+        """Summary, a question about the page, or one about your history."""
+        w = self.window_
+        if self.engine.busy():
+            return
+        question = self.question.text().strip() if hasattr(self, "question") else ""
+        if kind != "summary" and not question:
+            self.question.setFocus()
+            return
+        self.answer, self.sources, self.status = "", [], "Waking Mímir…" if self.engine.state != "ready" else "Thinking…"
+        self.refresh()
+        model = self.store.installed()
+
+        def ready(error: str) -> None:
+            if error:
+                self.status = f"Mímir couldn't start: {error}"
+                self.refresh()
+                return
+            if kind == "history":
+                passages = w.muninn.passages(question) if w.muninn is not None else []
+                if not passages:
+                    self.status = ("Muninn has nothing about that. (Pages are remembered when Remember What Pages "
+                                   "Said is on in Privacy & Security.)")
+                    self.refresh()
+                    return
+                self.sources = passages
+                self._ask(mimir_messages("history", question, passages=passages))
+                return
+            view = self.view or w.current_view()
+            if view is None or view.url().scheme() not in ("http", "https", "file"):
+                self.status = "Open a web page first."
+                self.refresh()
+                return
+
+            def got(result) -> None:
+                try:
+                    page = json.loads(result) if isinstance(result, str) else None
+                except ValueError:
+                    page = None
+                if not page or not str(page.get("text", "")).strip():
+                    self.status = "This page has no text Mímir can read."
+                    self.refresh()
+                    return
+                self._ask(mimir_messages(kind, question, page=page))
+            view.page().runJavaScript(MIMIR_PAGE_JS, APPLICATION_WORLD, got)
+        self.engine.start(model, ready)
+
+    def _ask(self, messages: list[dict]) -> None:
+        self.status = "Thinking…"
+        self.refresh()
+
+        def text(out: str) -> None:
+            self.answer = out
+            try:
+                self.view_box.setHtml(mimir_html(out, self.window_.theme))
+                bar = self.view_box.verticalScrollBar()
+                bar.setValue(bar.maximum())
+            except RuntimeError:
+                pass
+
+        def done(out: str, error: str) -> None:
+            self.answer = out
+            self.status = f"Stopped: {error}" if error else ""
+            if not mimir_clean(out) and not error:
+                self.status = "Mímir didn't have an answer."
+            try:
+                self.refresh()
+            except RuntimeError:
+                pass
+        self.engine.ask(messages, text, done)
 
 
 class SiteStyleSheet(_Sheet):
@@ -14714,6 +19637,210 @@ def render_weather(weather: dict | None, theme: dict, norse: bool = False, now: 
             f'<div class="wx-days">{"".join(days)}</div></aside>')
 
 
+
+
+# --------------------------------------------------------------------------------------
+# Passkeys and security keys (WebAuthn). The engine does the cryptography and talks to the
+# key; Huginn shows what it needs from you: insert and touch the key, pick an account, a PIN.
+# Without this the page's request just waited, with nothing on screen.
+# --------------------------------------------------------------------------------------
+WEBAUTH_FAILURES = {
+    "Timeout": "Nothing answered in time.",
+    "KeyNotRegistered": "This security key isn't registered with {site}.",
+    "KeyAlreadyRegistered": "This security key is already registered with {site}.",
+    "SoftPinBlock": "Too many wrong PINs. Take the key out and put it back in to try again.",
+    "HardPinBlock": "Too many wrong PINs, so the key has locked itself. It has to be reset before it works again.",
+    "AuthenticatorRemovedDuringPinEntry": "The key was removed while the PIN was being entered.",
+    "AuthenticatorMissingResidentKeys": "This security key can't store passkeys.",
+    "AuthenticatorMissingUserVerification": "This security key can't check it's you (it has no PIN or fingerprint).",
+    "AuthenticatorMissingLargeBlob": "This security key can't store the extra data {site} asks for.",
+    "NoCommonAlgorithms": "This security key doesn't support what {site} asks for.",
+    "StorageFull": "This security key is full. Remove a passkey from it to make room.",
+    "UserConsentDenied": "The request was declined on the security key.",
+    "WinUserCancelled": "Windows Hello was cancelled.",
+}
+WEBAUTH_PIN_ERRORS = {
+    "InternalUvLocked": "Fingerprint checks are locked for now: enter the PIN instead.",
+    "WrongPin": "That PIN isn't right.",
+    "TooShort": "The PIN needs at least {min} characters.",
+    "InvalidCharacters": "The PIN has characters the key doesn't accept.",
+    "SameAsCurrentPin": "The new PIN must be different from the current one.",
+}
+
+
+def _enum_name(value) -> str:
+    return getattr(value, "name", str(value)).split(".")[-1]
+
+
+class PasskeySheet(QDialog):
+    """Follows one passkey / security-key request (QWebEngineWebAuthUxRequest) through its
+    states, and closes itself when the request completes or is cancelled."""
+
+    def __init__(self, window: QWidget, request, site: str) -> None:
+        super().__init__(window, sheet_flags())
+        self.request, self.site, self._done = request, site, False
+        self.setObjectName("Sheet")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(440)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 20, 22, 18)
+        outer.setSpacing(10)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("SheetTitle")
+        self.message_label = QLabel()
+        self.message_label.setObjectName("SheetBody")
+        self.message_label.setWordWrap(True)
+        self.accounts = QListWidget()
+        self.accounts.setObjectName("SheetList")
+        self.accounts.setMaximumHeight(150)
+        self.accounts.itemDoubleClicked.connect(lambda *_: self._continue())
+        self.pin = QLineEdit()
+        self.pin.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pin.setMaxLength(63)                          # a FIDO2 PIN is at most 63 bytes
+        self.pin.setPlaceholderText("PIN")
+        self.pin.setObjectName("SheetInput")
+        self.pin.returnPressed.connect(self._continue)
+        self.confirm = QLineEdit()
+        self.confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm.setMaxLength(63)
+        self.confirm.setPlaceholderText("PIN again")
+        self.confirm.setObjectName("SheetInput")
+        self.confirm.returnPressed.connect(self._continue)
+        self.error_label = QLabel()
+        self.error_label.setObjectName("SheetError")
+        self.error_label.setWordWrap(True)
+        for widget in (self.title_label, self.message_label, self.accounts, self.pin, self.confirm, self.error_label):
+            outer.addWidget(widget)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("SecondaryButton")
+        self.cancel_button.clicked.connect(lambda *_: self.cancel_request())
+        self.ok_button = QPushButton("Continue")
+        self.ok_button.setObjectName("PrimaryButton")
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(lambda *_: self._continue())
+        row.addWidget(self.cancel_button)
+        row.addWidget(self.ok_button)
+        outer.addLayout(row)
+        request.stateChanged.connect(self.update_state)
+        self.update_state()
+
+    def setVisible(self, visible: bool) -> None:
+        if visible and not self.isVisible() and self.parentWidget() is not None:
+            place_sheet(self, self.parentWidget())       # before it appears, not after
+        super().setVisible(visible)
+
+    def state(self) -> str:
+        try:
+            return _enum_name(self.request.state())
+        except RuntimeError:                               # the engine already let go of it
+            return "Cancelled"
+
+    def update_state(self, *_) -> None:
+        state, site = self.state(), self.site
+        for widget in (self.accounts, self.pin, self.confirm, self.error_label):
+            widget.hide()
+        self.ok_button.show()
+        if state in ("Completed", "Cancelled"):
+            self._done = True
+            self.done(QDialog.DialogCode.Accepted if state == "Completed" else QDialog.DialogCode.Rejected)
+            return
+        if state == "SelectAccount":
+            self.title_label.setText("Choose an account")
+            self.message_label.setText(f"Your security key has more than one passkey for {site}.")
+            self.accounts.clear()
+            for name in self.request.userNames():
+                self.accounts.addItem(name)
+            self.accounts.setCurrentRow(0)
+            self.accounts.show()
+            self.ok_button.setText("Continue")
+        elif state == "CollectPin":
+            info = self.request.pinRequest()
+            reason, error = _enum_name(info.reason), _enum_name(info.error)
+            minimum = max(4, int(info.minPinLength or 4))
+            if reason == "Challenge":
+                self.title_label.setText("Enter your security key's PIN")
+                self.message_label.setText(f"{site} asks your security key to check it's you.")
+            else:
+                self.title_label.setText("Set a PIN for your security key" if reason == "Set"
+                                         else "Choose a new PIN for your security key")
+                self.message_label.setText(f"{site} needs your security key to have a PIN. "
+                                           f"Use at least {minimum} characters.")
+                self.confirm.clear()
+                self.confirm.show()
+            self.pin.clear()
+            self.pin.show()
+            text = WEBAUTH_PIN_ERRORS.get(error, "")
+            if error == "WrongPin" and int(info.remainingAttempts or 0) > 0:
+                left = int(info.remainingAttempts)
+                text += f" {left} {'try' if left == 1 else 'tries'} left before the key locks."
+            self._show_error(text.format(min=minimum))
+            self.ok_button.setText("Continue")
+            QTimer.singleShot(0, self.pin.setFocus)
+        elif state == "FinishTokenCollection":
+            self.title_label.setText("Touch your security key")
+            self.message_label.setText("Touch it once more to finish.")
+            self.ok_button.hide()
+        elif state == "RequestFailed":
+            reason = _enum_name(self.request.requestFailureReason())
+            self.title_label.setText("That didn't work")
+            self.message_label.setText(WEBAUTH_FAILURES.get(reason, "The security key couldn't be used.").format(site=site))
+            self.ok_button.setText("Try Again")
+        else:                                              # NotStarted / Discovery: waiting for a key
+            self.title_label.setText("Use your passkey")
+            if IS_WINDOWS:
+                self.message_label.setText(f"{site} wants to confirm it's you. Windows will ask: use Windows "
+                                           "Hello, your phone, or insert your security key and touch it.")
+            else:
+                self.message_label.setText(f"{site} wants to confirm it's you. Insert your security key "
+                                           "and touch it when it blinks.")
+            self.ok_button.hide()
+        self.adjustSize()
+
+    def _show_error(self, text: str) -> None:
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
+
+    def _continue(self) -> None:
+        state = self.state()
+        try:
+            if state == "SelectAccount":
+                item = self.accounts.currentItem()
+                if item is not None:
+                    self.request.setSelectedAccount(item.text())
+            elif state == "CollectPin":
+                info = self.request.pinRequest()
+                pin, minimum = self.pin.text(), max(4, int(info.minPinLength or 4))
+                if self.confirm.isVisible():
+                    if len(pin) < minimum:
+                        self._show_error(f"The PIN needs at least {minimum} characters.")
+                        return
+                    if pin != self.confirm.text():
+                        self._show_error("The two PINs don't match.")
+                        return
+                elif not pin:
+                    return
+                self.request.setPin(pin)
+            elif state == "RequestFailed":
+                self.request.retry()
+        except RuntimeError:
+            self.reject()
+
+    def cancel_request(self) -> None:
+        if not self._done and self.state() not in ("Completed", "Cancelled"):
+            try:
+                self.request.cancel()                      # its Cancelled state closes the sheet
+                return
+            except RuntimeError:
+                pass
+        self.reject()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancel_request()
+            return
+        super().keyPressEvent(event)
 
 
 class WeatherService(QObject):
@@ -15390,7 +20517,7 @@ class BrowserWindow(QWidget):
 
     def __init__(self, profile: QWebEngineProfile, store: BrowserStore,
                  start_handler: StartPageSchemeHandler, blocker: PrivacyGuard,
-                 main_window: "BrowserWindow | None" = None) -> None:
+                 main_window: "BrowserWindow | None" = None, app: dict | None = None) -> None:
         super().__init__()
         self.profile = profile
         self.store = store
@@ -15403,8 +20530,22 @@ class BrowserWindow(QWidget):
         # A Private Browsing window belongs to the main window: it shares Favorites and
         # settings, but has its own off-the-record profile and keeps no history.
         self.main_window = main_window
-        self.private = main_window is not None
+        # A web app's window (app = its record) also belongs to the main window, but shares
+        # its profile: signed in, history kept. "secondary" is any window but the main one.
+        self.app = app
+        self.secondary = main_window is not None
+        self.private = self.secondary and app is None
         self._private_windows: list[BrowserWindow] = []
+        self._app_windows: list[BrowserWindow] = []
+        self._shown_once = False                          # the main window: tabs restored when first shown
+        self._notifications: list = []                    # web apps' notifications on screen
+        self.heimdall: Heimdall | None = None             # (the main window's; see create_browser)
+        self.trails: Trails | None = None
+        self.translation_store: TranslationStore | None = None
+        self.translation_engine: TranslationEngine | None = None
+        self.bifrost: Bifrost | None = None
+        self.mimir_store: MimirStore | None = None
+        self.mimir_engine: MimirEngine | None = None
         self.engine: EngineManager | None = None          # set by attach_engine()
         self.passwords: PasswordManager | None = None     # set by attach_passwords()
         self.typing_sounds: TypingSounds | None = None   # set by create_browser()
@@ -15418,7 +20559,7 @@ class BrowserWindow(QWidget):
         self._welcome_imported = False
         start_handler.welcome_state = self.welcome_state
         self.fingerprint_secret = secrets.token_hex(16)    # new every session: sites can't link visits
-        self.downloads = DownloadManager(None if self.private else self.settings, self)
+        self.downloads = DownloadManager(None if self.secondary else self.settings, self)
         self.groups: list[dict] = [{"name": "", "views": [], "current": 0}]   # tab groups; 0 is the plain one
         self.group_index = 0
         self._switching_group = False
@@ -15470,10 +20611,14 @@ class BrowserWindow(QWidget):
         self.tint_theme_colours = self.settings.value("tintUseThemeColour", True, type=bool)
         self._icloud_pending = None
         self.prefs = load_privacy_prefs(self.settings)
-        self.cookies = CookieKeeper(profile.cookieStore(), self)
-        profile.cookieStore().setCookieFilter(blocker.allow_cookie)
+        if app is not None:                               # the main window's profile: its keeper and filter
+            self.cookies = main_window.cookies
+        else:
+            self.cookies = CookieKeeper(profile, self)
+            profile.cookieStore().setCookieFilter(blocker.allow_cookie)
         # Seams for tests: how sheets are run and where downloads are saved.
         self.run_dialog = lambda dialog: dialog.exec()
+        self.ask_directory = lambda title: QFileDialog.getExistingDirectory(self, title, os.path.expanduser("~"))
         self.ask_save_path = self._ask_save_path
         self.ask_import_path = lambda: QFileDialog.getOpenFileName(
             self, "Import Passwords", os.path.expanduser("~"),
@@ -15559,12 +20704,15 @@ class BrowserWindow(QWidget):
             self.mac_menu_bar = self.build_mac_menu_bar()
         elif IS_LINUX:
             QTimer.singleShot(0, self, self.export_global_menu)
-        profile.downloadRequested.connect(self._on_download_requested)
+        if app is None:                                   # an app's downloads come through the main window
+            profile.downloadRequested.connect(self._on_download_requested)
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):                     # Qt 6.5+
             hints.colorSchemeChanged.connect(self._on_system_color_scheme_changed)
         apply_spellcheck(profile, self.spellcheck)
         self.apply_privacy_prefs()
+        if app is not None:
+            self._enter_app_mode()
         self.apply_theme()
         self._restore_state()
 
@@ -15687,7 +20835,7 @@ class BrowserWindow(QWidget):
         sb.memory_search = self.muninn_search
         sb.panelAddRequested.connect(self.add_web_panel)
         sb.panelRemoveRequested.connect(self.remove_web_panel)
-        if not self.private:
+        if not self.secondary:
             sb.panels = self.web_panels()
             sb.set_panels_enabled(self.settings.value("webPanelsOn", False, type=bool))
         self.split.closeRequested.connect(self.close_split_view)
@@ -15695,6 +20843,7 @@ class BrowserWindow(QWidget):
         self.tabs.bar.menuRequested.connect(self.show_tab_menu)
         self.tabs.bar.tabMoved.connect(lambda *_: None if self._pinning else QTimer.singleShot(0, self._sync_pins))
         self.address.audioRequested.connect(lambda: self.toggle_mute())
+        self.address.translateRequested.connect(self.show_translate_menu)
         self.tabs.bar.muteToggled.connect(self._toggle_mute_at)
         self.tabs.bar.tabMoved.connect(self.schedule_session_save)
 
@@ -15876,6 +21025,10 @@ class BrowserWindow(QWidget):
         item(history, "Start Page", "go_home", "Ctrl+Shift+H")
         history.addSeparator()
         item(history, "Valhalla (Closed Tabs)…", "show_valhalla")
+        item(history, "Trails…", "show_trails")
+        item(history, "Tabs on Your Other Devices…", "show_bifrost_tabs")
+        item(history, "Ask Mímir About Your History…", "ask_mimir_history")
+        item(history, "Heimdall (Watched Pages)…", "show_heimdall")
         item(history, "Clear History…", "show_clear_history_dialog", "Ctrl+Shift+Backspace")
 
         bookmarks = bar.addMenu("Bookmarks")
@@ -16012,15 +21165,16 @@ class BrowserWindow(QWidget):
             self._sync_update_bar()
 
     def all_windows(self) -> list["BrowserWindow"]:
-        """The main window and its Private Browsing windows (settings apply to all)."""
+        """The main window, its Private Browsing windows and web apps' (settings apply to all)."""
         main = self.main_window or self
         windows = [main]
-        for window in list(main._private_windows):
-            try:
-                window.isVisible()                      # raises once Qt has deleted it
-                windows.append(window)
-            except RuntimeError:
-                main._private_windows.remove(window)
+        for group in (main._private_windows, main._app_windows):
+            for window in list(group):
+                try:
+                    window.isVisible()                  # raises once Qt has deleted it
+                    windows.append(window)
+                except RuntimeError:
+                    group.remove(window)
         return windows
 
     def set_appearance(self, mode: str, *_) -> None:
@@ -16068,9 +21222,19 @@ class BrowserWindow(QWidget):
         if PRIVATE_LAUNCH in targets:
             self.open_private_window([t for t in targets if t != PRIVATE_LAUNCH])
             return
+        removals = [t.split("=", 1)[1] for t in targets if t.startswith(APP_LAUNCH.replace("app=", "remove-app="))]
+        if removals:
+            self.uninstall_web_app(removals[0], ask=False)
+            return
+        apps = [t[len(APP_LAUNCH):] for t in targets if t.startswith(APP_LAUNCH)]
+        if apps:
+            self.open_web_app(apps[0])
+            return
+        fresh = not self._shown_once                    # a web app started Huginn: its tabs come back now
+        self.ensure_shown()
         for target in targets:
             self.add_tab(url_from_user_input(target) or QUrl(START_URL))
-        if not targets:
+        if not targets and not fresh:
             self.new_tab()
         if self.isMinimized():
             self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
@@ -16105,6 +21269,7 @@ class BrowserWindow(QWidget):
 
     def _new_view(self, lazy: dict | None = None, profile: QWebEngineProfile | None = None) -> WebView:
         view = WebView(self, profile or self.current_profile())
+        view.tab_id = uuid.uuid4().hex[:12]                # how the desktop refers to it (DesktopService)
         view.page().setBackgroundColor(qc(self.theme["content"]))     # until it has a page: no white flash
         self._apply_dark(view)
         self._wire_view(view)
@@ -16117,6 +21282,13 @@ class BrowserWindow(QWidget):
                 profile: QWebEngineProfile | None = None) -> WebView:
         """Create a tab. url=None leaves it empty (WebEngine fills it for createWindow).
         lazy {"url", "title"}: a restored tab that loads when it's first shown."""
+        if self.app is not None and self.tabs.count():     # a web app has one page; the rest go to Huginn
+            main = self.main_window
+            main.ensure_shown()
+            view = main.add_tab(url, background=False, after_current=False, lazy=lazy, profile=profile)
+            main.raise_()
+            main.activateWindow()
+            return view
         view = self._new_view(lazy, profile)
         position = self.tabs.currentIndex() + 1 if (after_current and self.tabs.count()) else self.tabs.count()
         if not background:
@@ -16129,6 +21301,7 @@ class BrowserWindow(QWidget):
         self.schedule_session_save()
         if not background:
             self.tabs.setCurrentIndex(index)
+        self._desktop_changed()
         if self.overview.isVisible():
             self.hide_overview()
         if self._fullscreen_view is not None:
@@ -16158,6 +21331,8 @@ class BrowserWindow(QWidget):
         self.hide_password_suggestions(view)
         self.tabs.removeTab(index)
         view.deleteLater()
+        self._desktop_changed()
+        self._left_sites({getattr(view, "site", "")})
         self.schedule_session_save()
         self._sync_permission_prompt()
         self._sync_warning_panel()
@@ -16218,6 +21393,7 @@ class BrowserWindow(QWidget):
         page.permissionRequested.connect(partial(self._on_permission_requested, view))
         page.certificateError.connect(partial(self._on_certificate_error, view))
         page.loadingChanged.connect(partial(self._on_loading_changed, view))
+        page.webAuthUxRequested.connect(partial(self._on_webauth_requested, view))
 
     def _fallback_favicon(self) -> QIcon:
         return self.icons.icon("globe", self.theme["text_secondary"])
@@ -16246,10 +21422,12 @@ class BrowserWindow(QWidget):
         title = self._tab_title(view)
         if self.tabs.tabText(index) != title:            # setTabText re-lays out the whole strip
             self.tabs.setTabText(index, title)
+            self._desktop_changed()
             self.tabs.setTabToolTip(index, plain_tooltip(title))
         if view is self.current_view():
             self.setWindowTitle(f"{title} — {self._title_suffix()}")
         self.schedule_session_save()
+        self._trail_title(view)
 
     def _tab_icon(self, view: WebView) -> QIcon:
         if view.burner:
@@ -16293,6 +21471,14 @@ class BrowserWindow(QWidget):
 
     def _on_url_changed(self, view: WebView, url: QUrl) -> None:
         self.hide_password_suggestions(view)
+        self._desktop_changed()
+        site = registrable_domain(url.host().lower()) if url.scheme() in ("http", "https") else ""
+        before, view.site = getattr(view, "site", ""), site
+        if site:
+            self._note_forget_origin(url)
+        if before and before != site:                     # this tab left a site
+            self._left_sites({before})
+        self._trail_step(view, url)
         if url.scheme() not in ("http", "https", "file"):
             view.page_colours = None
             if view is self.current_view():
@@ -16314,6 +21500,8 @@ class BrowserWindow(QWidget):
         self.hide_password_suggestions(view)
         view.colours_reported = False
         view.loading, view.progress = True, 0
+        view.load_started_at = time.monotonic()
+        self._translate_page_left(view)
         if view is self.current_view():
             self.address.start_progress()
             self._update_nav_buttons()
@@ -16355,6 +21543,10 @@ class BrowserWindow(QWidget):
             if self.find_bar.isVisible() and self.find_bar.text():
                 self._find(self.find_bar.text())       # the new page's matches
         url = without_credentials(view.url())
+        self._trail_step(view, view.url())
+        self._trail_title(view)
+        if ok:
+            self._detect_page_language(view)
         if (ok and not self.private and not view.burner and view.warning is None
                 and url.scheme() in ("http", "https") and self.tabs.indexOf(view) >= 0):
             self.store.add_history(view.title(), url.toString())
@@ -16369,6 +21561,7 @@ class BrowserWindow(QWidget):
     def _on_current_tab_changed(self, index: int) -> None:
         if self._switching_group:
             return
+        self._desktop_changed()
         view = self.tabs.widget(index)
         if not isinstance(view, WebView):
             return
@@ -16388,6 +21581,7 @@ class BrowserWindow(QWidget):
         self._update_nav_buttons()
         self._sync_tab_title(view)
         self._sync_reader_button(view)
+        self._sync_translate_button(view)
         self._on_audio_changed(view)
         self.status_bubble.show_link("")
         self.tabs.bar.update()
@@ -16694,7 +21888,7 @@ class BrowserWindow(QWidget):
         return views
 
     def schedule_session_save(self, *_) -> None:
-        if not self.private and not self._closing:
+        if not self.secondary and not self._closing:
             self._session_timer.start()
 
     def _store_current_group(self) -> None:
@@ -16719,7 +21913,7 @@ class BrowserWindow(QWidget):
         return {"groups": groups, "group": self.group_index, "time": time.time()}
 
     def save_session(self) -> None:
-        if self.private:
+        if self.secondary:
             return
         self._session_timer.stop()
         self.settings.setValue("session", json.dumps(self.session_data()))
@@ -16785,7 +21979,7 @@ class BrowserWindow(QWidget):
         return self.groups[index]["name"] or "Main Tabs"
 
     def switch_group(self, index: int, *_) -> None:
-        if self.private or index == self.group_index or not 0 <= index < len(self.groups):
+        if self.secondary or index == self.group_index or not 0 <= index < len(self.groups):
             return
         self._leave_overview()
         self.close_find_bar()
@@ -16841,7 +22035,7 @@ class BrowserWindow(QWidget):
         return value if (value or allow_empty) else None
 
     def new_tab_group(self, move_view: WebView | None = None, *_) -> int | None:
-        if self.private:
+        if self.secondary:
             return None
         name = self.ask_text("New Tab Group", "Keep a set of tabs together - for work, a trip, a game - and "
                              "switch between sets from the sidebar menu.", placeholder="Name, e.g. Work",
@@ -16923,6 +22117,9 @@ class BrowserWindow(QWidget):
             return
         if state == "playing":
             self._watch_audible(view)
+            player = getattr(self.main_window or self, "media_player", None)
+            if player is not None and not self.private and not view.burner:   # the desktop's media controls
+                player.follow(view)
         index = self.tabs.indexOf(view)
         if index >= 0:
             color = self.theme["text_secondary"] if state == "muted" else self.theme["accent"]
@@ -17154,6 +22351,880 @@ class BrowserWindow(QWidget):
         except ValueError:
             sites = []
         return {str(s) for s in sites if isinstance(s, str)} if isinstance(sites, list) else set()
+
+    # ---------------------------------------------------------------------------- Mímir
+    def _mimir(self) -> tuple["MimirStore", "MimirEngine"]:
+        main = self.main_window or self
+        if main.mimir_store is None:
+            main.mimir_store = MimirStore(os.path.join(main.data_dir, MIMIR_DIR), main)
+            main.mimir_store.user_agent = main.profile.httpUserAgent()
+            main.mimir_engine = MimirEngine(main.mimir_store, main)
+        return main.mimir_store, main.mimir_engine
+
+    def show_mimir(self, *_, mode: str = "page", action: str | None = None) -> "MimirSheet":
+        sheet = getattr(self, "mimir_sheet", None)
+        if sheet is None:
+            sheet = self.mimir_sheet = MimirSheet(self)
+        if not sheet.engine.busy():
+            sheet.mode, sheet.answer, sheet.status, sheet.sources = mode, "", "", []
+        sheet.view = self.current_view()
+        sheet.refresh()
+        sheet.open()
+        if action == "summary" and sheet.store.installed():
+            sheet.run("summary")
+        elif sheet.store.installed():
+            sheet.question.setFocus()
+        return sheet
+
+    def summarize_with_mimir(self, *_) -> None:
+        self.show_mimir(mode="page", action="summary")
+
+    def ask_mimir_history(self, *_) -> None:
+        self.show_mimir(mode="history")
+
+    def remove_mimir(self, *_) -> None:
+        store, engine = self._mimir()
+        dialog = SheetDialog(self, "Remove Mímir?", "Its model and engine are deleted from this computer "
+                             f"(about {sum(os.path.getsize(os.path.join(r, n)) for r, _d, ns in os.walk(store.folder) for n in ns) / 1e9:.1f} GB). "
+                             "You can download it again any time.", ok="Remove", danger=True)
+        accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+        dialog.deleteLater()
+        if accepted:
+            engine.close()
+            store.remove()
+            sheet = getattr(self, "mimir_sheet", None)
+            if sheet is not None:
+                sheet.answer, sheet.status = "", ""
+                sheet.refresh()
+
+    # ---------------------------------------------------------------------------- Bifröst sync
+    def _bifrost(self) -> "Bifrost | None":
+        return getattr(self.main_window or self, "bifrost", None)
+
+    def show_bifrost(self, *_) -> None:
+        bifrost = self._bifrost()
+        if bifrost is None:
+            return
+        sheet = getattr(self, "bifrost_sheet", None)
+        if sheet is None:
+            sheet = self.bifrost_sheet = BifrostSheet(self, bifrost)
+        sheet.refresh()
+        sheet.open()
+
+    def _pair_sheet(self, joining: bool) -> "BifrostPairSheet | None":
+        bifrost = self._bifrost()
+        if bifrost is None:
+            return None
+        listing = getattr(self, "bifrost_sheet", None)
+        if listing is not None and listing.isVisible():
+            listing.accept()
+        sheet = BifrostPairSheet(self, bifrost, joining)
+        sheet.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.bifrost_pair_sheet = sheet
+        sheet.refresh()
+        sheet.open()
+        return sheet
+
+    def show_bifrost_add(self, *_) -> None:
+        bifrost = self._bifrost()
+        if bifrost is None:
+            return
+        manager = self.passwords
+        if "passwords" in bifrost.collections() and manager is not None and manager.available() \
+                and manager.vault.exists() and not self.ensure_passwords_confirmed(
+                    "Enter your master password to add a device. It gets your passwords too."):
+            return
+        bifrost.offer_pairing()
+        self._pair_sheet(False)
+
+    def show_bifrost_join(self, *_) -> None:
+        bifrost = self._bifrost()
+        if bifrost is None:
+            return
+        bifrost.start_discovery()
+        sheet = self._pair_sheet(True)
+        if sheet is not None:
+            sheet.finished.connect(lambda *_: bifrost.stop_discovery())
+
+    def join_bifrost_with_key(self, text: str, sheet=None) -> bool:
+        bifrost = self._bifrost()
+        parsed = bifrost_key_from_text(text)
+        if bifrost is None or parsed is None:
+            self.status_bubble.show_message("That pairing key isn't right. Copy it again, all of it.", 4000)
+            return False
+        secret, password_key = parsed
+        if bifrost.configured() and secret != bifrost.secret:
+            dialog = SheetDialog(self, "Switch to the other devices?",
+                                 "This device is already syncing with a group of devices. Joining this key moves it "
+                                 "to the other group (what's on this device stays here and syncs there).",
+                                 ok="Switch")
+            accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+            dialog.deleteLater()
+            if not accepted:
+                return False
+        bifrost.join(secret, password_key)
+        if sheet is not None:
+            sheet.state, sheet.detail = "done", ""
+            sheet.refresh()
+        return True
+
+    def unlock_bifrost_passwords(self, *_) -> None:
+        """After pairing: put the passwords' key in this device's vault (unlocking it, or
+        setting it up), so passwords start syncing."""
+        bifrost = self._bifrost()
+        if bifrost is not None and self.ensure_passwords_unlocked(
+                "Enter your master password so your passwords can sync to this device."):
+            bifrost.sync_now()
+
+    def choose_bifrost_folder(self, *_) -> None:
+        bifrost = self._bifrost()
+        if bifrost is None:
+            return
+        path = self.ask_directory("Choose a Folder to Sync Through")
+        if path:
+            bifrost.set_folder(path)
+
+    def leave_bifrost(self, *_) -> None:
+        bifrost = self._bifrost()
+        if bifrost is None:
+            return
+        dialog = SheetDialog(self, "Stop syncing this device?",
+                             "Your Favorites, Reading List and passwords stay on this device, and your other devices "
+                             "keep theirs. This device's key is deleted; to sync again, pair it again.",
+                             ok="Stop Syncing", danger=True)
+        accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+        dialog.deleteLater()
+        if accepted:
+            bifrost.leave()
+
+    def show_bifrost_tabs(self, device: str | None = None, *_) -> None:
+        """Tabs open on your other devices (one, or all)."""
+        bifrost = self._bifrost()
+        if bifrost is None or not bifrost.configured():
+            self.show_bifrost()
+            return
+        devices = [device] if device else sorted(bifrost.remote_tabs, key=lambda d: -float(
+            bifrost.remote_tabs[d].get("at") or 0))
+        sheet = _Sheet(self, "Tabs on Your Other Devices", "", width=560, ok="Done")
+        shown = 0
+        for d in devices:
+            entry = bifrost.remote_tabs.get(d) or {}
+            tabs = entry.get("tabs", [])
+            if not tabs:
+                continue
+            head = QLabel(f"{entry.get('name') or 'Another device'} · {heimdall_ago(float(entry.get('at') or 0))}")
+            head.setObjectName("RowTitle")
+            head.setTextFormat(Qt.TextFormat.PlainText)
+            sheet.body.addWidget(head)
+            for tab in tabs[:60]:
+                button = QPushButton(QFontMetrics(self.font()).elidedText(tab.get("title") or tab["url"],
+                                                                         Qt.TextElideMode.ElideRight, 480))
+                button.setObjectName("LinkButton")
+                button.setToolTip(plain_tooltip(tab["url"]))
+                button.clicked.connect(lambda *_, u=tab["url"]: (sheet.accept(), self.add_tab(QUrl(u))))
+                sheet.body.addWidget(button)
+                shown += 1
+        if not shown:
+            empty = QLabel("No tabs open on your other devices (or they haven't synced yet).")
+            empty.setObjectName("SheetBody")
+            sheet.body.addWidget(empty)
+        self.bifrost_tabs_sheet = sheet
+        sheet.open()
+
+    def _bifrost_touch(self, *_) -> None:
+        bifrost = self._bifrost()
+        if bifrost is not None and bifrost.configured():
+            bifrost.schedule()
+
+    # ---------------------------------------------------------------------------- translation
+    def _translator(self) -> tuple["TranslationStore", "TranslationEngine"]:
+        """The main window's model store and engine (made on first use)."""
+        main = self.main_window or self
+        if main.translation_store is None:
+            main.translation_store = TranslationStore(os.path.join(main.data_dir, TRANSLATE_DIR), main)
+            main.translation_store.user_agent = main.profile.httpUserAgent()
+            main.translation_engine = TranslationEngine(main.translation_store, main)
+        return main.translation_store, main.translation_engine
+
+    def translate_target(self) -> str:
+        code = translation_language(str(self.settings.value("translateTarget", "") or ""))
+        return code or system_translation_language()
+
+    def _translate_list(self, key: str) -> list[str]:
+        try:
+            value = json.loads(str(self.settings.value(key, "[]") or "[]"))
+        except ValueError:
+            value = []
+        return [str(v) for v in value] if isinstance(value, list) else []
+
+    def _set_translate_list(self, key: str, value: str, on: bool, *_) -> None:
+        items = [v for v in self._translate_list(key) if v != value] + ([value] if on else [])
+        self.settings.setValue(key, json.dumps(sorted(set(items))))
+        view = self.current_view()
+        if view is not None:
+            self._sync_translate_button(view)
+
+    def _detect_page_language(self, view: "WebView") -> None:
+        url = view.url()
+        if url.scheme() not in ("http", "https") or getattr(view, "reader_on", False):
+            view.page_lang = ""
+            self._sync_translate_button(view)
+            return
+        address = url.toString()
+
+        def got(result) -> None:
+            try:
+                if view.url().toString() != address:
+                    return
+            except RuntimeError:
+                return
+            try:
+                data = json.loads(result) if isinstance(result, str) else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict) or data.get("translated"):
+                return
+            view.page_lang = detect_page_language(str(data.get("lang") or ""), str(data.get("text") or ""))
+            self._sync_translate_button(view)
+            tr = view.tr
+            target = self.translate_target()
+            if tr is not None and tr.get("state") == "carry" and view.page_lang == tr["from"]:
+                self.translate_view(view, tr["from"], tr["to"], ask=False)      # keeps going in this tab
+            elif (tr is None and view.page_lang and view.page_lang != target
+                  and view.page_lang in self._translate_list("translateAlways")
+                  and view.page_lang != getattr(view, "tr_declined", None)):
+                self.translate_view(view, view.page_lang, target, ask=False)
+        view.page().runJavaScript(TRANSLATE_DETECT_JS, APPLICATION_WORLD, got)
+
+    def _translate_offered(self, view: "WebView") -> bool:
+        lang = getattr(view, "page_lang", "")
+        if not lang or lang == self.translate_target() or view.url().scheme() not in ("http", "https"):
+            return False
+        if lang in self._translate_list("translateNever"):
+            return False
+        site = registrable_domain(view.url().host().lower())
+        return site not in self._translate_list("translateNeverSites")
+
+    def _sync_translate_button(self, view: "WebView") -> None:
+        if view is not self.current_view():
+            return
+        tr = view.tr
+        if tr is not None and tr.get("state") in ("downloading", "starting", "translating"):
+            self.address.set_translate("busy")
+        elif tr is not None and tr.get("state") == "on":
+            self.address.set_translate("on")
+        else:
+            self.address.set_translate("offer" if self._translate_offered(view) else None)
+
+    def show_translate_menu(self, *_) -> None:
+        view = self.current_view()
+        if view is None:
+            return
+        store, _engine = self._translator()
+        menu = prepare_menu(QMenu(self))
+        tr = view.tr
+        source = (tr or {}).get("from") or getattr(view, "page_lang", "") or ""
+        target = (tr or {}).get("to") or self.translate_target()
+        if tr is not None and tr.get("state") in ("downloading", "starting", "translating", "on"):
+            if tr.get("state") == "downloading":
+                self._add_action(menu, "Stop Downloading", partial(self.show_original, view))
+            self._add_action(menu, "Show Original", partial(self.show_original, view))
+        else:
+            label = (f"Translate From {language_name(source)} to {language_name(target)}" if source
+                     else f"Translate to {language_name(target)}")
+            self._add_action(menu, label, partial(self.translate_view, view, source or None, target),
+                             view.url().scheme() in ("http", "https"))
+        sources, targets = store.languages()
+        from_menu = prepare_menu(menu.addMenu("Translate From"))
+        for code in sources or ([source] if source else []):
+            action = from_menu.addAction(language_name(code))
+            action.setCheckable(True)
+            action.setChecked(code == source)
+            action.triggered.connect(lambda _on=False, c=code: self.translate_view(view, c, target))
+        if not sources:
+            from_menu.addSeparator()
+            self._add_action(from_menu, "More languages appear after your first translation", lambda: None, False)
+        to_menu = prepare_menu(menu.addMenu("Translate To"))
+        for code in targets or [target]:
+            action = to_menu.addAction(language_name(code))
+            action.setCheckable(True)
+            action.setChecked(code == target)
+            action.triggered.connect(lambda _on=False, c=code: self.set_translate_target(c, view))
+        if source and not self.private:
+            menu.addSeparator()
+            name = language_name(source)
+            self._add_toggle(menu, f"Always Translate {name}", source in self._translate_list("translateAlways"),
+                             partial(self._set_translate_list, "translateAlways", source))
+            self._add_toggle(menu, f"Never Offer to Translate {name}", source in self._translate_list("translateNever"),
+                             partial(self._set_translate_list, "translateNever", source))
+            site = registrable_domain(view.url().host().lower())
+            if site:
+                self._add_toggle(menu, f"Never Offer on {site}", site in self._translate_list("translateNeverSites"),
+                                 partial(self._set_translate_list, "translateNeverSites", site))
+        menu.addSeparator()
+        self._add_action(menu, "Translation Languages…", self.show_translation_settings)
+        self._popup_under(menu, self.address.translate_button)
+
+    def set_translate_target(self, code: str, view: "WebView | None" = None, *_) -> None:
+        if not self.private:
+            self.settings.setValue("translateTarget", code)
+        view = view or self.current_view()
+        if view is not None and view.tr is not None and view.tr.get("to") != code:
+            source = view.tr["from"]
+            self.show_original(view)
+            self.translate_view(view, source, code)
+        elif view is not None:
+            self._sync_translate_button(view)
+
+    def translate_view(self, view: "WebView | None" = None, source: str | None = None, target: str | None = None,
+                       ask: bool = True, *_) -> None:
+        """Translates a tab's page on this computer (downloading the language once, if need be)."""
+        view = view or self.current_view()
+        if view is None or view.url().scheme() not in ("http", "https"):
+            return
+        source = source or getattr(view, "page_lang", "") or ""
+        target = target or self.translate_target()
+        if view.tr is not None and view.tr.get("state") in ("downloading", "starting", "translating", "on"):
+            if view.tr.get("from") == source and view.tr.get("to") == target:
+                return
+            self.show_original(view)
+        if not source:
+            self.status_bubble.show_message("Huginn can't tell what language this page is in. Choose it under "
+                                            "Translate From.", 4000)
+            return
+        if source == target:
+            self.status_bubble.show_message(f"This page is already in {language_name(target)}", 3000)
+            return
+        store, _engine = self._translator()
+        view.tr_gen = getattr(view, "tr_gen", 0) + 1
+        gen = view.tr_gen
+        view.tr = {"from": source, "to": target, "state": "starting", "gen": gen}
+        view.tr_declined = None
+        self._sync_translate_button(view)
+
+        def have_list(error: str) -> None:
+            if not self._translate_alive(view, gen):
+                return
+            route = store.route(source, target)
+            if route is None:
+                view.tr = None
+                self._sync_translate_button(view)
+                self.status_bubble.show_message(error or f"Huginn can't translate {language_name(source)} to "
+                                                f"{language_name(target)} yet", 4500)
+                return
+            needed = store.needed(route)
+            if not needed:
+                self._translate_start(view, gen, route)
+                return
+            size = sum(f["size"] for f in needed)
+            if not ask:                                   # (never a download nobody asked for)
+                view.tr = None
+                self._sync_translate_button(view)
+                return
+            if ask:
+                names = " and ".join(dict.fromkeys(language_name(c) for s in route for c in (s["from"], s["to"])
+                                                   if c != "en" or (source == "en" or target == "en")))
+                dialog = SheetDialog(self, f"Download {names} for translation?",
+                                     f"Huginn translates on this computer with Mozilla's translation engine, the one "
+                                     f"in Firefox. It needs to download the files for this language once "
+                                     f"(about {max(1, round(size / 1_000_000))} MB). After that, pages are translated "
+                                     "here and nothing you read is sent anywhere.", ok="Download and Translate")
+                accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+                dialog.deleteLater()
+                if not accepted or not self._translate_alive(view, gen):
+                    view.tr = None
+                    self._sync_translate_button(view)
+                    return
+            view.tr["state"] = "downloading"
+            self._sync_translate_button(view)
+            self.status_bubble.show_message(f"Downloading {language_name(source)}…", 3000)
+
+            def progress(got: int, total: int) -> None:
+                if self._translate_alive(view, gen) and view is self.current_view():
+                    self.status_bubble.show_message(f"Downloading {language_name(source)}… "
+                                                    f"{min(100, round(100 * got / max(1, total)))}%", 1500)
+            store.progress.connect(progress)
+
+            def downloaded(error: str) -> None:
+                try:
+                    store.progress.disconnect(progress)
+                except (RuntimeError, TypeError):
+                    pass
+                if not self._translate_alive(view, gen):
+                    return
+                if error:
+                    view.tr = None
+                    self._sync_translate_button(view)
+                    self.status_bubble.show_message(error, 5000)
+                    return
+                self._translate_start(view, gen, route)
+            store.download(needed, downloaded)
+        store.fetch_records(have_list)
+
+    @staticmethod
+    def _translate_alive(view: "WebView", gen: int) -> bool:
+        try:
+            view.page()                                   # (a closed tab's page is gone)
+        except RuntimeError:
+            return False
+        return view.tr is not None and view.tr.get("gen") == gen
+
+    def _translate_start(self, view: "WebView", gen: int, route: list[dict]) -> None:
+        view.tr.update({"state": "translating", "route": route})
+        self._sync_translate_button(view)
+        if view is self.current_view():
+            self.status_bubble.show_message(f"Translating from {language_name(view.tr['from'])}…", 2500)
+        view.page().runJavaScript(TRANSLATE_PAGE_JS, APPLICATION_WORLD,
+                                  lambda *_: self._translate_more(view, gen))
+
+    def _translate_more(self, view: "WebView", gen: int) -> None:
+        if not self._translate_alive(view, gen):
+            return
+        _store, engine = self._translator()
+        limit, budget = TRANSLATE_BATCH
+
+        def collected(result) -> None:
+            if not self._translate_alive(view, gen):
+                return
+            try:
+                items = json.loads(result) if isinstance(result, str) else None
+            except ValueError:
+                items = None
+            if items is None:                             # the page went away under us
+                view.tr["state"] = "carry"
+                return
+            if not items:
+                if view.tr["state"] != "on":
+                    view.tr["state"] = "on"
+                    view.tr["auto"] = True
+                    self._sync_translate_button(view)
+                QTimer.singleShot(1500, self, partial(self._translate_follow, view, gen))
+                return
+
+            def translated(out, error: str, plain: bool = False) -> None:
+                if not self._translate_alive(view, gen):
+                    return
+                if out is None and not plain:             # once more, as plain text (no markup to trip on)
+                    text_only = [{"id": i["id"], "html": False,
+                                  "text": html.unescape(re.sub(r"<[^>]*>", "", i["text"])) if i.get("html") else i["text"]}
+                                 for i in items]
+                    engine.translate(view.tr["route"], text_only, partial(translated, plain=True))
+                    return
+                if out is None:
+                    view.tr = None
+                    self._sync_translate_button(view)
+                    self.status_bubble.show_message(f"Translation stopped: {error}", 5000)
+                    return
+                pairs = [[item["id"], text, plain] for item, text in zip(items, out)]
+                view.page().runJavaScript(f"window.__huginnTr ? __huginnTr.apply({json.dumps(pairs)}) : null",
+                                          APPLICATION_WORLD, lambda *_: self._translate_more(view, gen))
+            engine.translate(view.tr["route"], items, translated)
+        view.page().runJavaScript(f"window.__huginnTr ? __huginnTr.collect({limit}, {budget}) : null",
+                                  APPLICATION_WORLD, collected)
+
+    def _translate_follow(self, view: "WebView", gen: int) -> None:
+        """While a page is translated, what it adds (more posts, a new view) is translated too."""
+        if not self._translate_alive(view, gen) or view.tr.get("state") != "on":
+            return
+
+        def got(pending) -> None:
+            if not self._translate_alive(view, gen):
+                return
+            if isinstance(pending, (int, float)) and pending > 0:
+                self._translate_more(view, gen)
+            elif pending is None:
+                view.tr["state"] = "carry"
+            else:
+                QTimer.singleShot(1500, self, partial(self._translate_follow, view, gen))
+        view.page().runJavaScript("window.__huginnTr ? __huginnTr.pending() : null", APPLICATION_WORLD, got)
+
+    def show_original(self, view: "WebView | None" = None, *_) -> None:
+        view = view or self.current_view()
+        if view is None:
+            return
+        if view.tr is not None:
+            view.tr_declined = view.tr.get("from")
+            if view.tr.get("state") == "downloading":
+                store, _engine = self._translator()
+                store.cancel()
+        view.tr = None
+        view.page().runJavaScript("window.__huginnTr ? __huginnTr.restore() : null", APPLICATION_WORLD)
+        self._sync_translate_button(view)
+
+    def _translate_page_left(self, view: "WebView") -> None:
+        """A new page is loading in a translated tab: carry on there if it's the same language."""
+        if view.tr is not None:
+            view.tr_gen = getattr(view, "tr_gen", 0) + 1
+            if view.tr.get("auto") or view.tr.get("state") in ("on", "translating"):
+                view.tr = {"from": view.tr["from"], "to": view.tr["to"], "state": "carry", "gen": view.tr_gen}
+            else:
+                view.tr = None
+        view.page_lang = ""
+        self._sync_translate_button(view)
+
+    def show_translation_settings(self, *_) -> None:
+        store, engine = self._translator()
+        sheet = _Sheet(self, "Translation", "Pages are translated on this computer by Mozilla's translation engine. "
+                       "Each language is downloaded from Mozilla once, the first time you translate it.",
+                       width=520, ok="Done")
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("Translate to")
+        label.setObjectName("RowTitle")
+        h.addWidget(label, 1)
+        combo = QComboBox()
+        _sources, targets = store.languages()
+        target = self.translate_target()
+        for code in sorted(set(targets) | {target}, key=language_name):
+            combo.addItem(language_name(code), code)
+        combo.setCurrentIndex(max(0, combo.findData(target)))
+        combo.currentIndexChanged.connect(lambda i: self.set_translate_target(combo.itemData(i)))
+        combo.setEnabled(not self.private)
+        h.addWidget(combo)
+        sheet.body.addWidget(row)
+        heading = QLabel("On this computer")
+        heading.setObjectName("RowTitle")
+        sheet.body.addWidget(heading)
+        installed = store.installed()
+        if not installed:
+            empty = QLabel("No languages yet.")
+            empty.setObjectName("SheetBody")
+            sheet.body.addWidget(empty)
+        for entry in installed:
+            line = QWidget()
+            hl = QHBoxLayout(line)
+            hl.setContentsMargins(0, 0, 0, 0)
+            text = QLabel(f"{language_name(entry['from'])} → {language_name(entry['to'])} · "
+                          f"{max(1, round(entry['size'] / 1_000_000))} MB")
+            text.setObjectName("SheetBody")
+            hl.addWidget(text, 1)
+            remove = QPushButton("Remove")
+            remove.setObjectName("LinkButton")
+            remove.clicked.connect(lambda *_, p=entry["pair"], w=line: (engine.close_all(), store.remove(p), w.hide()))
+            hl.addWidget(remove)
+            sheet.body.addWidget(line)
+        always = self._translate_list("translateAlways")
+        if always:
+            note = QLabel("Always translated: " + ", ".join(language_name(c) for c in always) +
+                          ". Change it in the Translate menu on a page in that language.")
+            note.setObjectName("SheetNote")
+            note.setWordWrap(True)
+            sheet.body.addWidget(note)
+        self.translation_sheet = sheet
+        sheet.open()
+
+    # ---------------------------------------------------------------------------- Trails
+    def _trails(self) -> "Trails | None":
+        if self.private or self.app is not None:
+            return None
+        return getattr(self.main_window or self, "trails", None)
+
+    def _trail_step(self, view: "WebView", url: QUrl) -> None:
+        """A tab reached a page: a step on its trail (see Trails). Steps are kept by their place
+        in the tab's history, so Back and Forward (even from the page cache) go back to them."""
+        trails = self._trails()
+        profile = view.page().profile()
+        if trails is None or view.burner or (profile.isOffTheRecord() and profile is not self.profile):
+            view.trail_nav = None
+            return                                        # (a burner tab, even before it's marked as one)
+        if url.scheme() not in ("http", "https"):
+            if not (url.isEmpty() or url.toString() == "about:blank"):
+                view.trail_node = None                    # the Start Page and the like: the trail breaks
+            return
+        key = without_credentials(url).toString().split("#", 1)[0]
+        item = view.history().currentItem()
+        if not item.isValid() or without_credentials(item.url()).toString().split("#", 1)[0] != key:
+            return                                        # asked for, not there yet (load end will say)
+        nav, view.trail_nav = view.trail_nav, None
+        index = view.history().currentItemIndex()
+        known = trails.get(view.trail_steps.get(index))
+        if known is not None and known["url"] == key:     # Back, Forward, a reload
+            view.trail_node = known["id"]
+            return
+        current = trails.get(view.trail_node)
+        if current is not None and current["url"] == key:
+            return
+        kind = QWebEnginePage.NavigationType
+        if (known is not None and known is current
+                and nav in (None, kind.NavigationTypeRedirect, kind.NavigationTypeOther)):
+            trails.update(current, url=key, title="")      # the same visit, moved on (a redirect, replaceState)
+            return
+        if current is None and view.trail_from:
+            parent, via = view.trail_from, "tab"
+        elif nav == kind.NavigationTypeTyped:
+            parent, via = None, "typed"
+        else:
+            parent, via = (current["id"] if current is not None else None), "link"
+        view.trail_from = None
+        title = view.title().strip()
+        if title.startswith(("http://", "https://")) or (current is not None and title == current.get("title")):
+            title = ""                                    # (still the page before's)
+        view.trail_node = trails.add(key, title, parent, view.tab_id, via)["id"]
+        for later in [i for i in view.trail_steps if i > index]:
+            del view.trail_steps[later]                   # (that Forward history is gone)
+        view.trail_steps[index] = view.trail_node
+
+    def _trail_title(self, view: "WebView") -> None:
+        trails = self._trails()
+        step = trails.get(view.trail_node) if trails is not None else None
+        title = view.title().strip()
+        if (step is not None and title and not title.startswith(("http://", "https://"))
+                and without_credentials(view.url()).toString().split("#", 1)[0] == step["url"]):
+            trails.update(step, title=title[:300])
+
+    def show_trails(self, *_, focus: str | None = None) -> None:
+        """History > Trails. With `focus`, that page and the trail that led to it are picked out."""
+        trails = getattr(self.main_window or self, "trails", None)
+        if trails is None:
+            return
+        sheet = getattr(self, "trails_sheet", None)
+        if sheet is None:
+            sheet = self.trails_sheet = TrailsSheet(self, trails)
+        step = trails.get(focus)
+        sheet.focus_id = focus if step is not None else None
+        sheet.search.blockSignals(True)
+        sheet.search.clear()
+        sheet.search.blockSignals(False)
+        sheet.show_days(trail_day(step["t"]) if step is not None else None)
+        sheet.refresh()
+        valhalla = getattr(self, "valhalla", None)
+        if valhalla is not None and valhalla.isVisible():
+            valhalla.accept()
+        sheet.open()
+
+    def show_trail_here(self, *_) -> None:
+        """Page menu > How You Got Here."""
+        view = self.current_view()
+        self.show_trails(focus=view.trail_node if view is not None else None)
+
+    # ---------------------------------------------------------------------------- Heimdall
+    def _heimdall(self) -> "Heimdall | None":
+        return getattr(self.main_window or self, "heimdall", None)
+
+    def watch_current_page(self, *_) -> None:
+        """Page menu > Watch Page for Changes: with a selection, just the part you selected."""
+        view, heimdall = self.current_view(), self._heimdall()
+        if view is None or heimdall is None or self.private or view.burner:
+            return
+        url = QUrl(view.url())
+        if url.scheme() not in ("http", "https"):
+            return
+        if view.hasSelection():
+            view.page().runJavaScript(HEIMDALL_PICK_JS, APPLICATION_WORLD,
+                                      lambda picked, v=view, u=url: self._ask_watch(v, u, picked))
+        else:
+            self._ask_watch(view, url, "")
+
+    def _ask_watch(self, view: "WebView", url: QUrl, picked) -> dict | None:
+        heimdall = self._heimdall()
+        if heimdall is None:
+            return None
+        try:
+            part = json.loads(picked) if isinstance(picked, str) and picked else {}
+        except ValueError:
+            part = {}
+        selector = str(part.get("selector") or "") if isinstance(part, dict) else ""
+        snippet = str(part.get("text") or "") if isinstance(part, dict) else ""
+        dialog = SheetDialog(self, "Watch this page for changes?",
+                             f"Heimdall looks at it for you while {BROWSER_NAME} is open, and tells you when it "
+                             "changes. He visits on his own, without your cookies, so the site can't tell it's you "
+                             "(and pages you need to be signed in for can't be watched).", ok="Watch")
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 4, 0, 0)
+        label = QLabel("Look")
+        label.setObjectName("SheetBody")
+        h.addWidget(label)
+        every = QComboBox()
+        for minutes, text in HEIMDALL_EVERY:
+            every.addItem(text.lower() if text.startswith("Every") else text, minutes)
+        every.setCurrentIndex(every.findData(HEIMDALL_DEFAULT_EVERY))
+        h.addWidget(every)
+        h.addStretch(1)
+        dialog.add_widget(row)
+        only_part = None
+        if selector:
+            shown = snippet if len(snippet) <= 60 else snippet[:58].rstrip() + "…"
+            only_part = QCheckBox(f"Only the part you selected: “{shown}”")
+            only_part.setChecked(True)
+            dialog.add_widget(only_part)
+        dialog.every_field, dialog.part_field = every, only_part
+        accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+        minutes = every.currentData()
+        just_part = only_part is not None and only_part.isChecked()
+        dialog.deleteLater()
+        if not accepted:
+            return None
+        title = view.title() if heimdall_url(view.url()) == heimdall_url(url) else ""
+        watch = heimdall.add(url, title, selector if just_part else "", snippet if just_part else "", int(minutes))
+        self.status_bubble.show_message("Heimdall is watching this page", 3000)
+        return watch
+
+    def stop_watching(self, watch_id: str, *_) -> None:
+        heimdall = self._heimdall()
+        if heimdall is not None:
+            heimdall.remove(watch_id)
+            self.status_bubble.show_message("Heimdall stopped watching it", 3000)
+
+    def show_heimdall(self, *_) -> None:
+        heimdall = self._heimdall()
+        if heimdall is None:
+            return
+        sheet = getattr(self, "heimdall_sheet", None)
+        if sheet is None:
+            sheet = self.heimdall_sheet = HeimdallSheet(self, heimdall)
+        sheet.refresh()
+        sheet.open()
+
+    def show_heimdall_changes(self, watch_id: str, *_) -> None:
+        heimdall = self._heimdall()
+        watch = heimdall.get(watch_id) if heimdall is not None else None
+        if watch is None:
+            return
+        listing = getattr(self, "heimdall_sheet", None)
+        if listing is not None and listing.isVisible():
+            listing.accept()
+        heimdall.mark_read(watch_id)
+        sheet = HeimdallChangesSheet(self, watch)
+        sheet.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.heimdall_changes_sheet = sheet
+        sheet.open()
+
+    def open_heimdall_page(self, watch_id: str, *_) -> "BrowserWindow | None":
+        """The watched page in a tab of the main window (the one already open, if it is)."""
+        main = self.main_window or self
+        heimdall = main._heimdall()
+        watch = heimdall.get(watch_id) if heimdall is not None else None
+        if watch is None:
+            return None
+        for sheet in (getattr(self, "heimdall_sheet", None), getattr(self, "heimdall_changes_sheet", None)):
+            try:
+                if sheet is not None and sheet.isVisible():
+                    sheet.accept()
+            except RuntimeError:
+                pass
+        main.ensure_shown()
+        for i in range(main.tabs.count()):
+            view = main.tabs.widget(i)
+            if view is not None and heimdall_url(view.url()) == watch["url"]:
+                main.select_tab(i)
+                break
+        else:
+            main.add_tab(QUrl(watch["url"]))
+        main.raise_()
+        main.activateWindow()
+        return main
+
+    def open_heimdall_change(self, watch_id: str, *_) -> None:
+        """A notification was clicked: the page, with what changed over it."""
+        main = self.open_heimdall_page(watch_id)
+        if main is not None:
+            main.show_heimdall_changes(watch_id)
+
+    def _heimdall_noticed(self, watch: dict, added: list, removed: list) -> None:
+        name = watch.get("title") or bare_host(QUrl(watch["url"]))
+        if added:
+            first = added[0] if len(added[0]) <= 110 else added[0][:108].rstrip() + "…"
+            body = f"“{first}”"
+        else:
+            body = "Something was taken off it."
+        rest = len(added) + len(removed) - 1
+        if rest > 0:
+            body += f" And {rest} more change{'s' if rest != 1 else ''}."
+        self.status_bubble.show_message(f"Heimdall: {name} changed", 5000)
+        show_system_notification(self, f"{BROWSER_NAME} · Heimdall", f"{name} changed", body,
+                                 "huginn" if IS_LINUX else "", partial(self.open_heimdall_change, watch["id"]),
+                                 lambda: None)
+
+    # ---------------------------------------------------------------------------- Forget on Close
+    def forget_sites(self) -> set[str]:
+        return load_site_list(self.settings, FORGET_SITES_KEY)
+
+    def set_forget_site(self, host: str, on: bool, *_) -> None:
+        site = registrable_domain(host.lower())
+        sites = self.forget_sites()
+        sites = sites | {site} if on else sites - {site}
+        self.settings.setValue(FORGET_SITES_KEY, json.dumps(sorted(sites)))
+        if on:                                            # the tab you're looking at counts as visited
+            view = self.current_view()
+            if view is not None and registrable_domain(view.url().host().lower()) == site:
+                self._note_forget_origin(view.url())
+
+    def _note_forget_origin(self, url: QUrl) -> None:
+        """A forgettable site's origin was visited: remember to wipe it (even across a crash)."""
+        if url.scheme() not in ("http", "https") or self.private:
+            return
+        if registrable_domain(url.host().lower()) not in self.forget_sites():
+            return
+        origin = f"{url.scheme()}://{url.authority()}"
+        pending = load_site_list(self.settings, FORGET_PENDING_KEY)
+        if origin.lower() not in pending:
+            self.settings.setValue(FORGET_PENDING_KEY, json.dumps(sorted(pending | {origin.lower()})))
+
+    def _sites_open(self) -> set[str]:
+        """Sites with a tab open in the main window or a web app (the shared profile)."""
+        main = self.main_window or self
+        open_sites = set()
+        for window in main.all_windows():
+            if window.private:
+                continue
+            for view in window.views():
+                url = view.url() if view.pending is None else QUrl(view.pending["url"])
+                if url.scheme() in ("http", "https"):
+                    open_sites.add(registrable_domain(url.host().lower()))
+        return open_sites
+
+    def forget_pending(self, *_, sites: set[str] | None = None) -> int:
+        """Wipes forgettable sites with no tab open (all of `sites`, or every pending one)."""
+        main = self.main_window or self
+        if main is not self:
+            return main.forget_pending(sites=sites)
+        forget = self.forget_sites()
+        pending = load_site_list(self.settings, FORGET_PENDING_KEY)
+        still_open = self._sites_open()
+        doomed = {o for o in pending
+                  if registrable_domain(QUrl(o).host().lower()) in forget
+                  and registrable_domain(QUrl(o).host().lower()) not in still_open
+                  and (sites is None or registrable_domain(QUrl(o).host().lower()) in sites)}
+        stale = {o for o in pending if registrable_domain(QUrl(o).host().lower()) not in forget}
+        if not doomed and not stale:
+            return 0
+        self.settings.setValue(FORGET_PENDING_KEY, json.dumps(sorted(pending - doomed - stale)))
+        if not doomed:
+            return 0
+        self.cookies.delete_for_sites({registrable_domain(QUrl(o).host().lower()) for o in doomed})
+        if getattr(self, "_wiper", None) is None:
+            self._wiper = SiteDataWiper(self.profile, self)
+        self._wiper.wipe(sorted(doomed))
+        return len(doomed)
+
+    def _left_sites(self, sites: set[str]) -> None:
+        """A tab closed or moved on: the sites it was on may now have no tab open."""
+        sites = {s for s in sites if s} & self.forget_sites()
+        if sites:
+            QTimer.singleShot(0, self, partial(self.forget_pending, sites=sites))
+
+    def show_forget_sites(self, *_) -> None:
+        sheet = _Sheet(self, "Forget on Close", "These sites' cookies and stored data go when their last tab "
+                       "closes, so they don't remember you next time. Turn it on for a site in its page menu.",
+                       width=460, ok="Done")
+        sites = sorted(self.forget_sites())
+        if not sites:
+            empty = QLabel("No sites yet.")
+            empty.setObjectName("SheetBody")
+            sheet.body.addWidget(empty)
+        for site in sites:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(QLabel(site), 1)
+            remove = QPushButton("Remove")
+            remove.setObjectName("LinkButton")
+            remove.clicked.connect(lambda *_, s=site, r=row: (self.set_forget_site(s, False), r.hide()))
+            h.addWidget(remove)
+            sheet.body.addWidget(row)
+        sheet.open()
 
     def set_keep_cookies(self, host: str, keep: bool, *_) -> None:
         site = registrable_domain(host.lower())
@@ -17481,6 +23552,12 @@ class BrowserWindow(QWidget):
                 ("Greet in Old Norse" if not self.start_handler.norse else "Greet in English", "sidebar",
                  partial(self.set_norse_greeting, not self.start_handler.norse)),
                 ("New Burner Tab", "flame", self.new_burner_tab), ("Valhalla — Closed Tabs", "valhalla", self.show_valhalla),
+                ("Heimdall — Watched Pages", "watch", self.show_heimdall), ("Trails", "trail", self.show_trails),
+                ("Translate Page", "translate", self.translate_view), ("Show Original (Not Translated)", "translate", self.show_original),
+                ("Translation Languages", "translate", self.show_translation_settings),
+                ("Bifröst Sync", "bifrost", self.show_bifrost), ("Tabs on Your Other Devices", "bifrost", self.show_bifrost_tabs),
+                ("Mímir — Ask About This Page", "mimir", self.show_mimir), ("Summarize with Mímir", "mimir", self.summarize_with_mimir),
+                ("Ask Mímir About Your History", "mimir", self.ask_mimir_history),
                 ("Read Aloud", "voice", self.read_aloud), ("Site Style", "palette", self.show_site_style),
                 ("Focus Hours", "moon", self.show_focus_settings),
                 ("Add Web Panel", "panel", self.add_web_panel),
@@ -17924,13 +24001,13 @@ class BrowserWindow(QWidget):
                    else QWebEngineProfile(app))
         self._setup_profile(profile)
         self._containers[name] = profile
-        self._container_cookies[name] = CookieKeeper(profile.cookieStore(), self)
+        self._container_cookies[name] = CookieKeeper(profile, self)
         return profile
 
     def set_group_separate(self, index: int, on: bool, *_) -> None:
         """Gives a tab group its own cookies and site data (its own logins), or shares the
         main ones again. Its tabs reopen in the new place (pages reload)."""
-        if self.private or index <= 0 or index >= len(self.groups):
+        if self.secondary or index <= 0 or index >= len(self.groups):
             return
         group = self.groups[index]
         if bool(group.get("container")) == bool(on):
@@ -17981,7 +24058,7 @@ class BrowserWindow(QWidget):
 
     def _muninn_capture(self, view: "WebView", url: str) -> None:
         try:
-            if (self.private or view.burner or not self.prefs.get("rememberPages") or self.muninn is None
+            if (self.private or self.app or view.burner or not self.prefs.get("rememberPages") or self.muninn is None
                     or view.url().toString() != url or view.loading):
                 return
         except RuntimeError:
@@ -18004,7 +24081,7 @@ class BrowserWindow(QWidget):
 
     # ---------------------------------------------------------------------------- Valhalla
     def _to_valhalla(self, view: "WebView") -> None:
-        if self.private or view.burner:
+        if self.private or self.app or view.burner:
             return
         url = without_credentials(view.tab_url())
         if url.scheme() in ("http", "https", "file"):
@@ -18606,6 +24683,8 @@ class BrowserWindow(QWidget):
 
     # ---------------------------------------------------------------------------- privacy settings
     def _title_suffix(self) -> str:
+        if self.app:
+            return str(self.app.get("name") or BROWSER_NAME)
         if self.private:
             return f"Private Browsing — {BROWSER_NAME}"
         groups = getattr(self, "groups", None)
@@ -18644,6 +24723,9 @@ class BrowserWindow(QWidget):
         self.start_handler.tracking_prevention = guard.enabled
         if changed:
             self._refresh_start_pages()
+        service = getattr(self, "desktop_service", None)
+        if service is not None:                           # the main window's: on or off with the switch
+            service.start() if prefs.get("shareWithDesktop") else service.stop()
 
     # ---------------------------------------------------------------------------- ad blocking
     def _on_filters_changed(self) -> None:
@@ -18797,6 +24879,8 @@ class BrowserWindow(QWidget):
         self._sync_isolated_scripts()
         if manager is not None:
             manager.changed.connect(self._on_passwords_changed)
+            if not self.secondary:
+                manager.changed.connect(self._bifrost_touch)      # (unlocked: what waited for it syncs)
 
     def _on_passwords_changed(self) -> None:
         if self.passwords is not None and self.passwords.vault.locked():
@@ -19519,7 +25603,7 @@ class BrowserWindow(QWidget):
 
     # ---------------------------------------------------------------------------- history & website data
     def show_clear_history_dialog(self) -> None:
-        if self.private:                                # history lives with the main window
+        if self.secondary:                              # history lives with the main window
             self.main_window.show_clear_history_dialog()
             return
         dialog = SheetDialog(self, "Clear History",
@@ -19543,18 +25627,42 @@ class BrowserWindow(QWidget):
             self.clear_history(history_cutoff(combo.currentData()))
         dialog.deleteLater()
 
+    def _clear_http_cache(self, profile: QWebEngineProfile) -> None:
+        """Empties a profile's cache. Qt leaves a page that starts loading while it does that
+        hanging for good, so pages that started meanwhile load again once it's done."""
+        started = time.monotonic()
+
+        def done() -> None:
+            try:
+                profile.clearHttpCacheCompleted.disconnect(done)
+            except (RuntimeError, TypeError):
+                pass
+            for window in (self.main_window or self).all_windows():
+                for view in window.views():
+                    if view.loading and getattr(view, "load_started_at", 0) >= started - 0.05:
+                        view.setUrl(QUrl(view.url()))
+        if hasattr(profile, "clearHttpCacheCompleted"):
+            profile.clearHttpCacheCompleted.connect(done)
+        profile.clearHttpCache()
+
     def clear_history(self, since: float | None = None) -> None:
         """History from `since` on (all of it when None) plus what reveals it: those sites'
         cookies and icons, the tracker log's site names, visited-link colouring, the cache
         and the reopen-closed-tab list. Clearing everything also erases local storage and
         the like on the next launch (WebEngine keeps those files open while running)."""
-        if self.private:
+        if self.secondary:
             self.main_window.clear_history(since)
             return
         removed = self.store.clear_history(since)
         hosts = {QUrl(e["url"]).host() for e in removed}
         if self.muninn is not None:
             self.muninn.forget_since(since)
+        if self.trails is not None:
+            self.trails.clear(since)
+            for window in self.all_windows():             # tabs start fresh trails
+                for view in window.views():
+                    view.trail_node = view.trail_from = None
+                    view.trail_steps.clear()
         self.store.closed_tabs = [e for e in self.store.closed_tabs if since is not None and e["time"] < since]
         favicons = self.start_handler.favicons
         if since is None:
@@ -19576,9 +25684,9 @@ class BrowserWindow(QWidget):
                 profile.clearAllVisitedLinks()
             else:
                 keeper.delete_for_sites({registrable_domain(h) for h in hosts if h})
-            profile.clearHttpCache()
+            self._clear_http_cache(profile)
         self.store.clear_tracker_sites(since)
-        self.profile.clearHttpCache()
+        self._clear_http_cache(self.profile)
         for window in self.all_windows():
             window._closed_tabs.clear()
             window._refresh_start_pages()
@@ -19621,6 +25729,9 @@ class BrowserWindow(QWidget):
     # ---------------------------------------------------------------------------- site permissions
     def _on_permission_requested(self, view: WebView, permission) -> None:
         name = permission.permissionType().name
+        if name == "Notifications" and self.app is not None:    # an installed web app may ask
+            QTimer.singleShot(0, self, partial(self._answer_app_notifications, permission))
+            return
         if name not in PERMISSION_INFO:
             # Notifications (and anything unknown) are refused quietly; the refusal isn't
             # stored, so turning this into a prompt later stays possible.
@@ -19682,6 +25793,31 @@ class BrowserWindow(QWidget):
         return len(doomed)
 
     # ---------------------------------------------------------------------------- certificates & https
+    def _on_webauth_requested(self, view: WebView, request) -> None:
+        """A site asks for a passkey or security key: show what to do, in its tab's window."""
+        index = self.tabs.indexOf(view)
+        if index < 0:
+            request.cancel()
+            return
+        old = getattr(view, "passkey_sheet", None)
+        if old is not None:
+            try:
+                old.reject()
+            except RuntimeError:
+                pass
+        if index != self.tabs.currentIndex():
+            self.select_tab(index)
+        try:
+            party = str(request.relyingPartyId() or "")       # (the site the passkey belongs to)
+        except (AttributeError, RuntimeError):
+            party = ""
+        site = party or origin_label(view.url())
+        sheet = PasskeySheet(self, request, site)
+        view.passkey_sheet = sheet
+        sheet.finished.connect(lambda *_: (setattr(view, "passkey_sheet", None), sheet.deleteLater()))
+        if not sheet.result() and sheet.state() not in ("Completed", "Cancelled"):
+            sheet.open()
+
     def _on_certificate_error(self, view: WebView, error) -> None:
         url = error.url()
         key = (url.host().lower(), int(error.type().value))
@@ -19910,6 +26046,16 @@ class BrowserWindow(QWidget):
             menu.addAction(row)
         if url.scheme() in ("http", "https"):
             self._add_action(menu, "Site Style…", self.show_site_style).setIcon(self.icons.icon("palette", sec))
+            self._add_action(menu, "Summarize with Mímir", self.summarize_with_mimir).setIcon(self.icons.icon("mimir", sec))
+            if view is not None and view.tr is not None and view.tr.get("state") != "carry":
+                self._add_action(menu, "Show Original (Not Translated)", partial(self.show_original, view)).setIcon(
+                    self.icons.icon("translate", self.theme["accent"]))
+            else:
+                lang = getattr(view, "page_lang", "") if view is not None else ""
+                target = self.translate_target()
+                self._add_action(menu, f"Translate to {language_name(target)}…" if lang != target else "Translate…",
+                                 self.show_translate_menu if lang == target or not lang else
+                                 partial(self.translate_view, view, lang, target)).setIcon(self.icons.icon("translate", sec))
         video = prepare_menu(menu.addMenu("Video"))
         video.setIcon(self.icons.icon("speed", sec))
         video.setEnabled(view is not None)
@@ -19947,6 +26093,33 @@ class BrowserWindow(QWidget):
                          url.scheme() in ("http", "https")).setIcon(self.icons.icon("reading", sec))
         self._add_action(menu, "Copy Link", lambda: QGuiApplication.clipboard().setText(self.shareable_link(url)),
                          url.scheme() in ("http", "https", "file")).setIcon(self.icons.icon("link", sec))
+        trails = self._trails()
+        here = trails.get(view.trail_node) if trails is not None and view is not None else None
+        if here is not None and here.get("parent") and trails.get(here["parent"]) is not None:
+            self._add_action(menu, "How You Got Here…", self.show_trail_here).setIcon(self.icons.icon("trail", sec))
+        heimdall = self._heimdall()
+        if url.scheme() in ("http", "https") and not self.private and heimdall is not None and not view.burner:
+            watch = heimdall.find(url)
+            if watch is None:
+                self._add_action(menu, "Watch Selection for Changes…" if view.hasSelection() else
+                                 "Watch Page for Changes…", self.watch_current_page).setIcon(self.icons.icon("watch", sec))
+            else:
+                watched = prepare_menu(menu.addMenu("Watched by Heimdall" + (" · Changed" if watch.get("unread") else "")))
+                watched.setIcon(self.icons.icon("watch", self.theme["accent"] if watch.get("unread") else sec))
+                self._add_action(watched, "Show Changes…", partial(self.show_heimdall_changes, watch["id"]),
+                                 bool(watch.get("changes")))
+                self._add_action(watched, "Check Now", partial(heimdall.check_now, watch["id"]))
+                self._add_action(watched, "All Watched Pages…", self.show_heimdall)
+                watched.addSeparator()
+                self._add_action(watched, "Stop Watching This Page", partial(self.stop_watching, watch["id"]))
+        if url.scheme() in ("http", "https") and not self.private:
+            installed = web_app_for_origin(self.web_apps(), url)
+            if installed is not None:
+                self._add_action(menu, f"Open in {installed['name']} App", partial(self.open_web_app, installed["id"])
+                                 ).setIcon(self.icons.icon("app", sec))
+            else:
+                self._add_action(menu, f"Install {bare_display_host(url) or 'Site'} as App…",
+                                 self.install_current_as_app).setIcon(self.icons.icon("app", sec))
         menu.addSeparator()
         # -- privacy
         self._add_action(menu, "Privacy && Security…\tCtrl+,", self.show_privacy_settings).setIcon(  # && shows one &
@@ -19974,6 +26147,11 @@ class BrowserWindow(QWidget):
             self._add_toggle(settings, "Game Mode (when a game is full screen)",
                              self.settings.value("gameMode", True, type=bool), self.set_game_mode)
         self._add_action(settings, "Focus Hours…", self.show_focus_settings)
+        self._add_action(settings, "Translation…", self.show_translation_settings)
+        if self._bifrost() is not None and not self.private:
+            self._add_action(settings, "Bifröst Sync…", self.show_bifrost)
+        if not self.private:
+            self._add_action(settings, "Web Apps…", self.show_web_apps)
         buttons = prepare_menu(settings.addMenu("Window Buttons"))
         button_group = QActionGroup(buttons)
         for key, label in WINDOW_BUTTON_STYLES.items():
@@ -20067,6 +26245,13 @@ class BrowserWindow(QWidget):
         self._add_action(tools, "Welcome Tour", self.show_welcome).setIcon(self.icons.icon("sparkle", sec))
         if not self.private:
             self._add_action(tools, "Valhalla — Closed Tabs", self.show_valhalla).setIcon(self.icons.icon("valhalla", sec))
+            if self._trails() is not None:
+                self._add_action(tools, "Trails — How You Got Here", self.show_trails).setIcon(self.icons.icon("trail", sec))
+            if self._bifrost() is not None:
+                self._add_action(tools, "Bifröst Sync", self.show_bifrost).setIcon(self.icons.icon("bifrost", sec))
+            self._add_action(tools, "Mímir — Ask Your Assistant", self.show_mimir).setIcon(self.icons.icon("mimir", sec))
+            if self._heimdall() is not None:
+                self._add_action(tools, "Heimdall — Watched Pages", self.show_heimdall).setIcon(self.icons.icon("watch", sec))
             if self.sidebar.panels_enabled:
                 self._add_action(tools, "Add Page as Web Panel", self.add_web_panel,
                                  url.scheme() in ("http", "https")).setIcon(self.icons.icon("panel", sec))
@@ -20158,6 +26343,10 @@ class BrowserWindow(QWidget):
             if not self.private:
                 self._add_toggle(details, f"Auto-Play Videos on {site}", self.autoplay_allowed(url.host()),
                                  partial(self.set_site_autoplay, url.host()))
+            if not self.private:
+                self._add_toggle(details, f"Forget {site} When Its Tabs Close",
+                                 registrable_domain(url.host().lower()) in self.forget_sites(),
+                                 partial(self.set_forget_site, url.host()))
             if self.prefs.get("clearCookiesOnQuit") and not self.private:
                 self._add_toggle(details, f"Keep Me Signed In to {site}",
                                  registrable_domain(url.host().lower()) in self.keep_cookie_sites(),
@@ -20256,6 +26445,15 @@ class BrowserWindow(QWidget):
         return path
 
     def _on_download_requested(self, download: QWebEngineDownloadRequest) -> None:
+        page = download.page()
+        if page is not None and self.app is None:
+            for window in self._app_windows:              # from a web app: its window shows it
+                try:
+                    if any(view.page() is page for view in window.views()):
+                        window._on_download_requested(download)
+                        return
+                except RuntimeError:
+                    continue
         target = os.path.normpath(os.path.join(download.downloadDirectory(), download.downloadFileName()))
         offline = {os.path.normpath(k): k for k in self._offline_saves}
         if download.isSavePageDownload() and target in offline:
@@ -20562,6 +26760,7 @@ class BrowserWindow(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._shown_once = True                          # (only a web app's launch keeps it hidden at first)
         if self._qwindow is None or self._qwindow is not self.windowHandle():
             self._install_window_hooks()
         self._update_frame_margins()
@@ -20582,7 +26781,360 @@ class BrowserWindow(QWidget):
                     QTimer.singleShot(400, self._check_default_after_settings)
         super().changeEvent(event)
 
+    # ---------------------------------------------------------------------------- web apps
+    def _enter_app_mode(self) -> None:
+        """A web app's window: no sidebar, address field or tab strip. Its name sits in the middle
+        of the title bar, Back and Forward on the left, Reload and its menu on the right."""
+        app, bar = self.app, self.toolbar
+        bar.capsules[0].hide()
+        bar.capsules[2].hide()
+        bar.address.hide()
+        self.sidebar.hide()
+        self.app_title = QLabel(str(app.get("name", "")))
+        self.app_title.setObjectName("AppTitle")
+        self.app_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.app_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)  # drags the window
+        layout = bar.layout()
+        layout.insertWidget(layout.indexOf(bar.address), self.app_title)
+        self.app_reload_button = capsule_button("reload", "Reload (Ctrl+R)")
+        self.app_reload_button.clicked.connect(lambda *_: self.reload())
+        self.app_menu_button = capsule_button("more", f"{app.get('name', '')} menu")
+        self.app_menu_button.clicked.connect(lambda *_: self.show_app_menu())
+        capsule = Capsule([self.app_reload_button, self.app_menu_button], dividers=(0,))
+        bar.capsules.append(capsule)
+        right = bar._right.layout()
+        right.insertWidget(right.indexOf(bar.capsules[2]) + 1, capsule)
+        bar._fit_sides()
+        self.tabs.setTabBarAutoHide(True)
+        keep = {"Ctrl+W", "Ctrl+F4", "Ctrl+R", "F5", "Alt+Left", "Ctrl+[", "Alt+Right", "Ctrl+]", "Ctrl+F", "F3",
+                "Ctrl+G", "Shift+F3", "Ctrl+Shift+G", "F11", "Meta+Ctrl+F", "Ctrl+=", "Ctrl++", "Ctrl+-", "Ctrl+0",
+                "F12", "Ctrl+Shift+I", "Ctrl+Alt+I", "Ctrl+Q", "Ctrl+J", "Ctrl+M", "Meta+M", "Ctrl+Shift+N",
+                "Ctrl+,", "Ctrl+Shift+P", "Ctrl+P", "Esc"}
+        for shortcut in self.findChildren(QShortcut):
+            if shortcut is not self._escape_shortcut and shortcut.key().toString() not in keep:
+                shortcut.setEnabled(False)               # tabs, sidebar, address field: not in an app
+        icon = self.web_app_icon(app)
+        if not icon.isNull():
+            self.setWindowIcon(icon)
+
+    def web_app_icon(self, app: dict) -> QIcon:
+        path = os.path.join(self.data_dir, WEB_APPS_DIR, f"{app['id']}.png")
+        return QIcon(path) if os.path.isfile(path) else QIcon()
+
+    def _close_app_window(self) -> None:
+        if not self.isFullScreen() and not self.isMaximized():
+            self.settings.setValue(f"webAppGeometry/{self.app['id']}", self.saveGeometry())
+        sites = {getattr(view, "site", "") for view in self.views()}
+        main = self.main_window
+        if main is not None and main.isVisible():
+            for view in self.views():                     # gone with the window
+                view.site = ""
+            main._left_sites(sites)
+        self.store.flush()
+
+    def _desktop_changed(self) -> None:
+        service = getattr(self.main_window or self, "desktop_service", None)
+        if service is not None and not self.private:
+            service.changed()
+        if not self.private:
+            self._bifrost_touch()                          # (open tabs, for your other devices)
+
+    def ensure_shown(self) -> None:
+        """The main window on screen. A web app may have started Huginn without it: its tabs
+        are restored the first time it's needed."""
+        main = self.main_window or self
+        if not main._shown_once:
+            main._shown_once = True
+            restored = bool(main.restore_tabs) and main.restore_session()
+            if not restored and not main.tabs.count():
+                main.add_tab(QUrl(START_URL))
+        if main.isMinimized():
+            main.setWindowState(main.windowState() & ~Qt.WindowState.WindowMinimized)
+        main.show()
+
+    def web_apps(self) -> list[dict]:
+        return load_web_apps(self.settings)
+
+    def open_web_app(self, app_id: str) -> "BrowserWindow | None":
+        main = self.main_window or self
+        app = next((a for a in self.web_apps() if a["id"] == app_id), None)
+        if app is None:
+            main.ensure_shown()
+            main.status_bubble.show_message("That web app isn't installed any more.", 4000)
+            return None
+        for window in main.all_windows():
+            if window.app is not None and window.app["id"] == app_id:
+                if window.isMinimized():
+                    window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return window
+        window = create_app_window(main, app)
+        main._app_windows.append(window)
+        window.add_tab(QUrl(app["url"]))
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        return window
+
+    def open_in_huginn(self, url: QUrl | None = None) -> None:
+        """From a web app: this page (or a link that leaves the app) in a tab of Huginn."""
+        main = self.main_window or self
+        view = self.current_view()
+        target = QUrl(url) if url is not None else (view.url() if view is not None else QUrl(START_URL))
+        main.ensure_shown()
+        main.add_tab(target)
+        main.raise_()
+        main.activateWindow()
+
+    def show_app_menu(self) -> None:
+        app, view = self.app, self.current_view()
+        sec = self.theme["text_secondary"]
+        menu = prepare_menu(QMenu(self))
+        self._add_action(menu, "Back", self.go_back, view is not None and view.history().canGoBack())
+        self._add_action(menu, "Forward", self.go_forward, view is not None and view.history().canGoForward())
+        self._add_action(menu, "Reload", self.reload)
+        menu.addSeparator()
+        self._add_action(menu, f"Open in {BROWSER_NAME}", self.open_in_huginn).setIcon(self.icons.icon("open_in", sec))
+        self._add_action(menu, "Copy Link", self.copy_current_url).setIcon(self.icons.icon("link", sec))
+        self._add_action(menu, "Find on Page…\tCtrl+F", self.show_find_bar).setIcon(self.icons.icon("search", sec))
+        zoom = prepare_menu(menu.addMenu("Zoom"))
+        self._add_action(zoom, "Zoom In\tCtrl++", self.zoom_in)
+        self._add_action(zoom, "Zoom Out\tCtrl+-", self.zoom_out)
+        self._add_action(zoom, "Actual Size\tCtrl+0", self.zoom_reset)
+        menu.addSeparator()
+        current = next((a for a in self.web_apps() if a["id"] == app["id"]), app)
+        self._add_toggle(menu, "Show Notifications", current.get("notify") == "allow",
+                         partial(self.set_web_app_notifications, app["id"]))
+        self._add_action(menu, f"Remove {app.get('name', 'this app')}…", partial(self.uninstall_web_app, app["id"]))
+        menu.addSeparator()
+        self._add_action(menu, f"Quit {BROWSER_NAME}\tCtrl+Q", self.quit_all)
+        self._popup_under(menu, self.app_menu_button)
+
+    def copy_current_url(self, *_) -> None:
+        view = self.current_view()
+        if view is not None:
+            QGuiApplication.clipboard().setText(without_credentials(view.url()).toString())
+            self.status_bubble.show_message("Link copied", 1800)
+
+    def install_current_as_app(self, *_) -> None:
+        """Page menu > Install as App: reads what the page says about itself (its manifest's
+        name, icon, start page), then asks."""
+        view = self.current_view()
+        if view is None or view.url().scheme() not in ("http", "https") or self.private:
+            return
+        page = view.page()
+        page.runJavaScript("window.__huginnAppInfo = null; " + WEB_APP_INFO_JS +
+                           ".then(r => window.__huginnAppInfo = r, () => window.__huginnAppInfo = '{}');",
+                           APPLICATION_WORLD)
+        started = time.monotonic()
+
+        def poll() -> None:
+            def got(result) -> None:
+                if result:
+                    try:
+                        info = json.loads(result)
+                    except ValueError:
+                        info = {}
+                    self._ask_install_app(view, info)
+                elif time.monotonic() - started < 6:
+                    QTimer.singleShot(120, self, poll)
+                else:
+                    self._ask_install_app(view, {})
+            try:
+                page.runJavaScript("window.__huginnAppInfo", APPLICATION_WORLD, got)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(150, self, poll)
+
+    def _ask_install_app(self, view: "WebView", info: dict) -> dict | None:
+        url = view.url()
+        host = bare_host(url)
+        start = QUrl(str(info.get("start") or ""))
+        if not (start.isValid() and start.scheme() == url.scheme() and start.authority() == url.authority()):
+            start = url
+        scope = web_app_scope(start.toString(), str(info.get("scope") or ""))
+        if not web_app_in_scope({"url": start.toString(), "scope": scope}, url):
+            scope = web_app_scope(start.toString())
+        title = re.split(r"\s+[|\-–—·:]\s+", view.title().strip())[0] if view.title().strip() else ""
+        name = str(info.get("name") or info.get("appName") or title or host).strip()[:40] or host
+        theme = str(info.get("theme") or "")
+        image = QImage()
+        data = str(info.get("icon") or "")
+        if data.startswith("data:image") and "," in data:
+            image.loadFromData(base64.b64decode(data.split(",", 1)[1] + "=="))
+        if image.isNull() and not view.icon().isNull():
+            image = view.icon().pixmap(256, 256).toImage()
+        if image.isNull() or image.width() < 48:
+            image = letter_icon(name, theme or self.theme["accent"])
+        image = square_icon(image)
+        dialog = SheetDialog(self, f"Install {host} as an app?",
+                             f"It opens in its own window, without the address field, and gets its own icon in "
+                             f"{'your Start menu' if IS_WINDOWS else 'Applications' if IS_MAC else 'your apps menu'}. "
+                             f"You stay signed in, {BROWSER_NAME}'s protections still apply, and links to other "
+                             f"sites open in {BROWSER_NAME}.", ok="Install")
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 6, 0, 0)
+        preview = QLabel()
+        preview.setPixmap(QPixmap.fromImage(image.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
+                                                         Qt.TransformationMode.SmoothTransformation)))
+        h.addWidget(preview)
+        field = QLineEdit(name)
+        field.setObjectName("SheetInput")
+        field.setMaxLength(40)
+        h.addWidget(field, 1)
+        dialog.add_widget(row)
+        dialog.name_field = field
+        accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+        name = field.text().strip() or name
+        dialog.deleteLater()
+        if not accepted:
+            return None
+        return self.install_web_app(name, start.toString(), scope, theme, image)
+
+    def install_web_app(self, name: str, url: str, scope: str, theme: str, image: QImage) -> dict:
+        main = self.main_window or self
+        app = {"id": web_app_id(name, url), "name": name, "url": url, "scope": scope, "theme": theme,
+               "notify": "ask", "installed": time.time()}
+        folder = os.path.join(main.data_dir, WEB_APPS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        icon_path = os.path.join(folder, f"{app['id']}.png")
+        square_icon(image).save(icon_path, "PNG")
+        apps = [a for a in self.web_apps() if a["id"] != app["id"]] + [app]
+        save_web_apps(self.settings, apps)
+        install_web_app_launcher(app, icon_path)
+        where = "your Start menu" if IS_WINDOWS else "Applications" if IS_MAC else "your apps menu"
+        self.status_bubble.show_message(f"{name} installed: it's in {where}", 3500)
+        main.open_web_app(app["id"])
+        return app
+
+    def uninstall_web_app(self, app_id: str, *_, ask: bool = True) -> bool:
+        main = self.main_window or self
+        app = next((a for a in self.web_apps() if a["id"] == app_id), None)
+        if app is None:
+            return False
+        if ask:
+            dialog = SheetDialog(self, f"Remove {app['name']}?",
+                                 f"Its window closes and it leaves {'your Start menu' if IS_WINDOWS else 'Applications' if IS_MAC else 'your apps menu'}. "
+                                 f"You stay signed in to {bare_host(QUrl(app['url']))} in {BROWSER_NAME}.",
+                                 ok="Remove", danger=True)
+            accepted = self.run_dialog(dialog) == QDialog.DialogCode.Accepted
+            dialog.deleteLater()
+            if not accepted:
+                return False
+        self.set_web_app_notifications(app_id, False)
+        remove_web_app(self.settings, main.data_dir, app_id)
+        for window in main.all_windows():
+            if window.app is not None and window.app["id"] == app_id:
+                window.close()
+        return True
+
+    def set_web_app_notifications(self, app_id: str, on: bool, *_) -> None:
+        apps = self.web_apps()
+        for app in apps:
+            if app["id"] == app_id:
+                app["notify"] = "allow" if on else "deny"
+                if not on:                               # forget a grant the engine kept for the site
+                    reset_notification_permission(self.profile, QUrl(app["url"]))
+        save_web_apps(self.settings, apps)
+
+    def _answer_app_notifications(self, permission) -> None:
+        if not permission.isValid():
+            return
+        app = next((a for a in self.web_apps() if a["id"] == self.app["id"]), self.app)
+        choice = app.get("notify", "ask")
+        if choice == "ask":
+            dialog = SheetDialog(self, f"Allow {app['name']} to show notifications?",
+                                 f"It can let you know about new messages and the like while its window is in "
+                                 f"the background. Change this any time in its menu (…). Other sites can't "
+                                 "show notifications.", ok="Allow", cancel="Don't Allow")
+            choice = "allow" if self.run_dialog(dialog) == QDialog.DialogCode.Accepted else "deny"
+            dialog.deleteLater()
+            self.set_web_app_notifications(app["id"], choice == "allow")
+        if not permission.isValid():
+            return
+        permission.grant() if choice == "allow" else permission.deny()
+
+    def present_notification(self, notification) -> None:
+        """A web page's notification (only installed web apps that were allowed get this far)."""
+        main = self.main_window or self
+        app = web_app_for_origin(self.web_apps(), notification.origin())
+        if app is None or app.get("notify") != "allow":
+            notification.close()
+            return
+        main._notifications.append(notification)
+        icon = os.path.join(main.data_dir, WEB_APPS_DIR, f"{app['id']}.png")
+
+        def clicked() -> None:
+            main.open_web_app(app["id"])
+            try:
+                notification.click()
+            except RuntimeError:
+                pass
+
+        def finished() -> None:
+            try:
+                notification.close()
+            except RuntimeError:
+                pass
+            if notification in main._notifications:
+                main._notifications.remove(notification)
+
+        show_system_notification(main, app["name"], notification.title(), notification.message(),
+                                 icon if os.path.isfile(icon) else "", clicked, finished)
+
+    def show_web_apps(self, *_) -> None:
+        """Settings > Web Apps: what's installed, open, notifications, remove."""
+        main = self.main_window or self
+        sheet = _Sheet(self, "Web Apps", "Sites installed as apps (page menu > Install as App). They share "
+                       f"{BROWSER_NAME}'s sign-ins and protections; links to other sites open in {BROWSER_NAME}.",
+                       width=520, ok="Done")
+        apps = self.web_apps()
+        if not apps:
+            empty = QLabel("Nothing installed yet.")
+            empty.setObjectName("SheetBody")
+            sheet.body.addWidget(empty)
+        for app in apps:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 2, 0, 2)
+            icon = QLabel()
+            icon.setPixmap(main.web_app_icon(app).pixmap(28, 28))
+            h.addWidget(icon)
+            text = QLabel(f"{html.escape(app['name'])}<br><span style='color:{self.theme['text_secondary']}'>"
+                          f"{html.escape(bare_host(QUrl(app['url'])))}</span>")
+            h.addWidget(text, 1)
+            notify = Switch()
+            notify.setChecked(app.get("notify") == "allow")
+            notify.setToolTip("Show notifications")
+            notify.toggled.connect(partial(self.set_web_app_notifications, app["id"]))
+            h.addWidget(notify)
+            open_button = QPushButton("Open")
+            open_button.setObjectName("LinkButton")
+            open_button.clicked.connect(lambda *_, i=app["id"]: (sheet.accept(), main.open_web_app(i)))
+            h.addWidget(open_button)
+            remove = QPushButton("Remove")
+            remove.setObjectName("LinkButton")
+            remove.clicked.connect(lambda *_, i=app["id"]: (sheet.accept(), self.uninstall_web_app(i)))
+            h.addWidget(remove)
+            sheet.body.addWidget(row)
+        self.web_apps_sheet = sheet
+        sheet.open()
+
     def _restore_state(self) -> None:
+        if self.app is not None:              # each web app keeps its own size and place
+            geometry = self.settings.value(f"webAppGeometry/{self.app['id']}")
+            if isinstance(geometry, bytes):
+                geometry = QByteArray(geometry)
+            if isinstance(geometry, QByteArray) and not geometry.isEmpty() and self.restoreGeometry(geometry):
+                return
+            screen = QGuiApplication.primaryScreen().availableGeometry()
+            w, h = min(1100, int(screen.width() * 0.75)), min(800, int(screen.height() * 0.85))
+            self.resize(w, h)
+            self.move(screen.center() - QPoint(w // 2, h // 2))
+            return
         if self.private:                       # cascade from the main window; remember nothing
             main = self.main_window
             source = main.normalGeometry() if main.isMaximized() or main.isFullScreen() else main.geometry()
@@ -20602,7 +27154,9 @@ class BrowserWindow(QWidget):
             self.toolbar.sidebar_button.setChecked(True)
 
     def closeEvent(self, event) -> None:
-        if not self.private:
+        if self.app is not None:
+            self._close_app_window()
+        elif not self.secondary:
             if not self.isFullScreen():
                 self.settings.setValue("geometry", self.saveGeometry())
             self.settings.setValue("sidebarOpen", self.sidebar.is_open())
@@ -20611,6 +27165,11 @@ class BrowserWindow(QWidget):
             self.downloads.save()
             if self.prefs.get("clearCookiesOnQuit"):
                 self.clear_cookies_now()
+            forget = self.forget_sites()                  # their storage goes at the next start
+            if forget:
+                self.cookies.delete_for_sites(forget)
+            if self.trails is not None:
+                self.trails.save()
             self.store.flush()
         if self._inspector is not None:
             self._inspector.close()
@@ -20709,6 +27268,9 @@ def create_browser(app: QApplication, *, persistent: bool = True,
         except (ValueError, TypeError):
             keep = set()
         purge_cookie_db(cookie_dir, {str(k) for k in keep})
+    pending_forget = {registrable_domain(QUrl(o).host().lower()) for o in load_site_list(store.settings, FORGET_PENDING_KEY)}
+    if persistent and cookie_dir and os.path.isdir(cookie_dir) and pending_forget:
+        purge_cookie_db_sites(cookie_dir, pending_forget & load_site_list(store.settings, FORGET_SITES_KEY))
     # A named profile keeps cookies, cache and logins; an unnamed one is off-the-record.
     profile = QWebEngineProfile(APP_NAME, app) if persistent else QWebEngineProfile(app)
     STARTUP_MARKS["profile"] = time.perf_counter()
@@ -20740,6 +27302,18 @@ def create_browser(app: QApplication, *, persistent: bool = True,
     QTimer.singleShot(2500, window, window.weather.refresh)    # then a fresh one, after start-up
     fetcher.fetched.connect(window.schedule_start_page_refresh)
     set_perf_probe_script(profile)                             # a testing aid; normally off
+    if hasattr(profile, "setNotificationPresenter"):           # web apps' notifications (only theirs)
+        profile.setNotificationPresenter(window.present_notification)
+    if IS_LINUX and persistent and QDBusConnection is not None:
+        start_desktop_services(window)
+    QTimer.singleShot(0, window, window.forget_pending)        # Forget on Close: what a quit left behind
+    window.blocker.on_same_site_frame = window._note_forget_origin   # (a site's frames of itself keep data too)
+    if persistent:                                             # Heimdall watches pages (main window's)
+        window.bifrost = Bifrost(os.path.join(window.data_dir, BIFROST_DIR), BifrostLocal(window), window)
+        connect_bifrost(window)
+        window.trails = Trails(os.path.join(window.data_dir, TRAILS_DIR), window)
+        window.heimdall = Heimdall(window, os.path.join(window.data_dir, HEIMDALL_FILE))
+        window.heimdall.noticed.connect(window._heimdall_noticed)
     blocker.adblock.start()
     if persistent:
         window.attach_engine(EngineManager(store.settings, app))
@@ -20764,6 +27338,12 @@ def create_browser(app: QApplication, *, persistent: bool = True,
     return window
 
 
+def connect_bifrost(window: BrowserWindow) -> None:
+    """Changes to what Bifröst syncs start a sync shortly after."""
+    window.store.bookmarksChanged.connect(window._bifrost_touch)
+    window.store.readingChanged.connect(window._bifrost_touch)
+
+
 def create_private_window(main: BrowserWindow) -> BrowserWindow:
     """A Private Browsing window: an off-the-record profile (cookies, cache and storage
     live in memory and vanish with the window), no history, no saved icons, no tracker
@@ -20784,6 +27364,505 @@ def create_private_window(main: BrowserWindow) -> BrowserWindow:
     # Pages must go before their profile: delete the profile once the window is gone.
     window.destroyed.connect(profile.deleteLater)
     return window
+
+
+def manage_web_apps(command: str) -> int:
+    """`huginn --list-apps` prints the installed web apps as JSON; `huginn --remove-app=ID`
+    removes one (its menu entry and icon too). For Huginn OS's app store; no window opens."""
+    from PySide6.QtCore import QCoreApplication
+    core = QCoreApplication.instance() or QCoreApplication(["huginn"])     # for the local socket  # noqa: F841
+    settings = QSettings(ORG_NAME, APP_NAME)
+    data_dir = os.path.join(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
+                            if not IS_WINDOWS else os.environ.get("LOCALAPPDATA", ""), ORG_NAME, APP_NAME)
+    if IS_MAC:
+        data_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", ORG_NAME, APP_NAME)
+    if command == "--list-apps":
+        apps = [{"id": a["id"], "name": a["name"], "url": a["url"], "launcher": web_app_launcher_path(a),
+                 "icon": os.path.join(data_dir, WEB_APPS_DIR, a["id"] + ".png")} for a in load_web_apps(settings)]
+        print(json.dumps(apps, indent=2))
+        return 0
+    app_id = command.split("=", 1)[1].strip().lower()
+    if SingleInstance().send_to_running([APP_LAUNCH.replace("app=", "remove-app=") + app_id]):
+        return 0                                   # the running Huginn removes it (and closes its window)
+    return 0 if remove_web_app(settings, data_dir, app_id) else 1
+
+
+# --------------------------------------------------------------------------------------
+# The desktop (Linux, over D-Bus). Two services, both answered by hand (QDBusVirtualObject),
+# so each value goes out with exactly the type the standards ask for:
+#  * org.mpris.MediaPlayer2.huginn - the standard media controls: the top bar's or control
+#    centre's play/pause, next and previous reach whichever tab is playing.
+#  * org.huginn.Browser - for a desktop built around Huginn (Huginn OS): the open tabs (its
+#    dock's tab stack), a search over tabs, favorites, history and Muninn (its command
+#    palette), and opening links and web apps. Private windows and burner tabs are never in
+#    it. On by default only in Huginn OS; Privacy & Security switches it elsewhere.
+# --------------------------------------------------------------------------------------
+MPRIS_SERVICE = "org.mpris.MediaPlayer2.huginn"
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_ROOT = "org.mpris.MediaPlayer2"
+MPRIS_PLAYER = "org.mpris.MediaPlayer2.Player"
+DESKTOP_SERVICE = "org.huginn.Browser"
+DESKTOP_PATH = "/org/huginn/Browser"
+DBUS_PROPERTIES = "org.freedesktop.DBus.Properties"
+MEDIA_SESSION_NAME = "huginn-media-session"
+# Lets the media controls reach a page's own Next / Previous (what it gave navigator.mediaSession).
+MEDIA_SESSION_SCRIPT = r"""(() => {
+  const ms = navigator.mediaSession;
+  if (!ms || ms.__huginn) return;
+  const handlers = {}, set = ms.setActionHandler.bind(ms);
+  ms.setActionHandler = (action, fn) => { handlers[action] = fn; return set(action, fn); };
+  Object.defineProperty(ms, "__huginn", {value: action => {
+    const fn = handlers[action]; if (typeof fn === "function") { fn({action}); return true; } return false; }});
+})();"""
+MEDIA_INFO_JS = r"""(() => {
+  const media = [...document.querySelectorAll("video, audio")];
+  const meta = navigator.mediaSession && navigator.mediaSession.metadata;
+  const art = meta && meta.artwork && meta.artwork.length ? meta.artwork[meta.artwork.length - 1].src : "";
+  return JSON.stringify({playing: media.some(m => !m.paused && !m.ended), any: media.length > 0,
+    title: meta ? meta.title : "", artist: meta ? meta.artist : "", album: meta ? meta.album : "", art: art});
+})()"""
+MEDIA_ACTION_JS = r"""((action) => {
+  const ms = navigator.mediaSession;
+  if (ms && ms.__huginn && ms.__huginn(action)) return "handled";
+  const media = [...document.querySelectorAll("video, audio")];
+  const playing = media.find(m => !m.paused && !m.ended);
+  if (action === "pause" || (action === "playpause" && playing)) { media.forEach(m => m.pause()); return "paused"; }
+  if (action === "play" || action === "playpause") {
+    const m = media.find(m => m.currentTime > 0 && !m.ended) || media[0]; if (m) { m.play(); return "playing"; } }
+  if (action === "nexttrack") { const b = document.querySelector(".ytp-next-button"); if (b) { b.click(); return "next"; } }
+  if (action === "previoustrack") { const m = playing || media[0]; if (m) { m.currentTime = 0; return "restart"; } }
+  return "none";
+})(%s)"""
+
+
+def set_media_session_script(profile: QWebEngineProfile) -> None:
+    scripts = profile.scripts()
+    if scripts.find(MEDIA_SESSION_NAME):
+        return
+    script = QWebEngineScript()
+    script.setName(MEDIA_SESSION_NAME)
+    script.setSourceCode(MEDIA_SESSION_SCRIPT)
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)      # where the page sets its handlers
+    script.setRunsOnSubFrames(False)
+    scripts.insert(script)
+
+
+def share_with_desktop_default() -> bool:
+    return "huginn" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+
+
+def _dbus_reply(message, connection, *values) -> bool:
+    reply = message.createReply()
+    reply.setArguments(list(values))                    # one argument each (a list given whole is one)
+    connection.send(reply)
+    return True
+
+
+def _dbus_error(message, connection, name: str, text: str) -> bool:
+    connection.send(message.createErrorReply(name, text))
+    return True
+
+
+class MediaPlayerService(QDBusVirtualObject):
+    """MPRIS for the tab that played sound most recently."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window)
+        self.window = window
+        self.view: "WebView | None" = None
+        self.info: dict = {}
+        self.bus = QDBusConnection.sessionBus()
+        self._poll = QTimer(self)
+        self._poll.setInterval(1500)
+        self._poll.timeout.connect(self.refresh)
+
+    def start(self) -> bool:
+        if not self.bus.isConnected():
+            return False
+        if not self.bus.registerVirtualObject(MPRIS_PATH, self, QDBusConnection.VirtualObjectRegisterOption.SingleNode):
+            return False
+        return self.bus.registerService(MPRIS_SERVICE)
+
+    # -- state ------------------------------------------------------------------------------
+    def follow(self, view: "WebView") -> None:
+        """A tab started playing: it's the one the controls reach."""
+        if view is not self.view:
+            self.view = view
+            self.info = {}
+        if not self._poll.isActive():
+            self._poll.start()
+        self.refresh()
+
+    def _alive(self) -> bool:
+        try:
+            return self.view is not None and self.view.page() is not None and self.view.browser.tabs.indexOf(self.view) >= 0
+        except RuntimeError:
+            return False
+
+    def refresh(self) -> None:
+        if not self._alive():
+            self.view = None
+            self._poll.stop()
+            self._changed({})
+            return
+        def got(result) -> None:
+            try:
+                info = json.loads(result) if isinstance(result, str) else {}
+            except ValueError:
+                info = {}
+            self._changed(info)
+        self.view.page().runJavaScript(MEDIA_INFO_JS, APPLICATION_WORLD, got)
+
+    def _changed(self, info: dict) -> None:
+        before = (self.status(), self.metadata())
+        self.info = info
+        if (self.status(), self.metadata()) != before:
+            self._emit({"PlaybackStatus": self.status(), "Metadata": self.metadata()})
+        if self.status() == "Stopped":
+            self._poll.stop()
+
+    def status(self) -> str:
+        if self.view is None or not self.info.get("any"):
+            return "Stopped"
+        return "Playing" if self.info.get("playing") else "Paused"
+
+    def metadata(self) -> dict:
+        if self.view is None:
+            return {"mpris:trackid": QDBusObjectPath("/org/mpris/MediaPlayer2/TrackList/NoTrack")}
+        try:
+            title = self.info.get("title") or self.view.title() or bare_host(self.view.url())
+            site = bare_display_host(self.view.url())
+        except RuntimeError:
+            title, site = "", ""
+        data = {"mpris:trackid": QDBusObjectPath(f"/org/huginn/tab/{getattr(self.view, 'tab_id', 'tab')}"),
+                "xesam:title": str(title)[:200], "xesam:artist": [str(self.info.get("artist") or site)[:120] or BROWSER_NAME]}
+        if self.info.get("album"):
+            data["xesam:album"] = str(self.info["album"])[:120]
+        art = str(self.info.get("art") or "")
+        if art.startswith("https://"):
+            data["mpris:artUrl"] = art
+        return data
+
+    def properties(self, interface: str) -> dict:
+        if interface == MPRIS_ROOT:
+            return {"Identity": BROWSER_NAME, "DesktopEntry": "huginn", "CanQuit": False, "CanRaise": True,
+                    "HasTrackList": False, "SupportedUriSchemes": ["https", "http"],
+                    "SupportedMimeTypes": ["text/html"]}
+        if interface == MPRIS_PLAYER:
+            live = self.view is not None
+            return {"PlaybackStatus": self.status(), "Metadata": self.metadata(), "Rate": 1.0, "MinimumRate": 1.0,
+                    "MaximumRate": 1.0, "Volume": 1.0, "Position": 0, "CanGoNext": live, "CanGoPrevious": live,
+                    "CanPlay": live, "CanPause": live, "CanSeek": False, "CanControl": True}
+        return {}
+
+    def _emit(self, changed: dict) -> None:
+        signal = QDBusMessage.createSignal(MPRIS_PATH, DBUS_PROPERTIES, "PropertiesChanged")
+        signal.setArguments([MPRIS_PLAYER, changed, ["Position"]])   # (a typed, non-empty list: as, not av)
+        self.bus.send(signal)
+
+    # -- D-Bus --------------------------------------------------------------------------------
+    def introspect(self, path: str) -> str:
+        return ('<interface name="org.mpris.MediaPlayer2"><method name="Raise"/><method name="Quit"/>'
+                '<property name="Identity" type="s" access="read"/><property name="DesktopEntry" type="s" access="read"/>'
+                '<property name="CanQuit" type="b" access="read"/><property name="CanRaise" type="b" access="read"/>'
+                '<property name="HasTrackList" type="b" access="read"/>'
+                '<property name="SupportedUriSchemes" type="as" access="read"/>'
+                '<property name="SupportedMimeTypes" type="as" access="read"/></interface>'
+                '<interface name="org.mpris.MediaPlayer2.Player">'
+                + "".join(f'<method name="{m}"/>' for m in ("Next", "Previous", "Pause", "PlayPause", "Stop", "Play")) +
+                '<method name="Seek"><arg type="x" direction="in"/></method>'
+                '<method name="SetPosition"><arg type="o" direction="in"/><arg type="x" direction="in"/></method>'
+                '<method name="OpenUri"><arg type="s" direction="in"/></method>'
+                '<signal name="Seeked"><arg type="x"/></signal>'
+                '<property name="PlaybackStatus" type="s" access="read"/><property name="Rate" type="d" access="read"/>'
+                '<property name="Metadata" type="a{sv}" access="read"/><property name="Volume" type="d" access="read"/>'
+                '<property name="Position" type="x" access="read"/><property name="MinimumRate" type="d" access="read"/>'
+                '<property name="MaximumRate" type="d" access="read"/>'
+                + "".join(f'<property name="{p}" type="b" access="read"/>' for p in
+                          ("CanGoNext", "CanGoPrevious", "CanPlay", "CanPause", "CanSeek", "CanControl")) +
+                '</interface>')
+
+    def handleMessage(self, message, connection) -> bool:
+        interface, member, args = message.interface(), message.member(), message.arguments()
+        if interface == DBUS_PROPERTIES:
+            props = self.properties(str(args[0]) if args else "")
+            if member == "GetAll":
+                return _dbus_reply(message, connection, props)
+            if member == "Get" and len(args) >= 2 and str(args[1]) in props:
+                return _dbus_reply(message, connection, QDBusVariant(props[str(args[1])]))
+            if member == "Set":
+                return _dbus_error(message, connection, "org.freedesktop.DBus.Error.PropertyReadOnly", "read-only")
+            return _dbus_error(message, connection, "org.freedesktop.DBus.Error.UnknownProperty", "no such property")
+        if interface == MPRIS_ROOT or (not interface and member in ("Raise", "Quit")):
+            if member == "Raise":
+                QTimer.singleShot(0, self, self.raise_player)
+            return _dbus_reply(message, connection)
+        if member in ("Play", "Pause", "PlayPause", "Stop", "Next", "Previous"):
+            action = {"Play": "play", "Pause": "pause", "PlayPause": "playpause", "Stop": "pause",
+                      "Next": "nexttrack", "Previous": "previoustrack"}[member]
+            QTimer.singleShot(0, self, partial(self.act, action))
+            return _dbus_reply(message, connection)
+        if member in ("Seek", "SetPosition"):
+            return _dbus_reply(message, connection)
+        if member == "OpenUri" and args:
+            url = QUrl(str(args[0]))                      # (web pages only, whoever on the session bus asks)
+            if url.isValid() and url.scheme() in ("http", "https") and url.host():
+                QTimer.singleShot(0, self, partial(self.window.open_from_another_launch, [url.toString()]))
+            return _dbus_reply(message, connection)
+        return False
+
+    def act(self, action: str) -> None:
+        if not self._alive():
+            return
+        if action in ("play", "playpause"):              # pressing Play in the top bar is your gesture
+            try:
+                self.view.page().settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture,
+                                                         False)
+            except RuntimeError:
+                return
+        self.view.page().runJavaScript(MEDIA_ACTION_JS % json.dumps(action), QWebEngineScript.ScriptWorldId.MainWorld,
+                                       lambda *_: QTimer.singleShot(400, self, self.refresh))
+
+    def raise_player(self) -> None:
+        if not self._alive():
+            return
+        browser = self.view.browser
+        browser.select_tab(browser.tabs.indexOf(self.view))
+        if browser.isMinimized():
+            browser.setWindowState(browser.windowState() & ~Qt.WindowState.WindowMinimized)
+        browser.show()
+        browser.raise_()
+        browser.activateWindow()
+
+
+class DesktopService(QDBusVirtualObject):
+    """org.huginn.Browser (see above). Methods answer with JSON text, so a desktop's own code
+    (QML, Python, Rust...) reads them without D-Bus type plumbing."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window)
+        self.window = window
+        self.bus = QDBusConnection.sessionBus()
+        self.registered = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._emit_changed)
+
+    def start(self) -> bool:
+        if self.registered or not self.bus.isConnected():
+            return self.registered
+        if not self.bus.registerVirtualObject(DESKTOP_PATH, self, QDBusConnection.VirtualObjectRegisterOption.SingleNode):
+            return False
+        self.registered = self.bus.registerService(DESKTOP_SERVICE)
+        return self.registered
+
+    def stop(self) -> None:
+        if self.registered:
+            self.bus.unregisterService(DESKTOP_SERVICE)
+            self.bus.unregisterObject(DESKTOP_PATH)
+            self.registered = False
+
+    def changed(self) -> None:
+        if self.registered:
+            self._timer.start()
+
+    def _emit_changed(self) -> None:
+        self.bus.send(QDBusMessage.createSignal(DESKTOP_PATH, DESKTOP_SERVICE, "TabsChanged"))
+
+    def _views(self):
+        """(window, view) for every tab you'd want a desktop to see: not private, not burner."""
+        for window in self.window.all_windows():
+            if window.private:
+                continue
+            for view in window.views():
+                if not getattr(view, "burner", False):
+                    yield window, view
+
+    def tabs(self) -> list[dict]:
+        out = []
+        for window in self.window.all_windows():
+            if window.private:
+                continue
+            current = window.current_view()
+            for view in window.views():
+                if getattr(view, "burner", False):
+                    continue
+                url = without_credentials(view.tab_url())
+                out.append({"id": view.tab_id, "title": window._tab_title(view), "url": url.toString(),
+                            "active": view is current and window.isActiveWindow(), "current": view is current,
+                            "audible": bool(view.page().recentlyAudible()) if view.pending is None else False,
+                            "window": "app:" + window.app["id"] if window.app else "main"})
+        return out
+
+    def search(self, text: str, limit: int = 30) -> list[dict]:
+        text = text.strip()
+        if not text:
+            return []
+        needle, out, seen = text.lower(), [], set()
+
+        def add(kind: str, title: str, url: str, **extra) -> None:
+            if url and (kind, url) not in seen and len(out) < limit:
+                seen.add((kind, url))
+                out.append({"kind": kind, "title": title or url, "url": url, **extra})
+        for tab in self.tabs():
+            if needle in tab["title"].lower() or needle in tab["url"].lower():
+                add("tab", tab["title"], tab["url"], id=tab["id"])
+        for mark in self.window.store.bookmarks:
+            if needle in str(mark.get("title", "")).lower() or needle in str(mark.get("url", "")).lower():
+                add("favorite", mark.get("title", ""), mark.get("url", ""))
+        for entry in history_ranked(self.window.store.history[:3000])[:400]:
+            if needle in str(entry.get("title", "")).lower() or needle in str(entry.get("url", "")).lower():
+                add("history", entry.get("title", ""), entry.get("url", ""))
+        for hit in self.window.muninn_search(text, limit=8):
+            add("remembered", hit.get("title", ""), hit.get("url", ""), snippet=str(hit.get("snippet", ""))[:200])
+        return out
+
+    def introspect(self, path: str) -> str:
+        def method(name, ins=(), out=None):
+            return (f'<method name="{name}">' + "".join(f'<arg name="{n}" type="s" direction="in"/>' for n in ins)
+                    + (f'<arg name="{out}" type="{"b" if out == "ok" else "s"}" direction="out"/>' if out else "")
+                    + "</method>")
+        return (f'<interface name="{DESKTOP_SERVICE}">'
+                + method("ListTabs", out="json") + method("ActivateTab", ("id",), "ok") + method("CloseTab", ("id",), "ok")
+                + method("OpenUrl", ("url",), "ok") + method("Search", ("query",), "json")
+                + method("ListApps", out="json") + method("OpenApp", ("id",), "ok")
+                + '<signal name="TabsChanged"/></interface>')
+
+    def handleMessage(self, message, connection) -> bool:
+        member, args = message.member(), [str(a) for a in message.arguments()]
+        if message.interface() not in ("", DESKTOP_SERVICE):
+            return False
+        if member == "ListTabs":
+            return _dbus_reply(message, connection, json.dumps(self.tabs()))
+        if member == "Search":
+            return _dbus_reply(message, connection, json.dumps(self.search(args[0] if args else "")))
+        if member == "ListApps":
+            apps = [{"id": a["id"], "name": a["name"], "url": a["url"],
+                     "icon": os.path.join(self.window.data_dir, WEB_APPS_DIR, a["id"] + ".png")}
+                    for a in self.window.web_apps()]
+            return _dbus_reply(message, connection, json.dumps(apps))
+        if member in ("ActivateTab", "CloseTab") and args:
+            target = next(((w, v) for w, v in self._views() if v.tab_id == args[0]), None)
+            if target is not None:
+                QTimer.singleShot(0, self, partial(self._tab_action, member, *target))
+            return _dbus_reply(message, connection, target is not None)
+        if member == "OpenUrl" and args:
+            url = url_from_user_input(args[0])
+            ok = url is not None and url.scheme() in ("http", "https")
+            if ok:
+                QTimer.singleShot(0, self, partial(self.window.open_from_another_launch, [url.toString()]))
+            return _dbus_reply(message, connection, ok)
+        if member == "OpenApp" and args:
+            ok = any(a["id"] == args[0] for a in self.window.web_apps())
+            if ok:
+                QTimer.singleShot(0, self, partial(self.window.open_web_app, args[0]))
+            return _dbus_reply(message, connection, ok)
+        return False
+
+    def _tab_action(self, member: str, window: "BrowserWindow", view: "WebView") -> None:
+        index = window.tabs.indexOf(view)
+        if index < 0:
+            return
+        if member == "CloseTab":
+            window.close_tab(index)
+            return
+        if window is window.main_window or window.main_window is None:
+            window.ensure_shown()
+        window.select_tab(index)
+        if window.isMinimized():
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+
+def start_desktop_services(window: BrowserWindow) -> None:
+    """Linux: the media controls (MPRIS) always; Huginn OS's hooks when that switch is on."""
+    set_media_session_script(window.profile)
+    window.media_player = MediaPlayerService(window)
+    if not window.media_player.start():
+        window.media_player = None
+    window.desktop_service = DesktopService(window)
+    if window.prefs.get("shareWithDesktop"):
+        window.desktop_service.start()
+
+
+def create_app_window(main: BrowserWindow, app: dict) -> BrowserWindow:
+    """A web app's window (see "Web apps"): the main window's profile, so you're signed in."""
+    window = BrowserWindow(main.profile, main.store, main.start_handler, main.guard, main_window=main, app=app)
+    window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    window.data_dir = main.data_dir
+    window.weather = main.weather
+    window.attach_engine(main.engine)
+    window.attach_passwords(main.passwords)
+    window.typing_sounds = main.typing_sounds
+    icon = window.web_app_icon(app)
+    if not icon.isNull():
+        window.setWindowIcon(icon)
+    return window
+
+
+def reset_notification_permission(profile: QWebEngineProfile, url: QUrl) -> None:
+    """Forgets a notification grant the engine stored for a site (Qt 6.8+)."""
+    query = getattr(profile, "queryPermission", None)
+    kind = getattr(getattr(QWebEnginePermission, "PermissionType", None), "Notifications", None) \
+        if "QWebEnginePermission" in globals() else None
+    if query is None or kind is None:
+        return
+    try:
+        site = QUrl(url)
+        permission = query(QUrl(f"{site.scheme()}://{site.authority()}"), kind)
+        if permission.isValid():
+            permission.reset()
+    except (RuntimeError, TypeError):
+        pass
+
+
+_TRAY: dict = {}
+
+
+def show_system_notification(parent: QObject, app_name: str, title: str, body: str, icon: str,
+                             clicked, finished) -> None:
+    """Through the desktop's own notifications: notify-send on Linux (clicking it opens the
+    app; libnotify-bin, on every Ubuntu desktop), the system tray's message elsewhere."""
+    if IS_LINUX and shutil.which("notify-send"):
+        args = [f"--app-name={app_name}", "--expire-time=8000", "--action=default=Open", "--wait"]
+        if icon:
+            args.append(f"--icon={icon}")
+        process = QProcess(parent)
+        started = time.monotonic()
+
+        def output() -> None:
+            if b"default" in bytes(process.readAllStandardOutput()):
+                clicked()
+
+        def done(code, _status) -> None:
+            if code != 0 and time.monotonic() - started < 2:   # an older notify-send: no actions
+                QProcess.startDetached("notify-send", [f"--app-name={app_name}"] + ([f"--icon={icon}"] if icon else [])
+                                       + [title or app_name, body])
+            finished()
+            process.deleteLater()
+
+        process.readyReadStandardOutput.connect(output)
+        process.finished.connect(done)
+        process.start("notify-send", args + [title or app_name, body])
+        return
+    tray = _TRAY.get("icon")
+    if tray is None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            finished()
+            return
+        tray = _TRAY["icon"] = QSystemTrayIcon(make_app_icon(), QApplication.instance())
+    try:
+        tray.messageClicked.disconnect()
+    except (RuntimeError, TypeError):
+        pass
+    tray.messageClicked.connect(clicked)
+    tray.show()
+    tray.showMessage(f"{app_name}: {title}" if title else app_name, body, QIcon(icon) if icon else make_app_icon(), 8000)
+    QTimer.singleShot(10_000, tray, lambda: (tray.hide(), finished()))
 
 
 class SingleInstance(QObject):
@@ -20857,6 +27936,8 @@ def main() -> int:
         return install_shortcuts(args[1:])
     if args[:1] == ["--export-icon"] and len(args) >= 2:  # from the macOS / Linux installer
         return export_icons(args[1])
+    if args[:1] == ["--list-apps"] or (args and args[0].startswith("--remove-app=")):
+        return manage_web_apps(args[0])                # for an app store (Huginn OS's): no window
     if len(args) >= 2 and args[0] == "--after":         # restarted after an update: let the old one close
         try:
             wait_for_process(int(args[1]))
@@ -20876,15 +27957,32 @@ def main() -> int:
     app.file_opened.connect(pending.append)
     targets = launch_targets(args)
     private = wants_private_window(args)
+    web_app = wants_app(args)
     steps: dict[str, float] = {}
     instance = SingleInstance(app)
-    if instance.send_to_running(([PRIVATE_LAUNCH] if private else []) + targets):
+    message = [APP_LAUNCH + web_app] if web_app else ([PRIVATE_LAUNCH] if private else []) + targets
+    if instance.send_to_running(message):
         return 0                               # the running browser opened them
     instance.listen()
     steps["instance"] = time.perf_counter()
     window = create_browser(app)
     steps["browser"] = time.perf_counter()
     instance.received.connect(window.open_from_another_launch)
+    app.aboutToQuit.connect(window.store.flush)
+    if web_app and any(a["id"] == web_app for a in window.web_apps()):   # just the app: Huginn's tabs wait
+        window.open_web_app(web_app)
+        app.file_opened.disconnect()
+        app.file_opened.connect(lambda target: window.open_from_another_launch([target]))
+        exit_code = app.exec()
+        try:
+            import shiboken6
+            for other in window.all_windows()[1:]:
+                shiboken6.delete(other)
+            shiboken6.delete(window)
+        except Exception:
+            del window
+        return exit_code
+    window._shown_once = True
     restart = window.engine.take_restart() if window.engine is not None else None
     restored = bool(window.restore_tabs or restart) and window.restore_session()
     if not restored and restart:

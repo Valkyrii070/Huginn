@@ -671,7 +671,7 @@ def settings_dialog():
                                                            "globalPrivacyControl", "warnDownloads", "blockAds",
                                                            "rejectCookieBanners", "fingerprintProtection",
                                                            "clearCookiesOnQuit", "searchSuggestions",
-                                                           "rememberPages"})
+                                                           "rememberPages"} | ({"shareWithDesktop"} if sb.IS_LINUX else set()))
     d.switches["warnDownloads"].click()
     check("switch saves + applies", w.prefs["warnDownloads"] is False
           and QSettings(sb.ORG_NAME, SETTINGS_NAME).value("warnDownloads") in (False, "false"))

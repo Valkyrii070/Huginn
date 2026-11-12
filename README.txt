@@ -139,6 +139,17 @@ Huginn on Linux
   From a terminal  huginn [link], huginn --new-tab, huginn --private-window [link] (the
                    last two are also the apps menu entry's right-click actions). A second
                    launch hands its links to the running Huginn.
+  Desktop hooks    Huginn's open tabs are shared with the desktop over D-Bus
+                   (org.huginn.Browser at /org/huginn/Browser: ListTabs, ActivateTab,
+                   CloseTab, OpenUrl, Search, ListApps, OpenApp, and a TabsChanged signal),
+                   so a launcher or dock can list, switch and search them. On by default on
+                   Huginn OS, off elsewhere: Privacy & Security > Share tabs with the desktop.
+                   Private windows and burner tabs are never shared.
+  Media keys       A tab playing sound appears in the desktop's media controls (MPRIS:
+                   title, artist, artwork, play/pause, next/previous, seek), as in GNOME's
+                   and KDE's panels, and the keyboard's media keys work.
+  Notifications    Web apps' notifications and Heimdall's go through the desktop's own
+                   (notify-send, from libnotify-bin); clicking one opens the page.
   Fonts            Huginn uses Inter where it's installed (fonts-inter), else your desktop's.
   Default browser  Huginn reads which browser opens links from the desktop's mimeapps.list
                    files (yours first, then the system's), as every desktop keeps it.
@@ -155,7 +166,8 @@ Privacy & Security  (Ctrl+, or "Privacy & Security..." in the page menu)
                         warning page; DNS lookups are encrypted (Quad9 by default - switch
                         to Off if you rely on company/intranet names)
   Permissions           sites must ask before using camera, microphone, location,
-                        clipboard or fonts; notification requests are always refused
+                        clipboard or fonts; notifications only from web apps you
+                        installed and allowed
   Look-alike addresses  a fake domain like "apple.com" written in Cyrillic shows as xn--...
   Downloads             apps and scripts (.exe, .msi, .ps1...) ask first, and every download
                         is marked as coming from the internet so Windows SmartScreen checks it
@@ -188,7 +200,8 @@ Passwords  (Ctrl+Shift+P, "Passwords..." in the page menu, or Privacy & Security
       are only offered to that site (a secure site's never to an http:// copy of it).
     - Sign-up forms get "Use Strong Password" (like kH7qzT-m4Rdwx-9cBnLa); it is saved
       the moment you pick it.
-    - The Passwords window flags passwords that are weak or used on more than one site.
+    - The Passwords window flags passwords that are weak, used on more than one site,
+      or (once you've checked) found in a data breach.
       Showing, copying or exporting a password asks for the master password again;
       copied passwords stay out of Windows clipboard history and clear after 30 seconds.
     - Import: More > Import Passwords..., or drop the file on the window. Reads the CSV
@@ -209,6 +222,102 @@ Passwords  (Ctrl+Shift+P, "Passwords..." in the page menu, or Privacy & Security
   stays connected until Huginn closes. New passwords are saved in Huginn's own vault
   (saving into iCloud Keychain isn't supported). The pairing and lookup code follows the
   open-source "iCloud Passwords for Firefox" by au2001 (Apache License 2.0).
+
+  Passkeys and security keys: sites that sign you in with a passkey or a USB/NFC security
+  key (YubiKey and the like) work. Huginn shows a sheet that says what to do: touch your
+  key, pick an account, enter or set the key's PIN (with how many tries are left). The
+  key itself does the cryptography; nothing about it is stored by Huginn. On Linux the
+  libu2f-udev package lets your account use the key (the .deb recommends it).
+  Breach check: Passwords > More > Check for Breaches... asks Have I Been Pwned whether
+  each password has turned up in a data breach. Only the first 5 characters of a hash of
+  each password leave your computer (the service sends back every leaked hash starting
+  with them, padded so the reply's size gives nothing away, and Huginn compares here).
+  Passwords found are marked "In a breach" - change those first.
+
+Web apps  (page menu > Install <site> as App...; Settings > Web Apps...)
+  Any site can become an app: its own window with no address field or tabs, its own icon
+  in the Start menu / Applications / your apps menu, and it remembers its size and place.
+  It shares Huginn's sign-ins and protections; links to other sites open in Huginn.
+  Installed apps may show notifications if you allow them when they first ask (no other
+  site can). From a terminal: huginn --app=ID opens one, huginn --list-apps lists them as
+  JSON and huginn --remove-app=ID removes one (Huginn OS's app store uses these).
+
+Forget on Close  (page menu > the site card > Forget <site> When Its Tabs Close)
+  For sites you don't want remembering you: when a site's last tab closes (or moves on
+  to another site), its cookies, local storage, IndexedDB databases, caches and service
+  workers are wiped (its own pages and frames, like login.<site> inside <site>). If
+  Huginn closes or crashes first, they're wiped at the next start. Its files in the
+  browser cache stay until you clear history (the cache can only be cleared as a whole;
+  sites can't read each other's entries in it). On hosting sites such as github.io each
+  name is its own site. The list is in Privacy & Security > Forget on close > Manage...
+
+Heimdall  (page menu > Watch Page for Changes...; History > Heimdall)
+  Heimdall keeps an eye on pages for you while Huginn is open - a price, a timetable, a
+  "back in stock" notice - and tells you when they change (a notification, and the
+  changes in his list: what's new in green, what went struck through). Select part of
+  a page first to watch only that part. Choose every hour, every 6 hours or every day.
+  He visits on his own from a fresh private profile each time, with Huginn's blocking and
+  no cookies, so sites can't tell it's you (and pages that need you signed in can't be
+  watched). "5 minutes ago"-style text and reordering don't count as changes. While a
+  game is running (Game Mode) he waits.
+
+Trails  (History > Trails...; page menu > How You Got Here...; Valhalla links to it)
+  Every page you visit is a step under the page you came from - a link in the same tab,
+  or the page a new tab was opened from - so Trails shows your browsing as trees, newest
+  first, for each day of the past week. "How You Got Here" picks out the page you're on
+  and the trail that led to it. Search shows matches with the trails that led to them.
+  Back and Forward don't make new steps; typing an address starts a new trail. Private
+  windows and burner tabs leave none, and Clear History clears them.
+
+Translation  (the translate button in the address field; page menu > Translate)
+  Pages in another language are translated on this computer, by Mozilla's translation
+  engine (the one in Firefox) - nothing you read is sent anywhere. The first time you
+  translate a language, Huginn downloads its files from Mozilla once (about 20-40 MB per
+  language; the engine is 5 MB more), each checked against the hash Mozilla published.
+  It translates what's on screen first, keeps links and buttons working, translates what
+  the page adds later, and keeps translating as you follow links in that tab. "Show
+  Original" puts the page back exactly as it was. Languages without a direct model go
+  through English. In the translate menu: Translate From / To, Always Translate <language>,
+  Never Offer for a language or a site; Translation Languages... lists what's downloaded
+  and removes it. Code, form fields and anything marked "translate=no" are left alone.
+
+Bifröst Sync  (page menu > Settings > Bifröst Sync...; More Tools)
+  Keeps your Favorites, Reading List, passwords and open tabs the same on your own
+  computers, with no account and no server. Your devices share one random key, given to a
+  new device when you pair it, and everything is encrypted with it (AES-256-GCM).
+    - Pair: on one device choose Add a Device..., on the other Join Another Device... Both
+      show a 6-digit number; check they're the same and click They Match on both. Nothing is
+      sent until both of you have. (It's what stops someone else on the network from
+      slipping in, either way round.) Or copy the pairing key across, or scan its QR code
+      with a phone and send yourself the text. Anyone with the key can join, so keep it to
+      yourself. Add a Device asks for your master password first when passwords sync.
+    - Passwords are sealed a second time, with a key kept inside your password vault (so
+      only your master password unlocks it). It goes to a new device only when you pair
+      it; the key your computer's keyring keeps can't read them on its own.
+    - Devices meet directly on your local network (their announcements change every
+      minute, so they can't be followed) and/or in a sync folder you choose - Syncthing,
+      Nextcloud, Dropbox, a USB stick. Each device writes only its own file there, so the
+      sync tool never sees a conflict, and nothing in the files is readable without the key.
+    - When the same thing changed on two devices, the newest change wins; deletions sync
+      too. Passwords sync while the vault is unlocked; changes wait until it is. Only web
+      addresses (http and https) come in from other devices.
+    - Tabs on Your Other Devices (History menu) opens what's open elsewhere.
+    - The key is kept in Windows' protected storage, the macOS Keychain, or your Linux
+      desktop's keyring (secret-tool). Without a keyring it's in a file only your account
+      can read, and passwords don't sync unless you turn them on.
+    - Leave... stops syncing this device; what's on it stays.
+  Windows may ask once whether Huginn can use the network (for syncing on your network).
+
+Mímir  (page menu > Summarize with Mímir; More Tools > Mímir; History > Ask Mímir...)
+  An AI assistant that runs entirely on this computer: it summarizes the page you're on,
+  answers questions about it, and answers questions about pages you've visited (from
+  Muninn, with the pages it used as numbered sources). Nothing you ask leaves your computer.
+  It's off until you download it: Quick (Qwen3 0.6B, about 0.65 GB) or Better answers
+  (Qwen3 1.7B, about 1.8 GB) - open models (Apache 2.0) from Hugging Face plus Hugging
+  Face's Transformers.js engine from npm, each file checked before it's used. It runs in
+  a page of its own that can't reach the network, uses several processor cores, and
+  closes after 5 minutes unused. Small models make mistakes: check what matters. Remove
+  Mímir... deletes it.
 
 Search engine  (page menu > Settings > Search Engine, or Privacy & Security > Search)
   Google (default), DuckDuckGo, Bing, Brave Search, Startpage, Ecosia, Qwant, Kagi, or a

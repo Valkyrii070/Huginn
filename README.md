@@ -2,7 +2,7 @@
 
 <h1 align="center">Huginn</h1>
 
-<p align="center"><b>A quiet, private, Safari-style browser for Windows and Mac.</b><br>
+<p align="center"><b>A quiet, private, Safari-style browser for Windows, Mac and Linux.</b><br>
 Named for Odin's raven of thought, which flies over the world each day and keeps what it sees to itself.</p>
 
 <p align="center"><img src="docs/start-dark.png" width="820" alt="Huginn's Start Page in dark mode"></p>
@@ -54,6 +54,17 @@ site gets a privacy grade from A to F, and **Ctrl+Alt+N** opens a burner tab tha
 **The ravens remember.** *Muninn* lets you find a page by what it said: type a few words you remember into the
 address bar. *Valhalla* keeps every tab you closed this week, by day. All of it stays on your PC.
 
+**The gods help out, on your computer.** *Mímir* is an AI assistant that runs entirely on your machine: it
+summarizes the page, answers questions about it, and answers from pages you've visited. Pages in other languages
+are translated on your computer too, by Mozilla's engine from Firefox. *Heimdall* watches pages for changes (a price,
+a timetable) and tells you, visiting them without your cookies. *Trails* shows how you got from page to page, as
+trees. Nothing any of them sees leaves your computer.
+
+**Your devices, no account.** *Bifröst* keeps Favorites, the Reading List, passwords and open tabs the same on your
+own computers, encrypted with a key only they share, meeting on your local network or in a folder you already sync.
+There's no server. Sites can be installed as apps, sites you pick can be forgotten the moment their last tab closes,
+passkeys and security keys work, and your passwords can be checked against known breaches without sending them.
+
 **Made to be yours.** Four realms tint the window and the Start Page: Aurora, Bifröst, Muspelheim and Niflheim.
 There's light, dark or follow-Windows, and window buttons on the left (Mac) or the right (Windows). The Start Page
 greets you in Old Norse if you like, with an optional weather card and slowly rippling aurora curtains.
@@ -76,6 +87,11 @@ Huginn sends nothing about you anywhere. The only things it fetches by itself ar
 EasyPrivacy), engine security updates when you've built the H.264 engine, updates from this repository, and the
 weather if you add a city, in which case only that city's position (rounded to about 1 km) goes to Open-Meteo.
 
+When you ask for them: translation downloads each language's files from Mozilla once; Mímir downloads its model
+from Hugging Face and its engine from npm once (every file checked against a published hash); Heimdall visits the
+pages you asked it to watch, without your cookies; the breach check sends Have I Been Pwned the first 5 characters
+of a hash of each password, never the password. Bifröst talks only to your own devices.
+
 ## License
 
 Huginn is free to use, change and share for any **non-commercial** purpose under the
@@ -85,6 +101,9 @@ needs the author's permission. The bundled third-party parts keep their own lice
 ## Credits
 
 [Qt WebEngine](https://www.qt.io/) / [PySide6](https://doc.qt.io/qtforpython/) (LGPL) ·
+[Bergamot translator](https://github.com/mozilla/translations) and Firefox's translation models (MPL 2.0) ·
+[Transformers.js](https://github.com/huggingface/transformers.js) (Apache 2.0) and
+[ONNX Runtime Web](https://onnxruntime.ai/) (MIT) · [Qwen3](https://huggingface.co/Qwen) models (Apache 2.0) ·
 [Mozilla Readability](https://github.com/mozilla/readability) (Apache 2.0) ·
 [EasyList and EasyPrivacy](https://easylist.to/) ·
 weather by [Open-Meteo](https://open-meteo.com/) (CC BY 4.0) ·

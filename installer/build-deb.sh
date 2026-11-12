@@ -147,7 +147,7 @@ Priority: optional
 Architecture: $ARCH
 Installed-Size: $SIZE
 Depends: $DEPS
-Recommends: ${RECOMMENDS}xdg-utils, speech-dispatcher, fonts-inter, fonts-noto-core, fonts-noto-color-emoji
+Recommends: ${RECOMMENDS}xdg-utils, speech-dispatcher, libu2f-udev, libnotify-bin, libsecret-tools, fonts-inter, fonts-noto-core, fonts-noto-color-emoji
 Provides: www-browser, gnome-www-browser
 Maintainer: Huginn <noreply@github.com>
 Homepage: https://github.com/Valkyrii070/Huginn
