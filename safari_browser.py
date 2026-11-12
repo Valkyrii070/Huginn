@@ -1747,13 +1747,12 @@ def user_namespaces_work() -> bool:
 
 def page_sandbox_blocked(switch: str = USERNS_SWITCH, profiles: tuple[str, ...] | None = None) -> bool:
     """Ubuntu 23.10 and later let a program make the user namespaces Chromium's page sandbox
-    is built from only when an AppArmor profile allows it. Huginn's own engine gets one when
-    it's installed for everyone (or the installer added it). On the distribution's engine
-    (--system-engine) the namespace is made by Huginn's own process, so Ubuntu's profile for
-    QtWebEngineProcess isn't enough: the installer's profile for the `huginn` command is what
-    allows it, and there Huginn simply tries. Where it isn't allowed every page would fail to
-    open (the engine stops with "credentials.cc: Permission denied"), so Huginn then starts
-    with the page sandbox off (it says so in Privacy & Security)."""
+    is built from only when an AppArmor profile allows it. The namespace is made by Huginn's
+    own process, so the profile that counts is the installer's for the `huginn` command (one
+    for QtWebEngineProcess, Ubuntu's or an older Huginn's, isn't enough). Whether it's there,
+    loaded and covers this process is found by trying. Where it isn't allowed every page
+    would fail to open (the engine stops with "credentials.cc: Permission denied"), so Huginn
+    then starts with the page sandbox off (it says so in Privacy & Security)."""
     if not IS_LINUX or os.environ.get("QTWEBENGINE_DISABLE_SANDBOX"):
         return False
     try:
@@ -1764,9 +1763,9 @@ def page_sandbox_blocked(switch: str = USERNS_SWITCH, profiles: tuple[str, ...] 
     if not restricted:
         return False
     if profiles is None:
-        if "/.python/" not in engine_process_path():   # not the engine the installer fetched for Huginn
+        if hasattr(os, "unshare") and hasattr(os, "fork"):
             return not user_namespaces_work()
-        profiles = (APPARMOR_PROFILE,)
+        profiles = (APPARMOR_PROFILE,)                 # Python before 3.12 can't try: go by the file
     return not any(os.path.exists(p) for p in profiles)
 
 
