@@ -595,6 +595,20 @@ function Start-Hidden([string]$file, [string]$arguments, [string]$folder) {
     return [Diagnostics.Process]::Start($info)
 }
 
+function Protect-Folder([string]$folder) {
+    # A folder made outside your own profile (C:\Huginn, another drive) can by default be changed
+    # by every account on this PC, and Huginn runs from it. Only you, administrators and Windows
+    # itself may write there; the folder's inherited permissions go only once those are in place.
+    try {
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $path = '"' + $folder.TrimEnd('\') + '"'
+        $grant = Start-Hidden 'icacls.exe' "$path /grant:r *${me}:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F" $env:TEMP
+        $grant.WaitForExit()
+        if ($grant.ExitCode -ne 0) { return }
+        (Start-Hidden 'icacls.exe' "$path /inheritance:r" $env:TEMP).WaitForExit()
+    } catch { }
+}
+
 function Stop-Tree($proc) {
     if ($null -eq $proc -or $proc.HasExited) { return }
     Start-Hidden 'taskkill.exe' "/PID $($proc.Id) /T /F" $env:TEMP | Out-Null
@@ -610,6 +624,7 @@ function Start-Install {
         Show-Warning 'Huginn is open from that folder. Close it first, then press the button again.'
         return
     }
+    $ours = (-not (Test-Path -LiteralPath $target)) -or (Test-Path -LiteralPath (Join-Path $target 'safari_browser.py'))
     try {
         New-Item -ItemType Directory -Path $target -Force | Out-Null
         $probe = Join-Path $target '.huginn-write-test'
@@ -619,6 +634,8 @@ function Start-Install {
         Show-Warning "Huginn can't write there. Pick a folder of your own (not Program Files)."
         return
     }
+    # Huginn's own folder (new, or an earlier install), somewhere other accounts could write.
+    if ($ours -and -not (Test-Inside $target $env:USERPROFILE)) { Protect-Folder $target }
     $S.video = [bool]$ui.VideoSwitch.IsChecked
     # Like Chrome and Firefox: always in the Start menu; on the desktop unless you said no.
     $S.links = @(Join-Path ([Environment]::GetFolderPath('Programs')) 'Huginn.lnk')

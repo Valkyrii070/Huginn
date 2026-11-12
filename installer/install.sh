@@ -150,6 +150,7 @@ if [ "$UNINSTALL" = 1 ]; then
   banner "Remove Huginn" "Huginn and its own Python go; your bookmarks, history and passwords stay unless you say otherwise."
   pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true            # started as a script (older launchers)
   pkill -f "$VENV/bin/python -c import os, sys; sys.path.insert" 2>/dev/null || true   # this installer's launcher
+  pkill -f "$VENV/bin/python -I -c import os, sys; sys.path.insert" 2>/dev/null || true
   [ "$SYS_ENGINE" = 0 ] || pkill -f "import safari_browser; sys.exit(safari_browser.main())" 2>/dev/null || true
   pkill -f "^[^ ]*python[^ ]*( -[^ ]+)* $LAUNCHER( |\$)" 2>/dev/null || true   # this installer's launcher (a Python script)
   if [ "$SYSTEM" = 1 ]; then                     # for every user: the program goes, people's own data stays
@@ -369,7 +370,10 @@ mkdir -p "$LOGS" 2>/dev/null || LOGS=/dev
 # Its folder goes in the environment, not the arguments: macOS would treat a path argument as
 # a document to open.
 export HUGINN_DIR="$HERE/huginn"
-exec "$HERE/python/bin/python" -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
+# -I: Python takes no code from the environment (PYTHONPATH and the like) or from the folder
+# it's started in, so nothing else can run as Huginn.app and borrow the camera, microphone
+# and location permissions you gave it.
+exec "$HERE/python/bin/python" -I -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
   "$@" >"$LOGS/huginn.log" 2>&1
 LAUNCH
   chmod +x "$BUNDLE/Contents/MacOS/Huginn"
@@ -453,7 +457,7 @@ LAUNCH
 # Starts Huginn (installed in $TARGET).
 # Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
 export HUGINN_DIR="$TARGET"
-exec "$RUNPY" -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
+exec "$RUNPY" -I -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
   "\$@"
 LAUNCH
   fi
