@@ -5523,8 +5523,10 @@ class TranslationStore(QObject):
         reply.finished.connect(finished)
 
     def _request(self, url: str) -> QNetworkRequest:
+        """The list goes with Huginn's user agent; the files don't: Mozilla's file server answers
+        406 to a browser's user agent that isn't a browser asking, and takes Qt's own."""
         request = QNetworkRequest(QUrl(url))
-        if self.user_agent:                               # (Mozilla's servers turn some robots away)
+        if self.user_agent and url == self.records_url:
             request.setRawHeader(b"User-Agent", self.user_agent.encode("ascii", "replace"))
         return request
 
@@ -7569,13 +7571,39 @@ MIMIR_MODELS = {
                         "onnx/model_quantized.onnx": (1_742_387_852,
                                                       "202ed81928b7f34c31505b46479c310e131fec307a045eab2537e7c494feb427")}},
 }
-MIMIR_PAGE_CHARS = 9000                   # of the page's text a question sees
+MIMIR_PAGE_CHARS = 3500                   # of the page's text a question sees (on the CPU, every word it
+                                          # writes costs more the longer this is: ~4 words/s at this length)
+MIMIR_ANSWER_TOKENS = {"summary": 220, "page": 220, "history": 280}
 MIMIR_IDLE_S = 300
 MIMIR_PAGE_JS = r"""(() => {
-  const root = document.querySelector('article, main, [role="main"]') || document.body;
-  const text = root ? (root.innerText || '').replace(/\n{3,}/g, '\n\n').trim() : '';
-  return JSON.stringify({title: document.title || '', url: location.href, text: text.slice(0, %d)});
-})()""" % MIMIR_PAGE_CHARS
+  const limit = %LIMIT%;
+  let text = '';
+  try {                                     // the article itself (Readability, as Reader uses), as paragraphs,
+%SOURCE%
+    const article = new Readability(document.cloneNode(true), {charThreshold: 300}).parse();
+    if (article && article.content) {       // without footnote marks, figures, tables or media
+      const tpl = document.createElement('template');
+      tpl.innerHTML = article.content;
+      tpl.content.querySelectorAll('sup, figure, figcaption, table, video, audio, style, script').forEach(n => n.remove());
+      const parts = [];
+      tpl.content.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, dt, dd').forEach(el => {
+        if (el.querySelector('p, li, blockquote, pre')) return;
+        const t = el.textContent.replace(/\s+/g, ' ').trim();
+        if (t) parts.push(t);
+      });
+      text = parts.join('\n\n');
+    }
+  } catch (e) {}
+  if (text.length < 300) {                  // (or, when there's no article, the page's main text)
+    const root = document.querySelector('article, main, [role="main"]') || document.body;
+    text = root ? (root.innerText || '').replace(/\n{3,}/g, '\n\n').trim() : '';
+  }
+  return JSON.stringify({title: document.title || '', url: location.href, text: text.slice(0, limit)});
+})()"""
+
+
+def mimir_page_js() -> str:
+    return MIMIR_PAGE_JS.replace("%LIMIT%", str(MIMIR_PAGE_CHARS)).replace("%SOURCE%", reader_source())
 MIMIR_SYSTEM = ("You are Mímir, the assistant built into the Huginn web browser. You run entirely on the user's own "
                 "computer. Be brief and plain, and answer in the language the user writes in.")
 
@@ -7809,7 +7837,8 @@ window.mimir = {
       env.useBrowserCache = false;
       env.backends.onnx.wasm.wasmPaths = {mjs: '/lib/ort-wasm-simd-threaded.jsep.mjs',
                                           wasm: '/lib/ort-wasm-simd-threaded.jsep.wasm'};
-      env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2) - 1));
+      env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(16, (navigator.hardwareConcurrency || 2) - 1));
+      env.backends.onnx.wasm.proxy = true;          // (in a worker: this page stays free, so answers stream)
       this.tf = tf;
       this.tokenizer = await tf.AutoTokenizer.from_pretrained(cfg.model);
       this.model = await tf.AutoModelForCausalLM.from_pretrained(cfg.model, {dtype: cfg.dtype, device: 'wasm'});
@@ -18163,6 +18192,25 @@ class SuggestionPanel(QWidget):
         p.end()
 
 
+class EnterAction(QObject):
+    """Enter in this text box does the box's own thing (Ask, Find) and nothing else: the key
+    stops here, so it never reaches the sheet and presses its default button too (which Qt
+    makes Done again whenever another button loses focus)."""
+
+    def __init__(self, field: QLineEdit, action) -> None:
+        super().__init__(field)
+        self.action = action
+        field.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
+                and not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier:
+            event.accept()
+            self.action()
+            return True
+        return False
+
+
 class _Sheet(QDialog):
     """A sheet in Huginn's style: frameless card, title, optional message, content, buttons."""
 
@@ -18193,8 +18241,9 @@ class _Sheet(QDialog):
             c.setObjectName("SecondaryButton")
             c.clicked.connect(self.reject)
             row.addWidget(c)
+        self.ok_button: QPushButton | None = None
         if ok:
-            o = QPushButton(ok)
+            o = self.ok_button = QPushButton(ok)
             o.setObjectName("PrimaryButton")
             o.setDefault(True)
             o.clicked.connect(self.accept)
@@ -19096,7 +19145,7 @@ class MimirSheet(_Sheet):
         self.question.setObjectName("SheetInput")
         self.question.setPlaceholderText("Ask about this page…" if self.mode == "page" else
                                          "Ask about pages you've visited…")
-        self.question.returnPressed.connect(lambda: self.run(self.mode))
+        EnterAction(self.question, lambda: self.run(self.mode))
         ask.addWidget(self.question, 1)
         go = QPushButton("Stop" if self.engine.busy() else "Ask")
         go.setObjectName("SecondaryButton")
@@ -19187,7 +19236,7 @@ class MimirSheet(_Sheet):
                     self.refresh()
                     return
                 self.sources = passages
-                self._ask(mimir_messages("history", question, passages=passages))
+                self._ask(mimir_messages("history", question, passages=passages), "history")
                 return
             view = self.view or w.current_view()
             if view is None or view.url().scheme() not in ("http", "https", "file"):
@@ -19204,12 +19253,12 @@ class MimirSheet(_Sheet):
                     self.status = "This page has no text Mímir can read."
                     self.refresh()
                     return
-                self._ask(mimir_messages(kind, question, page=page))
-            view.page().runJavaScript(MIMIR_PAGE_JS, APPLICATION_WORLD, got)
+                self._ask(mimir_messages(kind, question, page=page), kind)
+            view.page().runJavaScript(mimir_page_js(), APPLICATION_WORLD, got)
         self.engine.start(model, ready)
 
-    def _ask(self, messages: list[dict]) -> None:
-        self.status = "Thinking…"
+    def _ask(self, messages: list[dict], kind: str = "page") -> None:
+        self.status = "Reading the page…" if kind != "history" else "Thinking…"
         self.refresh()
 
         def text(out: str) -> None:
@@ -19230,7 +19279,7 @@ class MimirSheet(_Sheet):
                 self.refresh()
             except RuntimeError:
                 pass
-        self.engine.ask(messages, text, done)
+        self.engine.ask(messages, text, done, MIMIR_ANSWER_TOKENS.get(kind, 260))
 
 
 class SiteStyleSheet(_Sheet):
@@ -19699,13 +19748,11 @@ class PasskeySheet(QDialog):
         self.pin.setMaxLength(63)                          # a FIDO2 PIN is at most 63 bytes
         self.pin.setPlaceholderText("PIN")
         self.pin.setObjectName("SheetInput")
-        self.pin.returnPressed.connect(self._continue)
         self.confirm = QLineEdit()
         self.confirm.setEchoMode(QLineEdit.EchoMode.Password)
         self.confirm.setMaxLength(63)
         self.confirm.setPlaceholderText("PIN again")
         self.confirm.setObjectName("SheetInput")
-        self.confirm.returnPressed.connect(self._continue)
         self.error_label = QLabel()
         self.error_label.setObjectName("SheetError")
         self.error_label.setWordWrap(True)
@@ -19984,7 +20031,7 @@ class WeatherSheet(_Sheet):
         self.search.setObjectName("SheetInput")
         self.search.setPlaceholderText("Search for your city")
         self.search.setClearButtonEnabled(True)
-        self.search.returnPressed.connect(self._find)
+        EnterAction(self.search, self._find)            # (Enter finds; it doesn't save and close the sheet)
         search_row.addWidget(self.search, 1)
         find = QPushButton("Find")
         find.setObjectName("SecondaryButton")
