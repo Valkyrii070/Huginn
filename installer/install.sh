@@ -166,7 +166,7 @@ if [ "$UNINSTALL" = 1 ]; then
   pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true            # started as a script (older launchers)
   pkill -f "$VENV/bin/python -c import os, sys; sys.path.insert" 2>/dev/null || true   # this installer's launcher
   [ "$SYS_ENGINE" = 0 ] || pkill -f "import safari_browser; sys.exit(safari_browser.main())" 2>/dev/null || true
-  [ "$SYS_ENGINE" = 0 ] || pkill -f "^[^ ]*python[^ ]* $LAUNCHER( |\$)" 2>/dev/null || true   # --system-engine's launcher
+  [ "$SYS_ENGINE" = 0 ] || pkill -f "^[^ ]*python[^ ]*( -[^ ]+)* $LAUNCHER( |\$)" 2>/dev/null || true   # --system-engine's launcher
   if [ "$SYSTEM" = 1 ]; then                     # for every user: the program goes, people's own data stays
     rm -rf "$W$TARGET" "$W$LAUNCHER" "$W$ENTRY"
     find "$W$ICONS" -name huginn.png -delete 2>/dev/null || true
@@ -447,8 +447,10 @@ else
   if [ "$SYS_ENGINE" = 1 ]; then
     # A Python script, not a shell script that starts python3: the AppArmor profile that lets
     # the page sandbox work is attached to this file's path (see apparmor_profile above).
+    # -I: Python takes no code from the environment (PYTHONPATH and the like) or from the
+    # folder it's started in, so nothing else can borrow this command's profile.
     cat > "$W$LAUNCHER" <<LAUNCH
-#!$RUNPY
+#!$RUNPY -I
 # Starts Huginn (installed in $TARGET) on the system's Python and browser engine.
 # Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
 import sys

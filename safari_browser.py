@@ -3859,10 +3859,30 @@ def mac_app_bundle(folder: str = APP_DIR) -> str | None:
     return path[:i + 4] if i >= 0 else None
 
 
+def launcher_script() -> str | None:
+    """The `huginn` command this process was started through, when that is a Python script run
+    by its "#!" line (the Linux --system-engine install). Ubuntu's AppArmor profile that lets
+    the page sandbox work is attached to that file, so starting again any other way would
+    leave the new Huginn without its sandbox."""
+    if not IS_LINUX:
+        return None
+    for a in getattr(sys, "orig_argv", [])[1:]:
+        if a in ("-c", "-m"):
+            return None
+        if a.startswith("-"):
+            continue
+        own = os.path.basename(a) == os.path.basename(__file__)
+        return a if os.path.isabs(a) and not own and os.access(a, os.X_OK) else None
+    return None
+
+
 def restart_browser(after_pid: int, extra_args: list[str] | None = None) -> bool:
     """Starts Huginn again once this process (after_pid) has closed."""
     program, arguments = browser_launch_command()
     args = [program, os.path.abspath(__file__), "--after", str(after_pid)] + (extra_args or [])
+    launcher = launcher_script()
+    if launcher:                            # as it was started, so it's the same confined program
+        args = [launcher, "--after", str(after_pid)] + (extra_args or [])
     bundle = mac_app_bundle(APP_DIR)
     if bundle:                              # through the app, so it's Huginn in the Dock again
         args = ["/usr/bin/open", "-n", "-a", bundle, "--args", "--after", str(after_pid)] + (extra_args or [])
