@@ -114,20 +114,25 @@ W="$ROOT"                                          # files are written under W; 
 system_hooks() { [ "$SYSTEM" = 1 ] && [ -z "$ROOT" ]; }   # refresh the system's menus, icons, alternatives
 
 # Ubuntu 23.10+ lets a program make the user namespaces Chromium's page sandbox is built from
-# only when an AppArmor profile allows it. This one covers Huginn's own engine (installed for
-# everyone or for one person); without it Huginn runs its pages with the sandbox off.
+# only when an AppArmor profile allows it. The namespace is made by the browser's own process
+# (not by QtWebEngineProcess), so the profile has to cover the `huginn` command itself; without
+# it the engine stops at once ("credentials.cc: Permission denied"). AppArmor attaches a profile
+# by a program's path, which is why the launcher is a Python script run through its "#!" line
+# and not a shell script that starts Python.
 apparmor_profile() {
-  cat <<'PROFILE'
+  local where="$LAUNCHER"
+  [ "$SYSTEM" = 1 ] || where='/{usr/bin,home/*/.local/bin}/huginn'   # whoever installs it for themselves
+  cat <<PROFILE
 # Huginn's web engine (Chromium) builds its page sandbox from user namespaces, which
 # Ubuntu 23.10 and later allow only to programs whose AppArmor profile says so.
 abi <abi/4.0>,
 include <tunables/global>
 
-profile huginn-webengine /{opt/huginn,home/*/.local/share/huginn}/.python/lib/python3*/site-packages/PySide6/Qt/libexec/QtWebEngineProcess flags=(unconfined) {
+profile huginn $where flags=(unconfined) {
   userns,
 
   # Site-specific additions and overrides.
-  include if exists <local/huginn-webengine>
+  include if exists <local/huginn>
 }
 PROFILE
 }
@@ -146,6 +151,7 @@ if [ "$UNINSTALL" = 1 ]; then
   pkill -f "$TARGET/safari_browser.py" 2>/dev/null || true            # started as a script (older launchers)
   pkill -f "$VENV/bin/python -c import os, sys; sys.path.insert" 2>/dev/null || true   # this installer's launcher
   [ "$SYS_ENGINE" = 0 ] || pkill -f "import safari_browser; sys.exit(safari_browser.main())" 2>/dev/null || true
+  pkill -f "^[^ ]*python[^ ]*( -[^ ]+)* $LAUNCHER( |\$)" 2>/dev/null || true   # this installer's launcher (a Python script)
   if [ "$SYSTEM" = 1 ]; then                     # for every user: the program goes, people's own data stays
     rm -rf "$W$TARGET" "$W$LAUNCHER" "$W$ENTRY"
     find "$W$ICONS" -name huginn.png -delete 2>/dev/null || true
@@ -423,7 +429,26 @@ PLIST
   fi
 else
   mkdir -p "$(dirname "$W$LAUNCHER")" "$(dirname "$W$ENTRY")"
-  cat > "$W$LAUNCHER" <<LAUNCH
+  case "$RUNPY" in *[[:space:]]*) SCRIPT_LAUNCHER=0 ;; *) [ "${#RUNPY}" -le 120 ] && SCRIPT_LAUNCHER=1 || SCRIPT_LAUNCHER=0 ;; esac
+  if [ "$SCRIPT_LAUNCHER" = 1 ]; then
+    # A Python script, not a shell script that starts Python: the AppArmor profile that lets
+    # the page sandbox work is attached to this file's path (see apparmor_profile above).
+    # -I: Python takes no code from the environment (PYTHONPATH and the like) or from the
+    # folder it's started in, so nothing else can borrow this command's profile.
+    cat > "$W$LAUNCHER" <<LAUNCH
+#!$RUNPY -I
+# Starts Huginn (installed in $TARGET).
+# Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
+import sys
+
+sys.path.insert(0, "$TARGET")
+sys.argv[0] = "huginn"
+import safari_browser  # noqa: E402
+
+sys.exit(safari_browser.main())
+LAUNCH
+  else                                               # a "#!" line can't hold this path: pages run unsandboxed on Ubuntu
+    cat > "$W$LAUNCHER" <<LAUNCH
 #!/bin/sh
 # Starts Huginn (installed in $TARGET).
 # Imported rather than run as a script, so Python uses its compiled copy (about 0.2 s sooner).
@@ -431,6 +456,7 @@ export HUGINN_DIR="$TARGET"
 exec "$RUNPY" -c 'import os, sys; sys.path.insert(0, os.environ.pop("HUGINN_DIR")); import safari_browser; sys.exit(safari_browser.main())' \
   "\$@"
 LAUNCH
+  fi
   chmod 755 "$W$LAUNCHER"
   for s in 16 32 48 64 128 256 512; do
     if [ -f "$ICONDIR/huginn-$s.png" ]; then
@@ -463,18 +489,20 @@ Name=New Private Window
 Exec=$LAUNCHER --private-window
 DESKTOP
   chmod 644 "$W$ENTRY"
-  if [ "$SYS_ENGINE" = 1 ]; then                   # Ubuntu's own profile covers its engine
-    :
-  elif [ "$SYSTEM" = 1 ]; then                     # the page sandbox's AppArmor profile (Ubuntu 23.10+)
+  if [ "$SYSTEM" = 1 ]; then                       # the page sandbox's AppArmor profile (Ubuntu 23.10+)
+    if system_hooks && grep -qs huginn-webengine /etc/apparmor.d/huginn && command -v apparmor_parser >/dev/null 2>&1; then
+      apparmor_parser -R /etc/apparmor.d/huginn >/dev/null 2>&1 || true      # an older Huginn's profile, named differently
+    fi
     mkdir -p "$W/etc/apparmor.d" && apparmor_profile > "$W/etc/apparmor.d/huginn" && chmod 644 "$W/etc/apparmor.d/huginn"
     if system_hooks && command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
       apparmor_parser -r -W /etc/apparmor.d/huginn >/dev/null 2>&1 || true
     fi
-  elif userns_restricted && [ ! -f /etc/apparmor.d/huginn ] && command -v apparmor_parser >/dev/null 2>&1; then
+  elif userns_restricted && ! grep -qs '^profile huginn .*local/bin' /etc/apparmor.d/huginn && command -v apparmor_parser >/dev/null 2>&1; then
     say ""
     say "  ${B}One more thing:${N} Ubuntu runs a browser's page sandbox only with a small security profile for it."
     PROFILE_TMP="$(mktemp)"; apparmor_profile > "$PROFILE_TMP"
     if [ "$ASK" = 1 ] && [ -t 0 ] && ask "Add Huginn's profile now? (copies it to /etc/apparmor.d - asks for your password)" y \
+       && { ! grep -qs huginn-webengine /etc/apparmor.d/huginn || sudo apparmor_parser -R /etc/apparmor.d/huginn >/dev/null 2>&1 || true; } \
        && sudo install -m 644 "$PROFILE_TMP" /etc/apparmor.d/huginn && sudo apparmor_parser -r -W /etc/apparmor.d/huginn; then
       done_ "Page sandbox profile added"
     else
@@ -483,7 +511,10 @@ DESKTOP
     rm -f "$PROFILE_TMP"
   fi
   if [ "$SYSTEM" = 1 ]; then                       # readable by everyone; pages compiled once, here
-    chmod -R a+rX "$W$TARGET"
+    chmod -R a+rX,go-w "$W$TARGET"
+    # Copied files keep whoever unpacked Huginn as their owner, and the fetched tools the owner
+    # recorded in their archive. A program every user runs must be root's alone to change.
+    [ "$(id -u)" != 0 ] || chown -R 0:0 "$W$TARGET" "$W$LAUNCHER" "$W$ENTRY"
     "$TOOLPY" -m compileall -q "$W$TARGET/safari_browser.py" "$W$TARGET/engine" >/dev/null 2>&1 || true
   fi
   if [ "$SYSTEM" = 0 ] || system_hooks; then
