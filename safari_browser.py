@@ -9161,6 +9161,8 @@ class PasswordVault:
         self.confirmed_at = 0.0
         self._key: bytes | None = None
         self._header: dict = {}
+        self._base: dict | None = None               # what was last read from (or written to) the file: see save()
+        self._stamp: tuple | None = None
 
     # -- state ---------------------------------------------------------------------------------
     @staticmethod
@@ -9206,6 +9208,13 @@ class PasswordVault:
 
     def _master_key(self, master: str) -> bytes:
         header = self._read_header()
+        try:                                           # the file's own word: another program may have changed the master password
+            with open(self.path, encoding="utf-8") as f:
+                on_disk = json.load(f)
+            if isinstance(on_disk, dict) and on_disk.get("format") == VAULT_FORMAT:
+                header = on_disk
+        except (OSError, ValueError):
+            pass
         kdf = header["kdf"]
         try:
             return unseal(derive_key(master, _b64d(kdf["salt"]), kdf), header["master"], b"master")
@@ -9241,17 +9250,102 @@ class PasswordVault:
 
     def lock(self) -> None:
         self._key, self.entries, self.never, self.extras, self.confirmed_at = None, [], set(), {}, 0.0
+        self._base = None
 
-    def _load(self, key: bytes) -> None:
-        header = self._read_header()
+    def key(self) -> bytes | None:
+        return self._key
+
+    def adopt(self, key: bytes) -> None:
+        """Unlocks with the vault key itself (from the session agent on Huginn OS, where another
+        Huginn app already unlocked it). VaultError if the key doesn't fit this file."""
+        self._header = {}
+        self._load(key)
+
+    # The vault is shared: on Huginn OS the Passwords and Mail apps open this same file. Each
+    # program keeps its own copy in memory, so before writing, save() reads what is on disk and
+    # folds the two together change by change (against what this program last read): nothing
+    # either side did is lost. refresh() picks up the other side's changes between writes.
+    def _disk_stamp(self) -> tuple | None:
+        try:
+            st = os.stat(self.path)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _snapshot(self) -> dict:
+        return {"entries": {e["id"]: json.dumps(e, sort_keys=True) for e in self.entries if e.get("id")},
+                "never": {n: True for n in self.never},
+                "extras": {k: json.dumps(v, sort_keys=True) for k, v in self.extras.items()},
+                "header": {k: json.dumps(self._header.get(k), sort_keys=True) for k in ("kdf", "master", "windows")
+                           if k in self._header}}
+
+    @staticmethod
+    def _merge3(base: dict, mine: dict, theirs: dict) -> dict:
+        """A key changed (or removed) here keeps this side's answer; the rest is the other side's."""
+        merged = {}
+        for key in set(mine) | set(theirs):
+            was, me, them = base.get(key), mine.get(key), theirs.get(key)
+            take = me if me != was else them
+            if take is not None:
+                merged[key] = take
+        return merged
+
+    def _take(self, payload: dict) -> None:
+        self.entries = [e for e in payload.get("entries", []) if isinstance(e, dict)]
+        self.never = set(payload.get("never", []))
+        self.extras = payload.get("extras") if isinstance(payload.get("extras"), dict) else {}
+
+    def _read_disk(self, key: bytes) -> tuple[dict, dict, tuple | None]:
+        stamp = self._disk_stamp()
+        with open(self.path, encoding="utf-8") as f:
+            header = json.load(f)
+        if not isinstance(header, dict) or header.get("format") != VAULT_FORMAT:
+            raise VaultError(f"The password file isn't a {BROWSER_NAME} vault.")
         try:
             payload = json.loads(unseal(key, header["data"], b"data"))
         except InvalidTag:
             raise VaultError(f"The password file is damaged or was changed outside {BROWSER_NAME}.") from None
-        self._key = key
-        self.entries = [e for e in payload.get("entries", []) if isinstance(e, dict)]
-        self.never = set(payload.get("never", []))
-        self.extras = payload.get("extras") if isinstance(payload.get("extras"), dict) else {}
+        return header, payload, stamp
+
+    def _load(self, key: bytes) -> None:
+        header, payload, stamp = self._read_disk(key)
+        self._header, self._key = header, key
+        self._take(payload)
+        self._stamp, self._base = stamp, self._snapshot()
+
+    def refresh(self) -> bool:
+        """Picks up what another program saved since this one last looked. True if it changed anything."""
+        if self._key is None or self._disk_stamp() == self._stamp:
+            return False
+        before = self._snapshot()
+        try:
+            self._load(self._key)
+        except (VaultError, OSError, ValueError, KeyError):
+            return False
+        return self._snapshot() != before
+
+    def _fold_in_disk(self) -> None:
+        if self._base is None or not self.exists() or self._disk_stamp() == self._stamp:
+            return
+        try:
+            header, payload, _stamp = self._read_disk(self._key)
+        except (VaultError, OSError, ValueError, KeyError):
+            return                                     # unreadable on disk: this copy is the only good one
+        other = PasswordVault(self.path, self.dpapi)
+        other._header = header
+        other._take(payload)
+        base, mine, theirs = self._base, self._snapshot(), other._snapshot()
+        entries = self._merge3(base["entries"], mine["entries"], theirs["entries"])
+        order = [e["id"] for e in self.entries] + [e["id"] for e in other.entries]
+        self.entries = [json.loads(entries[i]) for i in dict.fromkeys(order) if i in entries]
+        self.never = set(self._merge3(base["never"], mine["never"], theirs["never"]))
+        self.extras = {k: json.loads(v) for k, v in self._merge3(base["extras"], mine["extras"], theirs["extras"]).items()}
+        sealed = self._merge3(base["header"], mine["header"], theirs["header"])
+        for k in ("kdf", "master", "windows"):         # e.g. the master password, changed in the other program
+            if k in sealed:
+                self._header[k] = json.loads(sealed[k])
+            else:
+                self._header.pop(k, None)
 
     def _seal_windows(self) -> None:
         if self.dpapi is None:
@@ -9283,20 +9377,35 @@ class PasswordVault:
 
     def save(self) -> None:
         self._require_unlocked()
-        payload = {"entries": self.entries, "never": sorted(self.never), "saved": time.time()}
-        if self.extras:
-            payload["extras"] = self.extras
-        self._header["data"] = seal(self._key, json.dumps(payload).encode("utf-8"), b"data")
         folder = os.path.dirname(self.path) or "."
         os.makedirs(folder, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._header, f)
-            f.flush()
-            os.fsync(f.fileno())
-        if os.path.exists(self.path):
-            shutil.copy2(self.path, self.path + ".bak")   # the previous version, in case of a crash
-        os.replace(tmp, self.path)
+        gate = None
+        try:
+            try:
+                import fcntl                             # one writer at a time, across programs
+                gate = open(self.path + ".lock", "a+")
+                fcntl.flock(gate, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass                                     # Windows: only the browser writes there
+            self._fold_in_disk()
+            payload = {"entries": self.entries, "never": sorted(self.never), "saved": time.time()}
+            if self.extras:
+                payload["extras"] = self.extras
+            self._header["data"] = seal(self._key, json.dumps(payload).encode("utf-8"), b"data")
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._header, f)
+                f.flush()
+                os.fsync(f.fileno())
+            if not IS_WINDOWS:
+                os.chmod(tmp, 0o600)
+            if os.path.exists(self.path):
+                shutil.copy2(self.path, self.path + ".bak")   # the previous version, in case of a crash
+            os.replace(tmp, self.path)
+            self._stamp, self._base = self._disk_stamp(), self._snapshot()
+        finally:
+            if gate is not None:
+                gate.close()
 
     # -- logins ----------------------------------------------------------------------------------
     def find(self, origin: str, username: str) -> dict | None:
@@ -10231,9 +10340,90 @@ class PasswordManager(QObject):
         self._idle.setSingleShot(True)
         self._idle.setInterval(AUTO_LOCK_MS)
         self._idle.timeout.connect(self.lock)
+        self._session_gen = None                     # the shared session this window joined, if any
+        self._agent_started = False
+        self._step = QTimer(self)                    # keeping in step with the Passwords and Mail apps
+        self._step.setInterval(2000)
+        self._step.timeout.connect(self._in_step)
+        if IS_LINUX:
+            self._step.start()
 
     def available(self) -> bool:
         return self.vault.available()
+
+    # -- Huginn OS: one vault, unlocked once ----------------------------------------------------
+    # The Passwords and Mail apps open this same vault file. A small agent they start holds the
+    # vault key (never the master password) in memory for the login session, and hands it only
+    # to Huginn's own programs installed where only the administrator can change them. So
+    # unlocking in one unlocks the others, and Lock in one locks them all. Off this system there
+    # is no agent and nothing here does anything.
+    @staticmethod
+    def _session_ask(ask: dict) -> dict:
+        if not IS_LINUX or not hasattr(socket, "AF_UNIX"):
+            return {}
+        path = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "huginn-vault.sock")
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(2)
+                conn.connect(path)
+                conn.sendall(json.dumps(ask).encode() + b"\n")
+                reply = json.loads(conn.makefile("rb").readline(4096).decode("utf-8") or "{}")
+                return reply if isinstance(reply, dict) and reply.get("ok") else {}
+        except (OSError, ValueError):
+            return {}
+
+    def try_session_unlock(self) -> bool:
+        """Unlocks without asking if another Huginn app already unlocked the vault this session."""
+        vault = self.vault
+        if not vault.locked():
+            return True
+        if not vault.exists() or not self.available():
+            return False
+        reply = self._session_ask({"do": "get"})
+        if not reply.get("key"):
+            return False
+        try:
+            vault.adopt(_b64d(reply["key"]))
+        except (VaultError, OSError, ValueError, KeyError):
+            return False
+        self._session_gen = reply.get("gen")
+        self._idle.start()
+        self.changed.emit()
+        return True
+
+    def _share_unlock(self) -> None:
+        """This program was unlocked with the master password: let Huginn's other apps in."""
+        key = self.vault.key()
+        if key and self._session_gen is None:
+            agent = "/usr/share/huginn-apps/huginn_vault.py"
+            reply = self._session_ask({"do": "put", "key": _b64e(key)})
+            if not reply and IS_LINUX and os.path.isfile(agent) and not self._agent_started:
+                self._agent_started = True
+                try:
+                    subprocess.Popen([sys.executable or "python3", agent, "agent"], start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError:
+                    return
+                QTimer.singleShot(1200, self._share_unlock)
+                return
+            self._session_gen = reply.get("gen", self._session_gen)
+
+    def _in_step(self) -> None:
+        vault = self.vault
+        if vault.locked():
+            if vault.exists() and self.available():
+                self.try_session_unlock()
+            return
+        if self._session_gen is not None:
+            reply = self._session_ask({"do": "get", "touch": False})
+            if reply and (not reply.get("key") or reply.get("gen") != self._session_gen):
+                self._session_gen = None
+                self._idle.stop()
+                vault.lock()                             # locked in another app: locked here too
+                self.changed.emit()
+                return
+        if vault.refresh():
+            self.changed.emit()
 
     def offer_save(self) -> bool:
         return self.settings.value("offerSavePasswords", True, type=bool)
@@ -10246,6 +10436,10 @@ class PasswordManager(QObject):
         """Passwords were used: the hour before they lock again starts over."""
         if not self.vault.locked():
             self._idle.start()
+            if self._session_gen is None:
+                self._share_unlock()
+            else:
+                self._session_ask({"do": "touch"})
 
     def try_windows_unlock(self) -> bool:
         vault = self.vault
@@ -10263,6 +10457,9 @@ class PasswordManager(QObject):
     def lock(self) -> None:
         self._idle.stop()
         self.vault.lock()
+        if self._session_gen is not None:
+            self._session_ask({"do": "lock"})            # Lock means locked in every Huginn app
+            self._session_gen = None
         self.changed.emit()
 
     def notify(self) -> None:
@@ -25072,7 +25269,7 @@ class BrowserWindow(QWidget):
         if not vault.locked():
             manager.touch()
             return True
-        if manager.try_windows_unlock():
+        if manager.try_windows_unlock() or manager.try_session_unlock():
             return True
 
         def check(password: str) -> str:
