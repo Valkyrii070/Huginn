@@ -5,6 +5,7 @@ import json
 import os
 import ssl
 import sys
+import shutil
 import tempfile
 import threading
 import time
@@ -736,6 +737,65 @@ def clear_all_check():
     sb.wipe_site_data(store_dir)
     left = sorted(os.listdir(store_dir))
     check("site data wipe keeps cookies file for the API, removes storage", left == ["Cookies"], left)
+
+
+@step(0)
+def shared_vault():
+    """The vault is shared with other programs (Huginn OS's Passwords and Mail): two copies open
+    at once must never lose each other's changes, and unlocking by key must only fit this file."""
+    folder = tempfile.mkdtemp(prefix="huginn-vault-test-")
+    path = os.path.join(folder, "passwords.vault")
+    a, b = sb.PasswordVault(path), sb.PasswordVault(path)
+    a.create("a test master pw")
+    a.add_or_update("https://one.example/login", "val", "pw-one")
+    b.unlock("a test master pw")
+    a.add_or_update("https://two.example", "val", "pw-two")                 # a writes
+    b.add_or_update("https://three.example", "val", "pw-three")             # b writes, not having seen it
+    b.set_never("ads.example")
+    a.refresh()
+    check("two programs saving to the vault keep each other's logins",
+          sorted(e["url"] for e in a.entries) == ["https://one.example", "https://three.example", "https://two.example"]
+          and "ads.example" in a.never, [e["url"] for e in a.entries])
+    one = next(e for e in a.entries if e["url"] == "https://one.example")
+    a.update(one["id"], password="pw-one-new")
+    b.delete(next(e for e in b.entries if e["url"] == "https://two.example")["id"])
+    a.refresh()
+    b.refresh()
+    check("an edit in one program and a delete in the other both stand",
+          sorted(e["url"] for e in b.entries) == ["https://one.example", "https://three.example"]
+          and next(e for e in b.entries if e["url"] == "https://one.example")["password"] == "pw-one-new"
+          and sorted(e["id"] for e in a.entries) == sorted(e["id"] for e in b.entries))
+    b.extras["mail"] = {"acct": {"password": "kept for the Mail app"}}
+    b.save()
+    a.add_or_update("https://four.example", "val", "pw-four")
+    b.refresh()
+    check("another program's secrets in the vault survive the browser saving",
+          a.extras.get("mail") == {"acct": {"password": "kept for the Mail app"}} and len(b.entries) == 3)
+    a.change_master("a test master pw", "a second master pw")
+    b.add_or_update("https://five.example", "val", "pw-five")
+    c = sb.PasswordVault(path)
+    try:
+        c.unlock("a test master pw")
+        old_opens = True
+    except sb.WrongPassword:
+        old_opens = False
+    c.unlock("a second master pw")
+    check("a master password changed in one program stays changed when the other saves",
+          not old_opens and len(c.entries) == 4)
+    d = sb.PasswordVault(path)
+    d.adopt(a.key())
+    check("the vault key from the session opens the vault without the master password",
+          not d.locked() and len(d.entries) == 4)
+    e = sb.PasswordVault(path)
+    try:
+        e.adopt(os.urandom(32))
+        fits = True
+    except sb.VaultError:
+        fits = False
+    check("a key that isn't this vault's doesn't open it", not fits and e.locked())
+    if not sb.IS_WINDOWS:
+        check("the vault file is private to the user", (os.stat(path).st_mode & 0o077) == 0, oct(os.stat(path).st_mode))
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 # ---- run ----------------------------------------------------------------------------------------------
