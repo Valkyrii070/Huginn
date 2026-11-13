@@ -1738,6 +1738,15 @@ REPAIR_HINT = ("Run setup.bat in the browser's folder once" if IS_WINDOWS
 
 USERNS_SWITCH = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
 
+# Google's sign-in turns away browsers built on an embedded engine ("This browser or app may
+# not be secure"), and Qt WebEngine looks like one to it. As qutebrowser does, Huginn asks
+# Google's sign-in pages, and only those, with Firefox's user agent (the long-lived ESR).
+GOOGLE_SIGNIN_HOSTS = frozenset({"accounts.google.com"})
+GOOGLE_SIGNIN_USER_AGENT = (
+    "Mozilla/5.0 ({}; rv:140.0) Gecko/20100101 Firefox/140.0".format(
+        "Windows NT 10.0; Win64; x64" if IS_WINDOWS else "Macintosh; Intel Mac OS X 10.15" if IS_MAC
+        else "X11; Linux x86_64")).encode("ascii")
+
 
 def engine_process_path() -> str:
     """The engine's page process: the one in Huginn's own engine, or the system's (/usr/lib/...)
@@ -3921,6 +3930,8 @@ class PrivacyGuard(QWebEngineUrlRequestInterceptor):
         url = info.requestUrl()
         if self.gpc:
             info.setHttpHeader(b"Sec-GPC", b"1")
+        if url.host() in GOOGLE_SIGNIN_HOSTS:
+            info.setHttpHeader(b"User-Agent", GOOGLE_SIGNIN_USER_AGENT)
         if info.resourceType() == _SUB_FRAME and self.on_same_site_frame is not None:
             first = info.firstPartyUrl().host().lower()
             if first and url.host() and registrable_domain(url.host().lower()) == registrable_domain(first):
