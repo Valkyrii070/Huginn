@@ -233,6 +233,8 @@ say ""
 
 # 1. Huginn's files (not anything a copy of Huginn made while running)
 step "Copying Huginn"
+FRESH=1                                            # a fresh install (not an update): its first start shows the tour
+[ -f "$W$TARGET/safari_browser.py" ] && FRESH=0
 mkdir -p "$W$TARGET"
 chmod -R u+w "$W$TARGET" 2>/dev/null || true       # installing again: some files came read-only
 if [ "$(cd "$SOURCE" && pwd -P)" != "$(cd "$W$TARGET" && pwd -P)" ]; then
@@ -240,7 +242,8 @@ if [ "$(cd "$SOURCE" && pwd -P)" != "$(cd "$W$TARGET" && pwd -P)" ]; then
       --exclude=./engine/standard-engine --exclude='*.log' --exclude=./engine/installed.json \
       --exclude=./engine/state.json --exclude=./engine/status.json --exclude=./engine/status.txt \
       --exclude=./engine/build-log.txt --exclude=./engine/builder.pid --exclude=./engine/restart.json \
-      --exclude=./engine/last-error.txt --exclude=./engine/update-check.json --exclude=./.git .) \
+      --exclude=./engine/last-error.txt --exclude=./engine/update-check.json --exclude=./.git \
+      --exclude=./fresh-install.txt .) \
     | (cd "$W$TARGET" && tar xf -) || fail "Copying failed."
 fi
 chmod +x "$W$TARGET/installer/install.sh" 2>/dev/null || true
@@ -250,6 +253,9 @@ if [ "$SYSTEM" = 1 ]; then                         # a program for everyone: no 
   rm -f "$W$TARGET"/{.gitattributes,.gitignore,README.md,run.bat,setup.bat,build-engine.bat,restore-engine.bat} \
         "$W$TARGET"/Install\ Huginn* "$W$TARGET"/*_test.py "$W$TARGET/installer/install.ps1" \
         "$W$TARGET"/engine/{build_engine.py,codec_check.py,codec_test.mp4,gnu_tools.zip}
+fi
+if [ "$FRESH" = 1 ] && [ -z "$ROOT" ]; then          # (not in a package: it's for each install, not each version)
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$-$RANDOM$RANDOM" > "$W$TARGET/fresh-install.txt"
 fi
 done_ "Copied Huginn"
 

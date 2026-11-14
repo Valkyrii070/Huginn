@@ -3503,6 +3503,21 @@ PACKAGE_FILES = ("Install Huginn.bat", "installer/install.ps1",
                  "adblock_test.py", "security_test.py", VERSION_FILE)
 
 
+# What the installers leave in Huginn's folder on a fresh install (never on an update, and not
+# in packages for every user): a line unique to that install. The first start after it shows the
+# welcome tour, even on a computer whose settings remember an earlier copy's. Not one of
+# PACKAGE_FILES, so updates and friends' packages don't carry it.
+FRESH_INSTALL_FILE = "fresh-install.txt"
+
+
+def fresh_install_mark(folder: str = APP_DIR) -> str:
+    try:
+        with open(os.path.join(folder, FRESH_INSTALL_FILE), encoding="utf-8") as f:
+            return f.read(200).strip()
+    except (OSError, ValueError):
+        return ""
+
+
 def app_dir_writable(folder: str = APP_DIR) -> bool:
     """False for a system-wide install (e.g. /opt/huginn from a distribution's package): the
     system's package manager updates it, and it can't make share packages or updates."""
@@ -24622,11 +24637,23 @@ class BrowserWindow(QWidget):
                 "isdefault": 1 if self.is_default_browser() is True else 0,
                 "building": 1 if self.engine is not None and self.engine.busy() else 0}
 
+    def welcome_due(self) -> bool:
+        """The tour is due on the very first start, and on the first start after a fresh install
+        (whose mark this computer's settings haven't seen: they outlive an uninstall, and every
+        copy of Huginn on the computer shares them)."""
+        if not self.settings.value("welcomeShown", False, type=bool):
+            return True
+        mark = fresh_install_mark()
+        return bool(mark) and self.settings.value("welcomeInstall", "", type=str) != mark
+
     def first_run_welcome(self) -> bool:
-        """The tour opens by itself once, on the very first start (More Tools > Welcome Tour brings it back)."""
-        if self.settings.value("welcomeShown", False, type=bool):
+        """Opens the tour by itself when it's due (More Tools > Welcome Tour brings it back any time)."""
+        if not self.welcome_due():
             return False
         self.settings.setValue("welcomeShown", True)
+        mark = fresh_install_mark()
+        if mark:
+            self.settings.setValue("welcomeInstall", mark)
         self.show_welcome()
         return True
 
@@ -28271,9 +28298,9 @@ def main() -> int:
     steps["restored"] = time.perf_counter()
     for target in ([] if private else targets):
         window.add_tab(url_from_user_input(target) or QUrl(START_URL))
-    if (private or not targets) and not restored:
-        window.add_tab(QUrl(START_URL))
-    window.first_run_welcome()
+    if (private or not targets) and not restored:      # the first start opens on the tour itself
+        window.add_tab(QUrl(WELCOME_URL if window.welcome_due() else START_URL))
+    window.first_run_welcome()                         # (or brings it in front of what opened)
     window.show()
     if private:                                        # started as `huginn --private-window`
         QTimer.singleShot(0, window, partial(window.open_private_window, targets))

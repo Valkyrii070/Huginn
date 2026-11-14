@@ -34,7 +34,8 @@ $KeepInData = @('release-key.pem')                     # the key that signs upda
 # Never copied from the source folder (a folder someone ran Huginn in, rather than a fresh package).
 $SkipDirs = @('python', '__pycache__', 'test_out', 'standard-engine', '.git')
 $SkipFiles = @('setup.log', 'installed.json', 'state.json', 'status.json', 'status.txt', 'build-log.txt',
-               'builder.pid', 'update-check.json', 'restart.json', 'last-error.txt', 'build-requested.json')
+               'builder.pid', 'update-check.json', 'restart.json', 'last-error.txt', 'build-requested.json',
+               'fresh-install.txt')
 
 # ------------------------------------------------------------------------------------------ look
 function Test-LightTheme {
@@ -662,6 +663,10 @@ function Start-Install {
     try {
         Copy-Huginn $Source $target
         Write-AppsEntry $target
+        if (-not $S.update) {                                   # a fresh install: its first start shows the tour
+            Set-Content -LiteralPath (Join-Path $target 'fresh-install.txt') -Encoding ASCII `
+                -Value ((Get-Date -Format s) + ' ' + [guid]::NewGuid().ToString('N'))
+        }
         $request = Join-Path $target 'engine\build-requested.json'
         if ($S.video) {
             New-Item -ItemType Directory -Path (Split-Path -Parent $request) -Force | Out-Null
