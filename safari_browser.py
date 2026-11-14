@@ -309,6 +309,44 @@ SITE_DATA_ENTRIES = ("IndexedDB", "Local Storage", "Session Storage", "Service W
                      "History-journal", "Favicons", "Favicons-journal", "Visited Links", "Trust Tokens",
                      "Trust Tokens-journal")
 
+# Passkeys, two fixes in the page itself:
+#  * Autofill ("conditional mediation"): sign-in pages such as Google's ask, as they load, for
+#    passkeys to offer in the username field's suggestions. Huginn has no such suggestions, and the
+#    engine shows those requests as Windows' full "Choose a passkey" window (or Huginn's passkey
+#    sheet) the moment the page opens, before you've asked for anything. So Huginn says it has no
+#    passkey autofill, as Firefox does: pages ask when you click "Use a passkey". A page that asks
+#    anyway waits, as it would for an autofill pick, until it gives up.
+#  * "What can you do?" (PublicKeyCredential.getClientCapabilities): the engine never answers it,
+#    and after a page has asked, every passkey request on that page fails ("not supported"). Pages
+#    ask before offering passkeys, so Huginn answers it here, from what the engine does support.
+PASSKEY_SCRIPT_NAME = "huginn-passkeys"
+PASSKEY_SCRIPT = r"""(() => {
+  const PKC = window.PublicKeyCredential, CC = window.CredentialsContainer;
+  if (!PKC || !CC) return;
+  const swap = (owner, name, handler) => {
+    const d = Object.getOwnPropertyDescriptor(owner, name);
+    if (d && typeof d.value === "function")
+      Object.defineProperty(owner, name, Object.assign({}, d, {value: new Proxy(d.value, handler)}));
+  };
+  const autofill = o => !!(o && typeof o === "object" && o.mediation === "conditional" && o.publicKey);
+  const untilAborted = signal => new Promise((_, reject) => {
+    if (!signal) return;
+    const fail = () => reject(signal.reason !== undefined ? signal.reason
+                                                           : new DOMException("The operation was aborted.", "AbortError"));
+    if (signal.aborted) fail(); else signal.addEventListener("abort", fail, {once: true});
+  });
+  const platform = PKC.isUserVerifyingPlatformAuthenticatorAvailable;
+  swap(CC.prototype, "get", {apply: (f, self, args) =>
+    autofill(args[0]) ? untilAborted(args[0].signal) : Reflect.apply(f, self, args)});
+  swap(CC.prototype, "create", {apply: (f, self, args) => autofill(args[0])
+    ? Promise.reject(new DOMException("The request is not allowed.", "NotAllowedError")) : Reflect.apply(f, self, args)});
+  swap(PKC, "isConditionalMediationAvailable", {apply: () => Promise.resolve(false)});
+  swap(PKC, "getClientCapabilities", {apply: () =>
+    (platform ? Reflect.apply(platform, PKC, []) : Promise.resolve(false)).catch(() => false).then(uv => ({
+      conditionalCreate: false, conditionalGet: false, hybridTransport: __HYBRID__,
+      passkeyPlatformAuthenticator: !!uv, userVerifyingPlatformAuthenticator: !!uv}))});
+})();""".replace("__HYBRID__", "true" if IS_WINDOWS else "false")    # Windows offers "your phone"
+
 # Global Privacy Control's JavaScript half (the Sec-GPC header is the other).
 GPC_SCRIPT_NAME = "safariqt-gpc"
 GPC_SCRIPT = ("Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', "
@@ -1740,12 +1778,22 @@ USERNS_SWITCH = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
 
 # Google's sign-in turns away browsers built on an embedded engine ("This browser or app may
 # not be secure"), and Qt WebEngine looks like one to it. As qutebrowser does, Huginn asks
-# Google's sign-in pages, and only those, with Firefox's user agent (the long-lived ESR).
+# Google's sign-in pages, and only those, with Firefox's user agent. Google also turns away
+# browsers that look out of date, so the version is today's Firefox: it has shipped every two
+# weeks since 155 (1 September 2026), so 160 came out on 10 November 2026.
 GOOGLE_SIGNIN_HOSTS = frozenset({"accounts.google.com"})
-GOOGLE_SIGNIN_USER_AGENT = (
-    "Mozilla/5.0 ({}; rv:140.0) Gecko/20100101 Firefox/140.0".format(
-        "Windows NT 10.0; Win64; x64" if IS_WINDOWS else "Macintosh; Intel Mac OS X 10.15" if IS_MAC
-        else "X11; Linux x86_64")).encode("ascii")
+
+
+def current_firefox_version(today: datetime.date | None = None) -> int:
+    days = ((today or datetime.date.today()) - datetime.date(2026, 11, 10)).days
+    return 160 + max(0, days) // 14
+
+
+def google_signin_user_agent(today: datetime.date | None = None) -> bytes:
+    version = current_firefox_version(today)
+    system = ("Windows NT 10.0; Win64; x64" if IS_WINDOWS else "Macintosh; Intel Mac OS X 10.15" if IS_MAC
+              else "X11; Linux x86_64")
+    return f"Mozilla/5.0 ({system}; rv:{version}.0) Gecko/20100101 Firefox/{version}.0".encode("ascii")
 
 
 def engine_process_path() -> str:
@@ -3931,7 +3979,7 @@ class PrivacyGuard(QWebEngineUrlRequestInterceptor):
         if self.gpc:
             info.setHttpHeader(b"Sec-GPC", b"1")
         if url.host() in GOOGLE_SIGNIN_HOSTS:
-            info.setHttpHeader(b"User-Agent", GOOGLE_SIGNIN_USER_AGENT)
+            info.setHttpHeader(b"User-Agent", google_signin_user_agent())
         if info.resourceType() == _SUB_FRAME and self.on_same_site_frame is not None:
             first = info.firstPartyUrl().host().lower()
             if first and url.host() and registrable_domain(url.host().lower()) == registrable_domain(first):
@@ -27428,6 +27476,15 @@ def configure_profile(profile: QWebEngineProfile) -> None:
         attribute = getattr(attrs, name, None)
         if attribute is not None:
             settings.setAttribute(attribute, on)
+    scripts = profile.scripts()
+    if not scripts.find(PASSKEY_SCRIPT_NAME):
+        script = QWebEngineScript()
+        script.setName(PASSKEY_SCRIPT_NAME)
+        script.setSourceCode(PASSKEY_SCRIPT)
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)    # where the page's own calls go
+        script.setRunsOnSubFrames(True)                                # (sign-in boxes are often frames)
+        scripts.insert(script)
 
 
 def create_application(argv: list[str]) -> QApplication:
