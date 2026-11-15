@@ -124,6 +124,8 @@ class Locker(QObject):
     me = Property("QVariantMap", lambda self: self._me, constant=True)
     realm = Property(str, lambda self: realm(), constant=True)
     liveDir = Property(str, lambda self: live_dir(), constant=True)
+    # The installation drive's session: its account has no password, so an empty one unlocks (PAM agrees: nullok).
+    live = Property(bool, lambda self: os.path.exists("/cdrom/casper/filesystem.squashfs"), constant=True)
 
 
 def main() -> int:

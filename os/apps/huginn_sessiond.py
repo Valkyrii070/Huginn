@@ -47,6 +47,8 @@ NOTIFY_FILE = CONFIG / "huginn-shell" / "notifications.json"
 SYSFS = Path(os.environ.get("HUGINN_SYSFS") or "/sys/class")      # tests point this at a pretend /sys/class
 TESTING = os.environ.get("HUGINN_SESSIOND_TEST") == "1"          # tests may answer questions over D-Bus
 HISTORY = DATA / "huginn" / "notifications.jsonl"
+# The installation drive's session: its account has no password, so nothing locks it by itself (asking still does).
+LIVE = os.path.exists("/cdrom/casper/filesystem.squashfs")
 
 POWER_DEFAULTS = {"ac": {"screenOff": 600, "sleep": 900}, "battery": {"screenOff": 300, "sleep": 600},
                   "lid": "1", "button": "16", "lockOnScreenOff": True, "low": 10, "critical": 5, "criticalAction": "2"}
@@ -768,7 +770,7 @@ class Session(QObject):
             self.do("sleep")
         elif off > 0 and idle >= off and self._stage in ("", "dim") and not self.inhibited("screen"):
             self._stage = "off"
-            if self.power.get("lockOnScreenOff", True):
+            if self.power.get("lockOnScreenOff", True) and not LIVE:
                 self.lock()
             self.screen_off(True)
         elif off > 0 and idle >= max(15, off - 30) and self._stage == "" and not self.inhibited("screen") and self.screen.ok():
@@ -810,7 +812,7 @@ class Session(QObject):
             self.screen_off(True)
             self._stage = "off"
         elif what in ("sleep", "hibernate", "shutdown", "restart") and self.yb:
-            if what in ("sleep", "hibernate"):
+            if what in ("sleep", "hibernate") and not LIVE:
                 self.lock()
             method = {"sleep": "Suspend", "hibernate": "Hibernate", "shutdown": "PowerOff", "restart": "Reboot"}[what]
             if what == "hibernate":

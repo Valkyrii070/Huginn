@@ -679,7 +679,8 @@ The goal is a desktop that is Huginn's from the first screen to the last. Where 
   (`shell/huginn_compositor.py`, `shell/qml/Compositor.qml`, inside cage) is what the notes below describe; it stays
   for `huginn_shell.py --compositor` until the Rust one has caught up with it.
   - **X11 apps** open as windows of their own through xwayland-satellite (built with a small patch:
-    `scripts/build-xwayland-satellite.sh`, `patches/xwayland-satellite/`).
+    `scripts/build-xwayland-satellite.sh`, `patches/xwayland-satellite/`; no longer put in the image, since the new
+    compositor has XWayland built in).
   - **Frosted glass**: the bar, dock, launcher and control centre blur what's behind them, desktop cards the wallpaper
     only — when a GPU draws the scene (a VM without one gets plain glass).
   - **Several screens**: cage spans them; the bar, dock and panels stay on the main one, windows open on the screen
@@ -952,10 +953,19 @@ What round 1 does:
   key or movement brings them back.
 - **Not yet** (rounds 2 and 3): the glass and corners, title bars for other apps (X11 apps get a plain bar for now),
   a visible Alt+Tab switcher, snapping, screenshots and screen sharing for apps, and per-screen settings.
+- **Computers without a GPU driver** (a virtual machine without 3D, "safe graphics", a card Mesa doesn't know): it
+  draws in software instead of refusing to start, as KWin does.
+- **The installation drive's session**: its account has no password, so nothing locks it by itself any more (in
+  either session), and the lock screen there takes an empty password.
 - Tested nested on X11 (`--winit`, the software renderer) with the shell and apps: the bar, dock, widgets and
   launcher; launching from the launcher; the dock bringing an app forward; minimise and close from D-Bus and the keys;
   Alt+Tab; focus after closing; an X11 app; locking, a wrong password, the right one (a test password set in a
   throwaway copy of the image), and the lock screen being killed and coming back.
+- Tested on DRM in a VM (QEMU without KVM or 3D, from the built ISO, started from a text console): the screen, the
+  keyboard and mouse, the shell and the installer, Super and the launcher, locking with Super+L and unlocking with
+  `loginctl unlock-sessions`, switching consoles and back. Found and fixed there: no GPU driver made it stop, and it
+  kept trying to draw while on another console. Still open: in that VM (where the shell took minutes to start) the
+  bar, dock and widgets stayed hidden until the mouse moved or a key was pressed; not seen nested, even under load.
 
 ## Huginn, the browser
 

@@ -245,6 +245,10 @@ build_compositor() {
     rm -rf "$CHROOT/tmp/hc" "$CHROOT"/tmp/hc-*.txt
     # Without it, the session menu mustn't offer a session that can't start.
     [ -x "$CHROOT/usr/bin/huginn-compositor" ] || rm -f "$CHROOT/usr/share/wayland-sessions/huginnos-preview.desktop"
+    # Left by earlier builds (with --from customise): the session's old file name, and xwayland-satellite, which the
+    # Python preview compositor needed and this one doesn't (XWayland is built in).
+    rm -rf "$CHROOT/usr/share/wayland-sessions/huginn-preview.desktop" "$CHROOT/usr/libexec/huginn/xwayland-satellite" \
+           "$CHROOT/usr/share/doc/huginn-xwayland-satellite"
 }
 
 stage_customise() {
@@ -303,20 +307,6 @@ stage_customise() {
             || warn "huginn-grab didn't build: screenshots fall back to KDE's portal backend"
     else
         warn "no C compiler or GIO headers here: huginn-grab isn't built (screenshots fall back to KDE's portal backend)"
-    fi
-
-    # X11 apps in Huginn's own compositor (the preview session): xwayland-satellite, built with Huginn's patch by
-    # scripts/build-xwayland-satellite.sh (here, if it isn't yet and cargo is installed).
-    local xsat="$ROOT/vendor/xwayland-satellite"
-    if [ ! -x "$xsat/xwayland-satellite" ] && command -v cargo >/dev/null 2>&1; then
-        WORK="$WORK" sh "$ROOT/scripts/build-xwayland-satellite.sh" || warn "xwayland-satellite didn't build"
-    fi
-    if [ -x "$xsat/xwayland-satellite" ]; then
-        install -D -m 755 "$xsat/xwayland-satellite" "$CHROOT/usr/libexec/huginn/xwayland-satellite"
-        install -D -m 644 "$xsat/LICENSE" "$CHROOT/usr/share/doc/huginn-xwayland-satellite/LICENSE"
-        [ -z "$(in_chroot ldd /usr/libexec/huginn/xwayland-satellite | grep 'not found')" ] || warn "xwayland-satellite is missing libraries in the image"
-    else
-        warn "no xwayland-satellite: X11 apps won't open in the preview session (the KWin session is unaffected)"
     fi
 
     # Huginn, the browser, from vendor/huginn (see vendor/huginn/SOURCE for the version).

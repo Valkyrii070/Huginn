@@ -23,6 +23,7 @@ FocusScope {
     property bool canSuspend: false
     property bool canSwitchUser: false
     property bool ready: true                                 // false while the host can't take a password yet
+    property bool allowEmpty: false                           // an account with no password (the installation drive's)
     property int idleAfter: 20
     signal submit(string password)
     signal suspend()
@@ -82,7 +83,7 @@ FocusScope {
         pass.forceActiveFocus()
     }
     function send() {
-        if (lock.busy || lock.unlocking || !lock.ready || pass.text === "")
+        if (lock.busy || lock.unlocking || !lock.ready || (pass.text === "" && !lock.allowEmpty))
             return
         lock.wake()
         lock.busy = true

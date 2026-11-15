@@ -692,8 +692,6 @@ enum DeviceAddError {
     DrmNode(CreateDrmNodeError),
     #[error("Failed to add device to GpuManager: {0}")]
     AddNode(egl::Error),
-    #[error("The device has no render node")]
-    NoRenderNode,
     #[error("Primary GPU is missing")]
     PrimaryGpuMissing,
 }
@@ -809,11 +807,15 @@ impl HuginnState<UdevData> {
             let display = unsafe { EGLDisplay::new(gbm.clone()).map_err(DeviceAddError::AddNode)? };
             let egl_device = EGLDevice::device_for_display(&display).map_err(DeviceAddError::AddNode)?;
 
-            if egl_device.is_software() {
-                return Err(DeviceAddError::NoRenderNode);
-            }
-
-            let render_node = egl_device.try_get_render_node().ok().flatten().unwrap_or(node);
+            // No driver for this GPU (a virtual machine without 3D, "safe graphics", a card Mesa doesn't know):
+            // EGL draws in software (llvmpipe) and the screen still works, as it does under KWin. It then has no
+            // render node of its own; the device's render node (or the card itself) stands for it.
+            let render_node = if egl_device.is_software() {
+                warn!(?node, "no GPU driver for this device: drawing in software");
+                node.node_with_type(NodeType::Render).and_then(|n| n.ok()).unwrap_or(node)
+            } else {
+                egl_device.try_get_render_node().ok().flatten().unwrap_or(node)
+            };
             self.backend_data
                 .gpus
                 .as_mut()
@@ -1411,6 +1413,11 @@ impl HuginnState<UdevData> {
 
     fn render_surface(&mut self, node: DrmNode, crtc: crtc::Handle, frame_target: Time<Monotonic>) {
         profiling::scope!("render_surface", &format!("{crtc:?}"));
+
+        // Switched to another console: nothing to draw until we're back (coming back draws everything again).
+        if !self.backend_data.session.is_active() {
+            return;
+        }
 
         let output = if let Some(output) = self.space.outputs().find(|o| {
             o.user_data().get::<UdevOutputId>()

@@ -40,6 +40,7 @@ QtObject {
                     if (LockHost.liveDir !== "")
                         item.liveDir = LockHost.liveDir
                     item.canSuspend = true
+                    item.allowEmpty = LockHost.live
                     item.submit.connect(function (pw) { LockHost.unlock(pw) })
                     item.suspend.connect(function () { LockHost.suspend() })
                     item.done.connect(function () { LockHost.unlocked() })
