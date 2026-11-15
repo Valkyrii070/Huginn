@@ -19,8 +19,9 @@ Faster iterations:
 In the Huginn repository this kit is the `os/` folder: run the same commands from there (`sudo os/scripts/build.sh`).
 Every change to it is checked by GitHub Actions (`.github/workflows/huginn-os.yml`: flake8 and shell syntax, and
 `scripts/ci-smoke.py`, which opens every app and the shell headless; the package lists against Ubuntu 26.04 by hand).
-X11 apps in the preview session need xwayland-satellite: the build makes it with `cargo` when it's installed
-(Rust 1.85+, clang, libxcb-cursor-dev), or run `scripts/build-xwayland-satellite.sh` first.
+Huginn's own compositor (`compositor/`, Rust) is built inside the image: the build puts Rust and the headers in only
+while it builds, then takes them out. Its crates are fetched with `cargo` on the build computer when it has one (kept
+in the work folder), otherwise inside the image.
 
 Local settings that stay out of the repository go in `config/build.local.conf` (sourced after `build.conf`): a nearer
 mirror, `SNAPSHOT=""` for the live archive, faster compression, or `APT_PROXY` / `APT_CA` for a machine that only
@@ -673,9 +674,10 @@ The goal is a desktop that is Huginn's from the first screen to the last. Where 
   Qt and KDE apps get a Kvantum style generated from the tokens (KvAdapta's shapes, Huginn's colours, all four realms
   dark and light) and the realm's KDE colours; GTK 3/4 apps get Breeze-GTK in Huginn's colours, and libadwaita apps
   its named colours. Inter is the font everywhere. Icons are still Papirus.
-- **The compositor**: Huginn's own (`shell/huginn_compositor.py`, `shell/qml/Compositor.qml`) is the session
-  **"Huginn OS (own compositor, preview)"**: glass windows with no title bars (other apps get a floating island), the
-  shell in the same scene, Alt+Tab, Super, Super+Up/Down, Super+L, Print, lock and idle, inside cage.
+- **The compositor**: being replaced with Huginn's own, in Rust on Smithay (see "Huginn's own compositor" below): it
+  is now the session **"Huginn OS (own compositor, preview)"**. The earlier preview in Python
+  (`shell/huginn_compositor.py`, `shell/qml/Compositor.qml`, inside cage) is what the notes below describe; it stays
+  for `huginn_shell.py --compositor` until the Rust one has caught up with it.
   - **X11 apps** open as windows of their own through xwayland-satellite (built with a small patch:
     `scripts/build-xwayland-satellite.sh`, `patches/xwayland-satellite/`).
   - **Frosted glass**: the bar, dock, launcher and control centre blur what's behind them, desktop cards the wallpaper
@@ -911,6 +913,49 @@ camera and microphone, and the two-players rule), then built:
   buttons reaching the apps, two players and the window in front, the media key, the screen shared and stopped,
   apps quitting); Clock's timer driven from the island (start, pause, +1 min, resume, cancel); KWin nested on X11
   with a player and a ringing call (the island opens by itself); both compositor suites; every app in the smoke test.
+
+## Huginn's own compositor, round 1 (2026-11-15)
+
+KWin was holding the design back (glass, islands, the dock's animations, phone pairing), so Huginn gets a compositor of
+its own: `compositor/`, in Rust, built on [Smithay](https://github.com/Smithay/smithay) (pinned to a commit of its main
+branch; it started as a copy of Smithay's example compositor, Anvil, MIT: `LICENSE-Smithay.txt`). It's done in rounds:
+1. **The core** (this round): drawing on the GPU, inputs, windows, X11 apps, locking, and everything the shell and
+   the session daemon already asked of a compositor.
+2. **Huginn's look**: glass and blur, rounded corners, islands, the dock's Ring and streak, snapping.
+3. **What KWin did besides**: screen sharing and screenshots for apps, screen and input settings, night light,
+   accessibility.
+4. **The default**: it becomes the "Huginn" session and KWin goes.
+
+What round 1 does:
+- **Drawing**: on the GPU through DRM/KMS (with a nested window for development: `huginn-compositor --winit`).
+  A game or video filling the screen goes straight to it (direct scanout), and FreeSync/adaptive sync turns on for it
+  on screens that have it. X11 apps through XWayland, built in.
+- **The session** (`/usr/bin/huginn-session-preview`): `huginn-compositor -- /usr/libexec/huginn-session-apps`: it
+  starts the session services and the shell once it's listening (with `WAYLAND_DISPLAY` and `DISPLAY` set), and ends
+  when the shell does. The keyboard layout is the system's (`/etc/default/keyboard`).
+- **Windows**: a new window opens centred in the space the bar and dock leave, a little offset from one already there,
+  and gets the keyboard; when one closes, the one under it does. Super+drag moves a window; Super+Up / Super+Down
+  fill the screen / hide; Alt+F4 closes; Alt+Tab and Alt+Shift+Tab go through them.
+- **The shell**: it hears which window is in front (`org.huginn.Shell.Active`), Super on its own (the launcher),
+  Super+Space (search) and Print / Shift+Print / Super+Shift+S (the picture itself comes in round 3); the dock brings a running app forward and the top
+  bar's app menu minimises and closes through the compositor (`org.huginn.Compositor`: `ActivateApp`,
+  `WindowAction`, `Windows`), with KWin's scripts still used in the KWin session. The hardware keys (volume,
+  brightness, media, power) go to the session daemon.
+- **Locking** (`shell/huginn_locker.py`, `shell/qml/Locker.qml`): Super+L, the session daemon's timers, logind
+  (`loginctl lock-session`, the lid) and going to sleep lock. The compositor starts the lock screen with a connection
+  made only for it; while locked it draws nothing else and sends the keyboard and mouse nowhere else. The lock screen
+  is the same `Lock.qml` as the KWin session's, the password checked through PAM; it unlocks by exiting with success,
+  and if it crashes it's started again, so a broken lock screen never unlocks. `loginctl unlock-sessions` (from a text
+  console) unlocks too.
+- **Idle and the screen**: `IdleTime`, `Lock`, `Blank` and `Locked` as the session daemon already used them; a video
+  that asks the screen to stay on (idle-inhibit) does; the screen-off timer switches the screens off (DPMS) and any
+  key or movement brings them back.
+- **Not yet** (rounds 2 and 3): the glass and corners, title bars for other apps (X11 apps get a plain bar for now),
+  a visible Alt+Tab switcher, snapping, screenshots and screen sharing for apps, and per-screen settings.
+- Tested nested on X11 (`--winit`, the software renderer) with the shell and apps: the bar, dock, widgets and
+  launcher; launching from the launcher; the dock bringing an app forward; minimise and close from D-Bus and the keys;
+  Alt+Tab; focus after closing; an X11 app; locking, a wrong password, the right one (a test password set in a
+  throwaway copy of the image), and the lock screen being killed and coming back.
 
 ## Huginn, the browser
 

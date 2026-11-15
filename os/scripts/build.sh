@@ -53,7 +53,7 @@ die() { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
 umount_chroot() {
     local m
-    for m in dev/pts dev proc sys run; do
+    for m in tmp/hc/crates tmp/hc/target dev/pts dev proc sys run; do
         mountpoint -q "$CHROOT/$m" && umount -l "$CHROOT/$m"
     done
     return 0
@@ -201,6 +201,52 @@ build_rounded_corners() {
     rm -rf "$CHROOT/tmp/rc" "$CHROOT"/tmp/rc-*.txt
 }
 
+build_compositor() {
+    # Huginn's own compositor (compositor/, Rust, built on Smithay): the "own compositor" session at the sign-in screen.
+    # Rust and the headers are put in the image only while it builds, then taken out again, as for rounded corners.
+    local src="$ROOT/compositor" crates="$WORK/cargo-home" target="$WORK/compositor-target"
+    [ -f "$src/Cargo.toml" ] || return 0
+    local deps="rustc cargo pkg-config libudev-dev libinput-dev libgbm-dev libseat-dev libxkbcommon-dev libegl-dev libgles-dev libdrm-dev libpixman-1-dev libdisplay-info-dev libwayland-dev"
+    in_chroot sh -c "dpkg-query -W -f='\${Package}\n' | sort > /tmp/hc-before.txt"
+    if ! in_chroot env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $deps > "$WORK/comp-deps.log" 2>&1; then
+        warn "Rust or the compositor's headers didn't install (see $WORK/comp-deps.log): no \"own compositor\" session"
+        tail -15 "$WORK/comp-deps.log" || true
+    else
+        # The crates (the libraries it's built from, Cargo.lock pins them) are fetched here on the build computer
+        # when it has cargo, and kept in the work folder between builds; the build inside the image then runs offline.
+        mkdir -p "$crates" "$target" "$CHROOT/tmp/hc/src" "$CHROOT/tmp/hc/crates" "$CHROOT/tmp/hc/target"
+        local where=chroot
+        if command -v cargo >/dev/null 2>&1 \
+           && CARGO_HOME="$crates" cargo fetch --locked --manifest-path "$src/Cargo.toml" > "$WORK/comp-fetch.log" 2>&1; then
+            where=host
+        fi
+        rsync -a --delete "$src/" "$CHROOT/tmp/hc/src/"
+        mount --bind "$crates" "$CHROOT/tmp/hc/crates"
+        mount --bind "$target" "$CHROOT/tmp/hc/target"
+        local offline="--offline"
+        if [ "$where" = chroot ]; then                   # no cargo here: the image fetches them itself
+            offline=""
+        fi
+        if in_chroot sh -c "cd /tmp/hc/src && CARGO_HOME=/tmp/hc/crates CARGO_TARGET_DIR=/tmp/hc/target cargo build --release --locked $offline" \
+               > "$WORK/comp-build.log" 2>&1; then
+            install -m 755 "$target/release/huginn-compositor" "$CHROOT/usr/bin/huginn-compositor"
+            install -D -m 644 "$src/LICENSE-Smithay.txt" "$CHROOT/usr/share/doc/huginn-compositor/LICENSE-Smithay.txt"
+            # keep what it links against; everything else the build brought in goes again
+            in_chroot sh -c 'ldd /usr/bin/huginn-compositor | awk "/=> \//{print \$3}" | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | sort -u | xargs -r apt-mark manual >/dev/null'
+        else
+            warn "Huginn's compositor didn't build (see $WORK/comp-build.log): no \"own compositor\" session"
+            tail -25 "$WORK/comp-build.log" || true
+        fi
+        umount "$CHROOT/tmp/hc/crates" "$CHROOT/tmp/hc/target"
+    fi
+    in_chroot sh -c "dpkg-query -W -f='\${Package}\n' | sort > /tmp/hc-after.txt; comm -13 /tmp/hc-before.txt /tmp/hc-after.txt > /tmp/hc-new.txt"
+    in_chroot sh -c 'grep -E -- "-dev\$|^(rustc|rustc-[0-9.]+|cargo|cargo-[0-9.]+|libstd-rust-[0-9.]+(-dev)?|gcc|gcc-[0-9]+|cpp|cpp-[0-9]+|pkg-config|pkgconf|pkgconf-bin|libwayland-bin|libc-dev-bin)\$" /tmp/hc-new.txt | xargs -r env DEBIAN_FRONTEND=noninteractive apt-get purge -y' > "$WORK/comp-purge.log" 2>&1 || true
+    in_chroot env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge >> "$WORK/comp-purge.log" 2>&1 || true
+    rm -rf "$CHROOT/tmp/hc" "$CHROOT"/tmp/hc-*.txt
+    # Without it, the session menu mustn't offer a session that can't start.
+    [ -x "$CHROOT/usr/bin/huginn-compositor" ] || rm -f "$CHROOT/usr/share/wayland-sessions/huginnos-preview.desktop"
+}
+
 stage_customise() {
     log "Apply overlay, theme and system defaults"
     rsync -a --chown=root:root "$ROOT/config/overlay/" "$CHROOT/"
@@ -247,6 +293,7 @@ stage_customise() {
     in_chroot python3 -m compileall -q /usr/share/huginn-apps /usr/share/huginn-shell
 
     build_rounded_corners
+    build_compositor
 
     # huginn-grab: KWin hands pictures of the screen only to programs a .desktop file names, by their executable;
     # Huginn's apps are Python, so this small native helper is the one named (native/huginn-grab.c).

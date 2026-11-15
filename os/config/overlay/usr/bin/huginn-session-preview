@@ -1,16 +1,17 @@
 #!/bin/sh
-# Huginn OS (own compositor, preview): Huginn's own compositor (huginn_shell.py --compositor) with the shell drawn
-# inside it, hosted by cage, which owns the screen, keyboard and mouse. Still being tried out on real computers:
-# the "Huginn" session (KWin) stays the default, and is the one to pick at the sign-in screen if this misbehaves.
+# Huginn OS (own compositor, preview): Huginn's own compositor (huginn-compositor, built on Smithay) in place of KWin,
+# with the same shell, apps and session services. Still being tried out on real computers: the "Huginn" session
+# (KWin) stays the default, and is the one to pick at the sign-in screen if this misbehaves.
 export XDG_CURRENT_DESKTOP=Huginn:KDE
 export XDG_SESSION_DESKTOP=huginn-preview
 export QT_QPA_PLATFORM=wayland
 export QT_QPA_PLATFORMTHEME=kde
-# KDE's parts find the installed apps through Plasma's menu file. Without it KWin knows no apps, and then refuses
-# KDE's portal backend the screen pictures and screen sharing it is allowed (X-KDE-DBUS-Restricted-Interfaces).
+# KDE's parts find the installed apps through Plasma's menu file.
 export XDG_MENU_PREFIX=plasma-
 export PLASMA_INTEGRATION_USE_PORTAL=1
 export GTK_USE_PORTAL=1
 export GDK_DEBUG=portals
-# cage: -d asks clients (that's us) not to draw title bars, -s keeps Ctrl+Alt+F1… for the text consoles.
-exec dbus-run-session -- cage -d -s -m extend -- python3 /usr/share/huginn-shell/huginn_shell.py --compositor
+# The pointer: Breeze's, as in the KWin session (the compositor draws it, and so does X11 apps' server).
+export XCURSOR_THEME=breeze_cursors XCURSOR_SIZE=24
+# The compositor starts the session (services, then the shell) once it's listening, and ends when the shell does.
+exec dbus-run-session -- huginn-compositor -- /usr/libexec/huginn-session-apps

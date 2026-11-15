@@ -2,9 +2,10 @@
 (NetworkManager), Bluetooth (BlueZ), the screen's brightness and the sound (Huginn's session daemon), Do Not Disturb,
 night light (KWin), the notifications that came, and which app is in front.
 
-Which app is in front: under Huginn's compositor the compositor knows; under KWin a small KWin script
-(/usr/share/kwin/scripts/huginnactive) tells the shell over D-Bus (org.huginn.Shell.Active). The shell asks KWin to do
-things to windows (bring an app forward, minimise, close) through KWin's scripting interface, one tiny script at a time.
+Which app is in front: Huginn's own compositor tells the shell over D-Bus (org.huginn.Shell.Active); under KWin a small
+KWin script (/usr/share/kwin/scripts/huginnactive) does. Things done to windows (bring an app forward, minimise, close)
+are asked of Huginn's compositor (org.huginn.Compositor.ActivateApp, WindowAction), or of KWin through its scripting
+interface, one tiny script at a time.
 
 All of it is D-Bus through Gio; nothing here blocks the screen for long (every call has a short timeout).
 """
@@ -419,11 +420,7 @@ if (!w || w.normalWindow || w.dialog)
         inv.return_value(None)
 
     def _kwin_running(self) -> bool:
-        try:
-            return bool(self.sb.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
-                                          GLib.Variant("(s)", ("org.kde.KWin",)), GLib.VariantType("(b)"), 0, 1000, None).unpack()[0])
-        except GLib.Error:
-            return False
+        return self._has_name("org.kde.KWin")
 
     def _app_name(self, app_id: str) -> str:
         low = (app_id or "").lower()
@@ -461,14 +458,40 @@ if (!w || w.normalWindow || w.dialog)
         QTimer.singleShot(3000, tidy)
         return True
 
+    def _own_compositor(self) -> bool:
+        """Huginn's own compositor (org.huginn.Compositor with ActivateApp) is running this session."""
+        return self._has_name("org.huginn.Compositor")
+
+    def _has_name(self, name: str) -> bool:
+        try:
+            return bool(self.sb.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
+                                          GLib.Variant("(s)", (name,)), GLib.VariantType("(b)"), 0, 1000, None).unpack()[0])
+        except GLib.Error:
+            return False
+
+    def _compositor(self, method: str, args: GLib.Variant | None, reply: str | None):
+        """A call to Huginn's own compositor; None when it can't be made."""
+        try:
+            out = self.sb.call_sync("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", method, args,
+                                    GLib.VariantType(reply) if reply else None, 0, 2000, None)
+            return out.unpack() if reply else ()
+        except GLib.Error:
+            return None
+
     @Slot("QVariantMap", result=bool)
     def activateApp(self, app: dict) -> bool:
-        """KWin session: a running app's window comes forward (un-minimised) instead of the app starting again. KWin
-        answers through Activated; with no window of it there, the app is started after all."""
+        """A running app's window comes forward (un-minimised) instead of the app starting again. Huginn's own
+        compositor answers at once; KWin answers through Activated. With no window of it there, the app is started
+        after all."""
         ids = [i.lower() for i in (app.get("wm", ""), app.get("id", "")) if i]
-        if not ids or self._demo or not self.sb or not self._kwin_running():
+        if not ids or self._demo or not self.sb:
             return False
         if self._apps is None or app.get("name") not in self._apps.running:
+            return False
+        if self._own_compositor():
+            found = self._compositor("ActivateApp", GLib.Variant("(s)", (" ".join(ids),)), "(b)")
+            return bool(found and found[0])
+        if not self._kwin_running():
             return False
         self._pending[ids[0]] = app.get("exec", "")
         return self.kwin(f"""var ids = {json.dumps(ids)};
@@ -482,11 +505,15 @@ callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Activated
 
     @Slot(str)
     def windowAction(self, action: str) -> None:
-        """The app menu in the top bar (KWin session): minimise or close the window in front."""
+        """The app menu in the top bar: minimise or close the window in front."""
+        if action not in ("minimise", "close") or self._demo or not self.sb:
+            return
+        if self._own_compositor():
+            self._compositor("WindowAction", GLib.Variant("(s)", (action,)), None)
+            return
         js = {"minimise": "if (workspace.activeWindow) workspace.activeWindow.minimized = true;",
               "close": "if (workspace.activeWindow) workspace.activeWindow.closeWindow();"}.get(action)
-        if js:
-            self.kwin(js)
+        self.kwin(js)
 
     battery = Property("QVariantMap", lambda self: self._battery, notify=changed)
     network = Property("QVariantMap", lambda self: self._network, notify=changed)
