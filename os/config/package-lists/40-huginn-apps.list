@@ -1,0 +1,19 @@
+# Huginn OS apps (Files, Calendar, Mail, Settings, Task Manager, Media Player, Music)
+python3-pyside6.qtmultimedia
+qml6-module-qtmultimedia
+libglib2.0-bin
+xdg-utils
+# Terminal (screen emulation), Documents (PDF)
+python3-pyte
+python3-pyside6.qtpdf
+qml6-module-qtquick-pdf
+# Passwords (the vault), Disks (formats it can make)
+python3-cryptography
+exfatprogs
+dosfstools
+# Mail (the system keyring, when there is one)
+# Formats our own apps open now that the KDE apps are gone: Archives reads 7z, RAR, ISO, CAB and cpio through
+# libarchive's bsdtar; Photos reads AVIF, HEIF, JPEG XL, TIFF, PSD and RAW previews through the Qt image plugins.
+libarchive-tools
+kimageformat-plugins
+qt6-image-formats-plugins

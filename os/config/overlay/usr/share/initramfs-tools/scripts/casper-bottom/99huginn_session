@@ -1,0 +1,12 @@
+#!/bin/sh
+# Live session: casper's autologin setup picks the Plasma session for SDDM. Point it at Huginn instead.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+    prereqs) prereqs; exit 0 ;;
+esac
+f=/root/etc/sddm.conf
+if [ -f "$f" ] && grep -q '^Session=' "$f"; then
+    sed -i 's/^Session=.*/Session=huginn/' "$f"
+fi
+exit 0

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Backup
+Comment=Keep a copy of your files on another drive
+Exec=python3 /usr/share/huginn-apps/huginn_app.py backup 
+Icon=huginn-backup
+Categories=Utility;Archiving;
+StartupWMClass=huginn-backup

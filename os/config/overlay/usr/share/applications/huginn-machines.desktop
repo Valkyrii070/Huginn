@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Machines
+GenericName=Virtual Machines
+Comment=Try other operating systems in a window: Linux, Windows and more
+Exec=python3 /usr/share/huginn-apps/huginn_app.py machines
+Icon=huginn-machines
+Categories=System;Emulator;
+Keywords=virtual;machine;vm;qemu;kvm;windows;linux;iso;test;snapshot;
+StartupWMClass=huginn-machines

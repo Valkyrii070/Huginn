@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Code
+GenericName=Code Editor
+Comment=Write code: projects, Git, a terminal and language servers
+Exec=python3 /usr/share/huginn-apps/huginn_app.py code %f
+Icon=huginn-code
+Categories=Development;IDE;TextEditor;
+Keywords=editor;ide;programming;developer;git;vscode;xcode;text;
+MimeType=text/plain;text/x-python;text/x-python3;application/x-shellscript;text/x-shellscript;application/json;application/xml;text/xml;application/x-yaml;text/yaml;application/toml;text/x-toml;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-rust;text/x-go;text/javascript;application/javascript;text/x-typescript;application/x-typescript;text/css;text/x-makefile;text/x-cmake;text/x-sql;text/x-lua;text/x-java;text/x-csharp;text/x-qml;text/x-log;inode/directory;
+StartupWMClass=huginn-code

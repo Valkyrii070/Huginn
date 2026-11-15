@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Scan
+GenericName=Document Scanner
+Comment=Scan documents, or straighten photos of pages, into PDFs you can search
+Exec=python3 /usr/share/huginn-apps/huginn_app.py scan
+Icon=huginn-scan
+Categories=Graphics;Scanning;OCR;Office;
+Keywords=scan;scanner;document;pdf;ocr;text;receipt;photo;page;
+StartupWMClass=huginn-scan

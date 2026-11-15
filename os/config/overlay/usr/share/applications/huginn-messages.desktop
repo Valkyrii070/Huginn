@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Messages
+Comment=Chat with friends over Matrix, end-to-end encrypted
+Exec=python3 /usr/share/huginn-apps/huginn_app.py messages
+Icon=huginn-messages
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=huginn-messages

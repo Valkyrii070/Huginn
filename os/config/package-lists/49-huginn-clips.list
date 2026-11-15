@@ -1,0 +1,8 @@
+# Clips: MLT (the engine behind Kdenlive and Shotcut) for the viewer and for making the video; frei0r for laying
+# video tracks over one another. ffmpeg (already in) makes thumbnails, waveforms, proxies and scopes.
+melt
+python3-mlt
+libmlt-data
+frei0r-plugins
+# Steadying shaky footage uses ffmpeg's vid.stab filters (Ubuntu's ffmpeg is built with them).
+# Speech to captions uses whisper.cpp or faster-whisper when they're installed (not shipped: the models are large).

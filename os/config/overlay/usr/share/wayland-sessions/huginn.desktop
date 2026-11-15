@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Huginn
+Comment=Huginn desktop
+Exec=/usr/bin/huginn-session
+Type=Application
+DesktopNames=Huginn;KDE

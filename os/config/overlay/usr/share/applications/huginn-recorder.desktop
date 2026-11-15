@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Voice Recorder
+Comment=Record and keep sound
+Exec=python3 /usr/share/huginn-apps/huginn_app.py recorder 
+Icon=huginn-recorder
+Categories=AudioVideo;Audio;Recorder;
+StartupWMClass=huginn-recorder

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Huginn OS (own compositor, preview)
+Comment=Huginn's own compositor, still being tried out. If anything goes wrong, sign in with “Huginn” instead.
+Exec=/usr/bin/huginn-session-preview
+Type=Application
+DesktopNames=Huginn;KDE

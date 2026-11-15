@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Music
+Comment=Play your music
+Exec=python3 /usr/share/huginn-apps/huginn_app.py music %f
+Icon=huginn-music
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=huginn-music
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/mp4;audio/x-wav;

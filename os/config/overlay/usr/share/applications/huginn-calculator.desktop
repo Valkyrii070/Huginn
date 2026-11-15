@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Comment=Do sums
+Exec=python3 /usr/share/huginn-apps/huginn_app.py calculator 
+Icon=huginn-calculator
+Categories=Utility;Calculator;
+StartupWMClass=huginn-calculator

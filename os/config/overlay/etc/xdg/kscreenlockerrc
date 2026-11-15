@@ -1,0 +1,9 @@
+# The lock screen in the KWin session is Huginn's own (the sign-in screen's twin): KDE's locker takes it from the shell
+# package plasmashellrc names (/usr/share/plasma/shells/org.huginn.desktop). No wallpaper of its own underneath.
+[Greeter]
+WallpaperPlugin=org.kde.color
+
+[Daemon]
+# Lock when waking from sleep, and a few seconds' grace to undo an accidental lock with the mouse.
+LockOnResume=true
+LockGrace=5

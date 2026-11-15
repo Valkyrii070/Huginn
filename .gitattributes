@@ -12,3 +12,8 @@ README.txt text eol=crlf
 *.zip   binary
 *.sh       text eol=lf
 *.command  text eol=lf
+
+# Huginn OS's build kit (os/) is not part of the browser's download.
+os/ export-ignore
+*.qsb   binary
+*.jpg   binary

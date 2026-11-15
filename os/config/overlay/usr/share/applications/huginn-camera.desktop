@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Take photos and videos
+Exec=python3 /usr/share/huginn-apps/huginn_app.py camera 
+Icon=huginn-camera
+Categories=AudioVideo;Recorder;
+StartupWMClass=huginn-camera

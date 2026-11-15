@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Podcasts
+Comment=Shows you follow, and their episodes
+Exec=python3 /usr/share/huginn-apps/huginn_app.py podcasts 
+Icon=huginn-podcasts
+Categories=AudioVideo;Audio;
+StartupWMClass=huginn-podcasts

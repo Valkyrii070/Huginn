@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Writer
+Comment=Write letters, reports and other documents
+Exec=python3 /usr/share/huginn-apps/huginn_app.py writer %f
+Icon=huginn-writer
+Categories=Office;WordProcessor;
+StartupWMClass=huginn-writer
+MimeType=text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.text;application/msword;application/rtf;

@@ -1,0 +1,27 @@
+# Settings: the tools each page talks to.
+#   Sound (pactl), battery and power (power profiles, brightness), users (AccountsService), KDE config changes that
+#   take effect at once (kwriteconfig6), VPN files (OpenVPN; WireGuard is built into NetworkManager), and the radio
+#   switch for airplane mode (rfkill, from util-linux).
+pulseaudio-utils
+power-profiles-daemon
+upower
+brightnessctl
+accountsservice
+libkf6config-bin
+network-manager-openvpn
+util-linux
+pciutils
+# Software Update: PackageKit for system updates (and offline updates at restart), fwupd for firmware.
+packagekit
+# (pkcon came in packagekit-tools; PackageKit 1.3 puts pkgcli in packagekit itself)
+fwupd
+# Photos editing and Easel: numpy and Pillow do the picture work; Qt SVG writes SVG.
+python3-numpy
+python3-pil
+python3-pyside6.qtsvg
+# Accessibility: the screen reader and its voice, and an on-screen keyboard (KWin's zoom, colour filters and
+# keyboard helps are built in).
+orca
+speech-dispatcher
+espeak-ng
+maliit-keyboard

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Huginn OS's installer engine, started as root through pkexec (org.huginn.installer) by the Install Huginn OS app.
+# It reads its plan as JSON on stdin and writes its progress as JSON lines on stdout.
+exec /usr/bin/python3 /usr/share/huginn-apps/huginn_install_engine.py "$@"

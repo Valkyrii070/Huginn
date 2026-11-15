@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=Change how Huginn OS looks and works
+Exec=python3 /usr/share/huginn-apps/huginn_app.py settings 
+Icon=huginn-settings
+Categories=Settings;
+StartupWMClass=huginn-settings

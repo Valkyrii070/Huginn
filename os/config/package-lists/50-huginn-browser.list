@@ -1,0 +1,17 @@
+# Huginn, the browser (vendor/huginn). It runs on the system's Qt WebEngine, so engine security
+# fixes arrive through the normal system updates.
+python3-pyside6.qtwidgets
+python3-pyside6.qtnetwork
+python3-pyside6.qtsvg
+python3-pyside6.qtwebchannel
+python3-pyside6.qtwebenginecore
+python3-pyside6.qtwebenginewidgets
+python3-pyside6.qtmultimedia
+python3-pyside6.qttexttospeech
+python3-cryptography
+python3-pyside6.qtdbus
+# What Huginn's own package recommends: read-aloud voices, desktop notifications, the system keyring.
+qt6-speech-speechd-plugin
+speech-dispatcher
+libnotify-bin
+libsecret-tools

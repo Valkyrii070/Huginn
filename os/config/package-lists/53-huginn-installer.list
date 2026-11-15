@@ -1,0 +1,17 @@
+# Huginn OS's own installer (apps/huginn_installer.py and its engine): everything it runs, on the live system, which
+# is also what gets installed. GRUB's two packages for UEFI and BIOS travel on the ISO in pool/ (see build.sh).
+squashfs-tools
+dosfstools
+fdisk
+e2fsprogs
+util-linux
+cryptsetup
+cryptsetup-initramfs
+efibootmgr
+os-prober
+grub-efi-amd64-bin
+grub-efi-amd64-signed
+grub-pc-bin
+grub2-common
+shim-signed
+network-manager

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Slides
+Comment=Make and give presentations
+Exec=python3 /usr/share/huginn-apps/huginn_app.py slides %f
+Icon=huginn-slides
+Categories=Office;Presentation;
+StartupWMClass=huginn-slides
+MimeType=application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.oasis.opendocument.presentation;application/vnd.ms-powerpoint;

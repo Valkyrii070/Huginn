@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Type commands
+Exec=huginn-terminal
+Icon=huginn-terminal
+Categories=System;TerminalEmulator;
+StartupWMClass=huginn-terminal
+X-TerminalArgExec=-e
+X-TerminalArgDir=--workdir

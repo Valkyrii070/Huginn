@@ -1,0 +1,6 @@
+work/
+out/
+config/build.local.conf
+__pycache__/
+*.pyc
+vendor/

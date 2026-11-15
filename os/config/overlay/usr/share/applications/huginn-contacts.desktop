@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Contacts
+Comment=People, numbers and addresses
+Exec=python3 /usr/share/huginn-apps/huginn_app.py contacts %f
+Icon=huginn-contacts
+Categories=Office;ContactManagement;
+StartupWMClass=huginn-contacts
+MimeType=text/vcard;text/x-vcard;text/directory;

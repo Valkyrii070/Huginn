@@ -1,0 +1,83 @@
+# Huginn OS (the os/ folder): checks on every change to it.
+#   lint      Python (flake8: undefined and unused names, syntax) and every shell script's syntax
+#   smoke     every app and the shell open headless in their demo mode and draw themselves, with no QML or
+#             Python errors; the theme generator and the settings portal run (os/scripts/ci-smoke.py)
+#   packages  by hand (Actions › Huginn OS › Run workflow): every package in os/config/package-lists resolves in
+#             Ubuntu 26.04's archive and installs together (a dry run)
+name: Huginn OS
+
+on:
+  push:
+    paths: ["os/**", ".github/workflows/huginn-os.yml"]
+  pull_request:
+    paths: ["os/**", ".github/workflows/huginn-os.yml"]
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Also check the package lists against Ubuntu 26.04"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install flake8
+      - name: Python
+        run: flake8 --select=F --extend-ignore=F541 --exclude=__pycache__ os/apps os/shell os/tokens os/scripts
+      - name: Shell scripts
+        run: |
+          status=0
+          for f in os/config/hooks/*.sh os/scripts/*.sh os/config/overlay/usr/bin/* os/config/overlay/usr/libexec/*; do
+            first=$(head -n1 "$f")
+            case "$first" in
+              *bash*) bash -n "$f" || status=1 ;;
+              "#!"*sh*) sh -n "$f" || status=1 ;;
+            esac
+          done
+          exit $status
+
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python and Qt's libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv python3-gi gir1.2-glib-2.0 python3-numpy python3-scipy \
+            python3-cryptography python3-pil libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 fonts-noto-core
+          python3 -m venv --system-site-packages /tmp/venv
+          /tmp/venv/bin/pip install PySide6
+      - name: Apps and shell, headless
+        run: /tmp/venv/bin/python os/scripts/ci-smoke.py
+      - name: Pictures of what they drew
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: huginn-os-smoke-pictures
+          path: /tmp/huginn-smoke/shots
+          retention-days: 7
+
+  packages:
+    if: github.event_name == 'workflow_dispatch' && inputs.packages
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every package resolves, and they install together
+        run: |
+          apt-get update
+          pkgs=$(sed 's/#.*//' os/config/package-lists/*.list | tr -s ' \t' '\n' | grep -v '^$' | sort -u)
+          missing=""
+          for p in $pkgs; do apt-cache show "$p" > /dev/null 2>&1 || missing="$missing $p"; done
+          if [ -n "$missing" ]; then echo "Not in Ubuntu 26.04:$missing"; exit 1; fi
+          echo "All $(echo "$pkgs" | wc -l) packages resolve."
+          apt-get install --dry-run --no-install-recommends -y $pkgs > /tmp/dry.txt
+          grep -c '^Inst ' /tmp/dry.txt

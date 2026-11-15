@@ -1,0 +1,12 @@
+#!/bin/sh
+# Huginn's Terminal, as the system's terminal (x-terminal-emulator): huginn-terminal [--workdir DIR] [-e COMMAND [ARGS...]]
+dir=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --workdir|-w) dir="$2"; shift 2 ;;
+        --workdir=*) dir="${1#*=}"; shift ;;
+        -e|-x|--) shift; exec python3 /usr/share/huginn-apps/huginn_app.py terminal ${dir:+"$dir"} --run "$@" ;;
+        *) [ -d "$1" ] && dir="$1"; shift ;;
+    esac
+done
+exec python3 /usr/share/huginn-apps/huginn_app.py terminal ${dir:+"$dir"}

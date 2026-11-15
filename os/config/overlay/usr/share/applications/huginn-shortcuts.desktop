@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Shortcuts
+Comment=Little recipes that do several things for you
+Exec=python3 /usr/share/huginn-apps/huginn_app.py shortcuts
+Icon=huginn-shortcuts
+Categories=Utility;
+StartupWMClass=huginn-shortcuts

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System Monitor
+Comment=See what your computer is doing and end programs
+Exec=python3 /usr/share/huginn-apps/huginn_app.py monitor
+Icon=huginn-monitor
+Categories=System;Monitor;
+StartupWMClass=huginn-monitor

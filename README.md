@@ -81,6 +81,14 @@ Huginn is one Python file (`safari_browser.py`) on PySide6 / Qt WebEngine. To ru
 double-click `run.bat`: the first run puts a portable Python and PySide6 inside the folder, and nothing is
 installed system-wide. [README.txt](README.txt) is the full manual: every feature, setting and shortcut.
 
+## Huginn OS
+
+[`os/`](os/README.md) is the build kit for **Huginn OS**, a desktop Linux built around Huginn on Ubuntu 26.04: its
+own shell, sign-in and lock screens, installer, file chooser and about fifty native apps, in the same glass-and-islands
+look. `sudo os/scripts/build.sh` makes the ISO (the browser in it is this repository); the
+[Huginn OS workflow](.github/workflows/huginn-os.yml) checks every change to it. It is not part of the browser's
+download.
+
 ## Privacy
 
 Huginn sends nothing about you anywhere. The only things it fetches by itself are the filter lists (EasyList,

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Media Player
+Comment=Play videos
+Exec=python3 /usr/share/huginn-apps/huginn_app.py video %f
+Icon=huginn-video
+Categories=AudioVideo;Video;Player;
+StartupWMClass=huginn-video
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;

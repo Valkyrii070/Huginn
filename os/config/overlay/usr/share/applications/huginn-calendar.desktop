@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Calendar
+Comment=Your month and your events
+Exec=python3 /usr/share/huginn-apps/huginn_app.py calendar %f
+MimeType=text/calendar;
+Icon=huginn-calendar
+Categories=Office;Calendar;
+StartupWMClass=huginn-calendar

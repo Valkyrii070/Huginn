@@ -1,0 +1,156 @@
+# Huginn OS's boot screen (Plymouth script).
+# The realm's scene, soft and dark (the same northern lights the sign-in screen brings to life), the Huginn OS mark,
+# and a thin line of the realm's light that fills as the computer starts. When a disk is encrypted, the line gives way
+# to a glass pill for its password, a bullet for each key. Shutting down and restarting show the mark alone; updates
+# being put in say so and how far along they are. Messages (a disk being checked) appear near the bottom.
+
+Window.SetBackgroundTopColor(0.020, 0.043, 0.047);
+Window.SetBackgroundBottomColor(0.027, 0.031, 0.059);
+
+W = Window.GetWidth();
+H = Window.GetHeight();
+X0 = Window.GetX();
+Y0 = Window.GetY();
+CY = Y0 + H * 0.44;                                      # the mark's middle, a little above the centre
+
+# ---- the backdrop, scaled to cover the screen
+back.image = Image("backdrop.png");
+back.k = Math.Max(W / back.image.GetWidth(), H / back.image.GetHeight());
+back.scaled = back.image.Scale(back.image.GetWidth() * back.k, back.image.GetHeight() * back.k);
+back.sprite = Sprite(back.scaled);
+back.sprite.SetPosition(X0 + W / 2 - back.scaled.GetWidth() / 2, Y0 + H / 2 - back.scaled.GetHeight() / 2, -10);
+back.sprite.SetOpacity(0);
+
+# ---- the mark
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.sprite.SetPosition(X0 + W / 2 - logo.image.GetWidth() / 2, CY - logo.image.GetHeight() / 2, 2);
+logo.sprite.SetOpacity(0);
+
+mode = Plymouth.GetMode();
+quiet = (mode == "shutdown" || mode == "reboot");          # going away: the mark alone
+if (mode == "updates" || mode == "system-upgrade") subtitle = "Putting updates in. Keep the computer on.";
+else if (mode == "firmware-upgrade") subtitle = "Updating firmware. Keep the computer on.";
+else subtitle = "";
+
+# ---- the line of light
+LY = CY + logo.image.GetHeight() / 2 + 54;
+track.image = Image("track.png");
+track.sprite = Sprite(track.image);
+track.x = X0 + W / 2 - track.image.GetWidth() / 2;
+track.sprite.SetPosition(track.x, LY, 3);
+track.sprite.SetOpacity(0);
+fill.image = Image("fill.png");
+fill.sprite = Sprite();
+fill.sprite.SetPosition(track.x, LY, 4);
+shown = 0;                                               # the fill as drawn: eases toward what Plymouth reports
+wanted = 0;
+fun progress(duration, fraction) {
+    global.wanted = fraction;
+}
+Plymouth.SetBootProgressFunction(progress);
+
+if (subtitle != "") {
+    sub.image = Image.Text(subtitle, 0.86, 0.88, 0.90, 1, "Sans 11");
+    sub.sprite = Sprite(sub.image);
+    sub.sprite.SetPosition(X0 + W / 2 - sub.image.GetWidth() / 2, LY + 22, 3);
+}
+
+t = 0;
+asking = 0;
+fun refresh() {
+    global.t = global.t + 1;
+    fade = Math.Min(1, global.t / 30);
+    back.sprite.SetOpacity(fade);
+    logo.sprite.SetOpacity(Math.Min(1, global.t / 22));
+    bar = (1 - global.asking) * (1 - global.quiet);
+    track.sprite.SetOpacity(bar * fade);
+    global.shown = global.shown + (global.wanted - global.shown) * 0.08;
+    w = Math.Int(track.image.GetWidth() * global.shown);
+    if (w > global.drawn + 1 || w < global.drawn - 1) {           # rescale only when it has grown a pixel or more
+        global.drawn = w;
+        if (w >= 4) fill.sprite.SetImage(fill.image.Scale(w, fill.image.GetHeight()));
+    }
+    if (global.drawn >= 4) fill.sprite.SetOpacity(bar * fade);
+    else fill.sprite.SetOpacity(0);
+}
+drawn = 0;
+Plymouth.SetRefreshFunction(refresh);
+
+# ---- the disk's password: a glass pill where the line was
+pill.image = Image("pill.png");
+pill.sprite = Sprite(pill.image);
+pill.x = X0 + W / 2 - pill.image.GetWidth() / 2;
+pill.y = LY + 8;
+pill.sprite.SetPosition(pill.x, pill.y, 5);
+pill.sprite.SetOpacity(0);
+lock.image = Image("lock.png");
+lock.sprite = Sprite(lock.image);
+lock.sprite.SetPosition(pill.x + 12, pill.y + pill.image.GetHeight() / 2 - lock.image.GetHeight() / 2, 6);
+lock.sprite.SetOpacity(0);
+bullet = Image("bullet.png");
+head.image = Image.Text("Enter the password to unlock this disk", 0.93, 0.94, 0.95, 1, "Sans 12");
+head.sprite = Sprite(head.image);
+head.sprite.SetPosition(X0 + W / 2 - head.image.GetWidth() / 2, pill.y - 34, 6);
+head.sprite.SetOpacity(0);
+place.image = Image.Text("Password", 0.62, 0.66, 0.70, 1, "Sans 12");
+place.sprite = Sprite(place.image);
+place.sprite.SetPosition(pill.x + 48, pill.y + pill.image.GetHeight() / 2 - place.image.GetHeight() / 2, 6);
+place.sprite.SetOpacity(0);
+
+fun show_password(text, bullets) {
+    global.asking = 1;
+    pill.sprite.SetOpacity(1);
+    lock.sprite.SetOpacity(1);
+    head.sprite.SetOpacity(1);
+    if (bullets == 0) place.sprite.SetOpacity(1);
+    else place.sprite.SetOpacity(0);
+    for (i = 0; i < 32; i++) {                          # one bullet for each key, as many as fit in the pill
+        if (!global.marks[i]) global.marks[i] = Sprite(bullet);
+        global.marks[i].SetPosition(pill.x + 50 + i * 14, pill.y + pill.image.GetHeight() / 2 - bullet.GetHeight() / 2, 7);
+        if (i < bullets && i < 19) global.marks[i].SetOpacity(1);
+        else global.marks[i].SetOpacity(0);
+    }
+}
+Plymouth.SetDisplayPasswordFunction(show_password);
+
+fun show_question(text, entry) {                     # a question with a visible answer (rare): shown the same way
+    show_password(text, 0);
+    place.sprite.SetOpacity(0);
+    global.answer.image = Image.Text(entry, 0.93, 0.94, 0.95, 1, "Sans 12");
+    if (!global.answer.sprite) global.answer.sprite = Sprite();
+    global.answer.sprite.SetImage(global.answer.image);
+    global.answer.sprite.SetPosition(pill.x + 48, pill.y + pill.image.GetHeight() / 2 - global.answer.image.GetHeight() / 2, 7);
+    global.answer.sprite.SetOpacity(1);
+}
+Plymouth.SetDisplayQuestionFunction(show_question);
+
+fun show_normal() {
+    global.asking = 0;
+    pill.sprite.SetOpacity(0);
+    lock.sprite.SetOpacity(0);
+    head.sprite.SetOpacity(0);
+    place.sprite.SetOpacity(0);
+    for (i = 0; i < 32; i++) if (global.marks[i]) global.marks[i].SetOpacity(0);
+    if (global.answer.sprite) global.answer.sprite.SetOpacity(0);
+}
+Plymouth.SetDisplayNormalFunction(show_normal);
+
+# ---- messages near the bottom (a disk being checked, and so on)
+msg.sprite = Sprite();
+fun message(text) {
+    global.msg.image = Image.Text(text, 0.80, 0.83, 0.86, 1, "Sans 11");
+    global.msg.sprite.SetImage(global.msg.image);
+    global.msg.sprite.SetPosition(X0 + W / 2 - global.msg.image.GetWidth() / 2, Y0 + H * 0.9, 4);
+}
+Plymouth.SetMessageFunction(message);
+
+# ---- updates being put in (offline updates): the line shows how far along, and the words say it too
+upd.sprite = Sprite();
+fun system_update(percent) {
+    global.wanted = percent / 100;
+    global.upd.image = Image.Text(Math.Int(percent) + "%", 0.80, 0.83, 0.86, 1, "Sans 11");
+    global.upd.sprite.SetImage(global.upd.image);
+    global.upd.sprite.SetPosition(X0 + W / 2 - global.upd.image.GetWidth() / 2, LY + 44, 4);
+}
+Plymouth.SetSystemUpdateFunction(system_update);

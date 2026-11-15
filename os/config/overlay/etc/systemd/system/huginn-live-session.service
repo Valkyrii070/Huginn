@@ -1,0 +1,11 @@
+[Unit]
+Description=Sign in to Huginn's session on the installation drive
+ConditionKernelCommandLine=boot=casper
+Before=display-manager.service sddm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/huginn-live-session
+
+[Install]
+WantedBy=display-manager.service

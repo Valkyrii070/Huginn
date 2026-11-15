@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Weather
+Comment=The forecast for places you choose
+Exec=python3 /usr/share/huginn-apps/huginn_app.py weather 
+Icon=huginn-weather
+Categories=Utility;
+StartupWMClass=huginn-weather

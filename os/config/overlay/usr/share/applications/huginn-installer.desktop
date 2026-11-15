@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Install Huginn OS
+GenericName=Installer
+Comment=Put Huginn OS on this computer
+Exec=python3 /usr/share/huginn-apps/huginn_app.py installer
+Icon=huginn-os
+Categories=System;
+Keywords=install;installer;disk;setup;
+StartupNotify=true

@@ -1,0 +1,4 @@
+# Huginn OS: KWin's defaults for the Huginn session.
+[Plugins]
+# Tells Huginn's top bar which app is in front (/usr/share/kwin-wayland/scripts/huginnactive).
+huginnactiveEnabled=true

@@ -1,0 +1,22 @@
+# Phone (pairing with a phone)
+kdeconnect
+# Print & Scan (printers that need no driver appear by themselves; network and USB scanners)
+cups
+cups-browsed
+ipp-usb
+sane-utils
+sane-airscan
+# Maps (the map itself)
+python3-pyside6.qtlocation
+python3-pyside6.qtpositioning
+qml6-module-qtlocation
+qt6-location-plugins
+qml6-module-qtpositioning
+# Screenshot's "Record a Video" (the desktop's screen-sharing service, PipeWire, and the video writer)
+python3-gi
+xdg-desktop-portal-kde
+gstreamer1.0-tools
+gstreamer1.0-pipewire
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-base
+# Translate is not here: Argos Translate isn't in Ubuntu's archive. See "Translate" in the README.

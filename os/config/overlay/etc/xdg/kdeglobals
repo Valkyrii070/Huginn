@@ -1,0 +1,16 @@
+# Huginn OS's defaults for KDE's parts and for Qt apps. The Aurora colours are added below at build time; each
+# user's realm and dark-or-light are put in place by the shell (apps/huginn_look.py).
+[General]
+TerminalApplication=huginn-terminal
+TerminalService=huginn-terminal.desktop
+ColorScheme=HuginnAuroraDark
+font=Inter Variable,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+menuFont=Inter Variable,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+toolBarFont=Inter Variable,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+smallestReadableFont=Inter Variable,8,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+fixed=JetBrains Mono,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+
+[KDE]
+# Huginn's look for Qt apps: Kvantum with Huginn's theme (/usr/share/Kvantum/Huginn*)
+widgetStyle=kvantum
+

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Help
+Comment=Short guides to Huginn OS and its apps
+Exec=python3 /usr/share/huginn-apps/huginn_app.py help %u
+Icon=huginn-help
+Categories=Utility;Documentation;
+StartupWMClass=huginn-help

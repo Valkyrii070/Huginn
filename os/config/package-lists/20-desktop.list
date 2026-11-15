@@ -1,0 +1,45 @@
+# Display manager + compositor (KWin on Wayland). plasma-workspace stays in 0.x as the fallback session
+# and for its background services; plasmashell is not started in the Huginn session.
+sddm
+kwin-wayland
+plasma-workspace
+plasma-session-wayland
+xwayland
+xdg-desktop-portal-kde
+xdg-user-dirs
+# Shell services. Notifications, power, the hardware keys, Wi‑Fi passwords and Bluetooth pairing are Huginn's own
+# session daemon (apps/huginn_sessiond.py); Plasma's (plasma-nm, plasma-pa, powerdevil, bluedevil) are not-wanted.
+kscreen
+kde-cli-tools
+kio-extras
+libnotify-bin
+wireplumber
+bluez
+upower
+# Theming
+breeze
+breeze-gtk-theme
+kde-config-gtk-style
+qt6-style-kvantum
+qt-style-kvantum-themes
+papirus-icon-theme
+fonts-inter-variable
+fonts-jetbrains-mono
+fonts-noto-core
+fonts-noto-color-emoji
+# Native apps (deliberately few)
+udisks2
+ffmpeg
+gvfs-backends
+gvfs-fuse
+avahi-utils
+# App delivery (no snapd): Flatpak, driven by the Huginn App Store
+flatpak
+# Huginn runtime (Phase 2 replaces this with the huginn .deb)
+python3
+python3-pyqt6
+python3-pyqt6.qtwebengine
+# Installer
+# Huginn's password prompt (apps/huginn_polkit.py) speaks to polkit through its own GObject bindings
+gir1.2-polkit-1.0
+pkexec

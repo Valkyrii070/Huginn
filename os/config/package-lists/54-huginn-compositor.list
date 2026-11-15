@@ -1,0 +1,11 @@
+# Huginn's own pieces that replaced KDE's:
+#  - Open and Save windows (apps/huginn_portal.py) through the desktop portal
+#  - the compositor (shell/huginn_compositor.py + qml/Compositor.qml, the preview session), hosted by cage, with
+#    X11 apps through xwayland-satellite (scripts/build-xwayland-satellite.sh; it runs Xwayland)
+xdg-desktop-portal
+cage
+qml6-module-qtwayland-compositor
+qml6-module-qtquick-effects
+qml6-module-qtcore
+xwayland
+libxcb-cursor0

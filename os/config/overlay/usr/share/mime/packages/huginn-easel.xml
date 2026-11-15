@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-huginn-easel">
+    <comment>Easel picture</comment>
+    <sub-class-of type="application/zip"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.easel"/>
+    <magic priority="70">
+      <match type="string" value="PK\003\004" offset="0">
+        <match type="string" value="mimetypeapplication/x-huginn-easel" offset="30"/>
+      </match>
+    </magic>
+  </mime-type>
+</mime-info>

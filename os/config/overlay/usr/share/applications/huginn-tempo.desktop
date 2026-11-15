@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tempo
+GenericName=Music Studio
+Comment=Make music: instruments, drummers, loops, recording and a mixer
+Exec=python3 /usr/share/huginn-apps/huginn_app.py tempo %f
+Icon=huginn-tempo
+Categories=AudioVideo;Audio;Midi;Sequencer;Music;
+Keywords=music;daw;studio;garageband;midi;record;synth;drums;beat;loops;mix;piano;
+MimeType=audio/midi;audio/x-midi;
+StartupWMClass=huginn-tempo

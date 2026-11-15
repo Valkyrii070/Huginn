@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Huginn OS</vendor>
+  <vendor_url>https://github.com/Valkyrii070/Huginn</vendor_url>
+  <action id="org.huginn.login-look">
+    <description>Change how the sign-in screen looks</description>
+    <message>Settings wants to change the sign-in screen's realm, which everyone on this computer sees.</message>
+    <icon_name>preferences-desktop-theme</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/huginn-login-look</annotate>
+  </action>
+</policyconfig>
