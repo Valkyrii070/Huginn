@@ -65,10 +65,10 @@ Glass {
                     width: 153; height: conns.height + 24
                     Column { id: conns; x: 12; y: 12; width: parent.width - 24; spacing: 11
                         Conn { visible: cc.net.wifiDevice; title: "Wi‑Fi"; glyph: "wifi"; page: "network"; on: cc.net.wifiOn
-                            sub: !cc.net.wifiOn ? "Off" : cc.net.kind === "wifi" ? cc.net.name : "Not connected"
+                            sub: !cc.net.wifiOn ? "Off" : cc.net.wifiName ? cc.net.wifiName + (cc.net.kind === "wired" ? " \u00b7 connected (wired is used)" : "") : "Not connected"
                             onToggled: function (on) { Status.setWifi(on) } }
-                        Conn { visible: !cc.net.wifiDevice || cc.net.kind === "wired"; title: cc.net.kind === "wired" ? "Wired" : "Network"; glyph: "globe"; page: "network"
-                            on: cc.net.kind !== "none"; sub: cc.net.kind === "none" ? "Not connected" : cc.net.name }
+                        Conn { visible: !cc.net.wifiDevice || cc.net.wired; title: cc.net.wired ? "Wired" : "Network"; glyph: "globe"; page: "network"
+                            on: cc.net.wired || cc.net.kind !== "none"; sub: cc.net.wired ? (cc.net.wiredName || "Connected") : cc.net.kind === "none" ? "Not connected" : cc.net.name }
                         Conn { visible: Status.bluetooth.present; title: "Bluetooth"; glyph: "bluetooth"; page: "bluetooth"; on: Status.bluetooth.on
                             sub: Status.bluetooth.on ? "On" : "Off"; onToggled: function (on) { Status.setBluetooth(on) } } }
                 }

@@ -7,6 +7,7 @@ Item {
     id: bar
     signal controlCentre()
     signal launcher()
+    signal search()                       // the magnifier: Search everything (Super+Space)
     signal windowAction(string action)    // "minimise" or "close": the window in front (the host does it)
     property bool solid: false
     property string appName: "Huginn"
@@ -84,7 +85,15 @@ Item {
         }
     }
 
+    Pressable {   // Search everything
+        id: searchButton
+        anchors { right: statusPill.left; rightMargin: 4; verticalCenter: parent.verticalCenter }
+        width: 28; height: 22; radius: 11
+        onClicked: bar.search()
+        Glyph { anchors.centerIn: parent; name: "search"; size: 14 }
+    }
     Pressable {
+        id: statusPill
         anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
         width: status.width + 16; height: 22; radius: 11
         onClicked: { Status.refreshPanel(); bar.controlCentre() }

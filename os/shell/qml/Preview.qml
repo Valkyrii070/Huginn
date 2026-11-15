@@ -13,7 +13,8 @@ Window {
     Wallpaper { anchors.fill: parent }
     MouseArea { anchors.fill: parent; onClicked: win.open = "" }
     Widgets { x: 22; y: 52 }
-    TopBar { width: parent.width; onControlCentre: win.open = win.open === "cc" ? "" : "cc"; onLauncher: win.open = win.open === "launcher" ? "" : "launcher" }
+    property string searchText: ""
+    TopBar { width: parent.width; onControlCentre: win.open = win.open === "cc" ? "" : "cc"; onLauncher: win.open = win.open === "launcher" ? "" : "launcher"; onSearch: win.open = win.open === "search" ? "" : "search" }
     Dock {
         id: dock
         anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 14 }
@@ -34,10 +35,21 @@ Window {
         x: win.open === "cc" ? parent.width - width - 10 : parent.width + 10
         Behavior on x { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
     }
+    Rectangle { anchors.fill: parent; color: "black"; opacity: launcher.presence * 0.22 + search.presence * 0.4; visible: opacity > 0 }
     Launcher {
+        id: launcher
         onDone: win.open = ""
-        visible: opacity > 0; opacity: win.open === "launcher" ? 1 : 0
-        x: dock.x; y: parent.height - height - 92
-        Behavior on opacity { NumberAnimation { duration: 150 } }
+        onSearchEverything: function (text) { search.startText = text; win.open = "search" }
+        shown: win.open === "launcher"
+        height: Math.min(660, parent.height - 132)
+        anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 92 }
+        orb: Qt.point(dock.x + 32 - x, dock.y + 32 - y)
+    }
+    Search {
+        id: search
+        anchors.fill: parent
+        shown: win.open === "search"
+        onDone: win.open = ""
+        Component.onCompleted: if (startQuery) text = startQuery
     }
 }

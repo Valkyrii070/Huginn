@@ -9,20 +9,37 @@ QtObject {
     property string open: ""
     property bool settled: !arriving       // after the arrival from the sign-in screen, the desktop's pieces come in
     property bool tabsOpen: false
+    property string searchText: ""
+    property var dockIsland: null              // the app whose island is open over the dock
+    property real dockIslandX: 0
     property Timer tabsShow: Timer { interval: 350; onTriggered: { Tabs.refresh(); shell.tabsOpen = true } }
     property Timer tabsHide: Timer { interval: 350; onTriggered: shell.tabsOpen = false }
+    property Connections keys: Connections {
+        target: Status
+        function onLauncherWanted() { shell.open = shell.open === "launcher" ? "" : "launcher" }
+        function onSearchWanted(text) { shell.searchText = text; shell.open = shell.open === "search" && !text ? "" : "search" }
+    }
+    // The wallpaper, on every screen (screens plugged in later get one too); the widgets on the main screen, with the
+    // bar and the dock.
+    property Instantiator walls: Instantiator {
+        model: Status.screenList
+        delegate: Window {
+            id: wall
+            required property var modelData
+            readonly property bool main: modelData.name === Status.primaryScreen || Status.primaryScreen === ""
+            visible: true; color: "black"
+            LayerShell.Window.screen: modelData                 // each on its own screen (else they all land on one)
+            LayerShell.Window.wantsToBeOnActiveScreen: false
+            LayerShell.Window.scope: "huginn-wallpaper"
+            LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
+            LayerShell.Window.layer: LayerShell.Window.LayerBackground
+            LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
+            LayerShell.Window.exclusionZone: -1
+            Wallpaper { anchors.fill: parent }
+            Widgets { visible: wall.main; x: 22; y: 52; opacity: shell.settled ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } } }
+        }
+    }
     property list<QtObject> surfaces: [
-
-    Window {   // wallpaper + widgets
-        visible: true; color: "black"
-        LayerShell.Window.scope: "huginn-wallpaper"
-        LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
-        LayerShell.Window.layer: LayerShell.Window.LayerBackground
-        LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
-        LayerShell.Window.exclusionZone: -1
-        Wallpaper { anchors.fill: parent }
-        Widgets { x: 22; y: 52; opacity: shell.settled ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } } }
-    },
     Window {   // arriving from the sign-in screen: its island carries on for a moment, then fades (takes no input)
         id: arriveWin
         objectName: "arrival"
@@ -46,7 +63,8 @@ QtObject {
         MouseArea { anchors.fill: parent; enabled: topBar.dropdownOpen; onClicked: topBar.menusOpen = false }
         TopBar { id: topBar; width: parent.width; appName: Status.active.name || "Huginn"; solid: Status.active.maximized
             onWindowAction: function (action) { Status.windowAction(action) }
-            opacity: shell.settled ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } } onControlCentre: shell.open = shell.open === "cc" ? "" : "cc"; onLauncher: shell.open = shell.open === "launcher" ? "" : "launcher" }
+            opacity: shell.settled ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } } onControlCentre: shell.open = shell.open === "cc" ? "" : "cc"; onLauncher: shell.open = shell.open === "launcher" ? "" : "launcher"
+            onSearch: shell.open = shell.open === "search" ? "" : "search" }
     },
     Window {   // dock
         visible: true; width: dock.width; height: 78; color: "transparent"
@@ -63,6 +81,8 @@ QtObject {
             onLauncher: shell.open = shell.open === "launcher" ? "" : "launcher"
             onControlCentre: shell.open = shell.open === "cc" ? "" : "cc"
             activate: function (app) { return Status.activateApp(app) }   // a running app's window comes forward (KWin)
+            menuOpen: shell.open === "launcher"
+            onIslandWanted: function (app, x) { shell.open = ""; shell.dockIslandX = x; shell.dockIsland = app }
             onTabsWanted: function (show) { if (show) { shell.tabsHide.stop(); shell.tabsShow.start() } else { shell.tabsShow.stop(); shell.tabsHide.restart() } }
         }
     },
@@ -93,21 +113,66 @@ QtObject {
             onPicked: shell.tabsOpen = false
         }
     },
-    Window {   // control centre
-        visible: shell.open === "cc"; width: 364; color: "transparent"
+    Window {   // control centre: slides in from the right edge, and back out
+        id: ccWin
+        visible: shell.open === "cc" || ccPanel.x < width - 1; width: 364; color: "transparent"
         LayerShell.Window.scope: "huginn-control-centre"
         LayerShell.Window.layer: LayerShell.Window.LayerOverlay
         LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorRight
         LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityOnDemand
-        ControlCentre { anchors { fill: parent; margins: 10 } }
+        ControlCentre {
+            id: ccPanel
+            y: 10; width: parent.width - 20; height: parent.height - 20
+            x: shell.open === "cc" ? 10 : parent.width
+            opacity: shell.open === "cc" ? 1 : 0
+            Behavior on x { NumberAnimation { duration: Theme.t.openMs ? 260 : 0; easing.type: Easing.OutCubic } }
+            Behavior on opacity { NumberAnimation { duration: Theme.t.openMs ? 200 : 0 } }
+        }
     },
-    Window {   // launcher
-        visible: shell.open === "launcher"; width: 450; height: 580; color: "transparent"
+    Window {   // launcher: the whole work area (between the bar and the dock), so a click beside it closes it
+        id: launcherWin
+        visible: shell.open === "launcher" || launcher.visible; color: "transparent"
         LayerShell.Window.scope: "huginn-launcher"
         LayerShell.Window.layer: LayerShell.Window.LayerOverlay
-        LayerShell.Window.anchors: LayerShell.Window.AnchorBottom
-        LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityExclusive
-        Launcher { anchors.centerIn: parent; onDone: shell.open = "" }
+        LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
+        LayerShell.Window.keyboardInteractivity: shell.open === "launcher" ? LayerShell.Window.KeyboardInteractivityExclusive : LayerShell.Window.KeyboardInteractivityNone
+        Rectangle { anchors.fill: parent; color: "black"; opacity: launcher.presence * 0.22 }
+        MouseArea { anchors.fill: parent; onClicked: shell.open = "" }
+        Launcher {
+            id: launcher; shown: shell.open === "launcher"; onDone: shell.open = ""
+            onSearchEverything: function (text) { shell.searchText = text; shell.open = "search" }
+            anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 10 }
+            height: Math.min(660, parent.height - 20)
+            // the dock's orb (its window sits just below this one): where the menu grows from
+            orb: Qt.point((launcherWin.width - dock.width) / 2 + 32 - x, launcherWin.height + 32 - y)
+        }
+    },
+    Window {   // Search everything: over the whole screen, bar and dock included
+        visible: shell.open === "search" || search.visible; color: "transparent"
+        LayerShell.Window.scope: "huginn-search"
+        LayerShell.Window.layer: LayerShell.Window.LayerOverlay
+        LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
+        LayerShell.Window.exclusionZone: -1
+        LayerShell.Window.keyboardInteractivity: shell.open === "search" ? LayerShell.Window.KeyboardInteractivityExclusive : LayerShell.Window.KeyboardInteractivityNone
+        Rectangle { anchors.fill: parent; color: "black"; opacity: search.presence * 0.4 }
+        Search { id: search; anchors.fill: parent; shown: shell.open === "search"; startText: shell.searchText; onDone: { shell.open = ""; shell.searchText = "" } }
+    },
+    Window {   // an app's island, from the dock (right-click or a long press on its tile)
+        id: islandWin
+        visible: shell.dockIsland !== null; color: "transparent"
+        LayerShell.Window.scope: "huginn-app-island"
+        LayerShell.Window.layer: LayerShell.Window.LayerOverlay
+        LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
+        LayerShell.Window.keyboardInteractivity: shell.dockIsland ? LayerShell.Window.KeyboardInteractivityExclusive : LayerShell.Window.KeyboardInteractivityNone
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onClicked: shell.dockIsland = null }
+        AppIsland {
+            id: dockIsland
+            visible: shell.dockIsland !== null
+            x: Math.max(8, Math.min(islandWin.width - width - 8, (islandWin.width - dock.width) / 2 + shell.dockIslandX - width / 2))
+            y: islandWin.height - height - 8
+            onDone: shell.dockIsland = null
+        }
+        onVisibleChanged: if (visible) dockIsland.open(shell.dockIsland)
     }
     ]
 }

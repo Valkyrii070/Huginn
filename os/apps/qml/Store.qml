@@ -27,9 +27,10 @@ GlassWindow {
     // The one button: Get, Open, or what is happening right now.
     component Get: Btn { property var item; property bool strong: false
         readonly property bool working: !!item && Backend.busy === item.id
+        readonly property bool waiting: !!item && Backend.queued.indexOf(item.id) >= 0     // queued behind another install
         pill: !strong; primary: strong; height: strong ? 34 : 30; radius: height / 2
-        text: working ? "Working…" : (item && item.installed ? "Open" : "Get"); opacity: working ? 0.6 : 1
-        onClicked: if (!working && item) item.installed ? Backend.launch(item.id) : Backend.install(item.id) }
+        text: working ? "Working…" : waiting ? "Waiting" : (item && item.installed ? "Open" : "Get"); opacity: working || waiting ? 0.6 : 1
+        onClicked: if (waiting) Backend.unqueue(item.id); else if (!working && item) item.installed ? Backend.launch(item.id) : Backend.install(item.id) }
     component Badge: Row { property var item; spacing: 4; visible: !!item && (!!item.verified || !!item.web)
         Glyph { name: parent.item && parent.item.web ? "wifi" : "star"; size: 12; ink: parent.item && parent.item.web ? Theme.t.text_secondary : Theme.t.accent; anchors.verticalCenter: parent.verticalCenter }
         Label { text: parent.item && parent.item.web ? "Web app" : "Verified developer"; color: parent.item && parent.item.web ? Theme.t.text_secondary : Theme.t.accent; font.pixelSize: 11 } }

@@ -2,6 +2,8 @@
 # is also what gets installed. GRUB's two packages for UEFI and BIOS travel on the ISO in pool/ (see build.sh).
 squashfs-tools
 dosfstools
+# Install beside Windows: ntfsresize shrinks Windows' partition to make room
+ntfs-3g
 fdisk
 e2fsprogs
 util-linux

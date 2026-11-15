@@ -1,6 +1,8 @@
 /*
     Huginn OS: tells Huginn's shell (org.huginn.Shell.Active) which app is in front, its window's title, and whether
     that window fills the screen (the top bar turns to glass then). Only changes are sent.
+    It also gives the shell its keys: Print (a screenshot), Shift+Print and Meta+Shift+S (the Screenshot app),
+    Meta+Space (Search everything). Meta alone opens the start menu, through kwinrc's ModifierOnlyShortcuts.
 */
 var watched = null;
 var last = "";
@@ -42,3 +44,11 @@ function watch(w) {
 workspace.windowActivated.connect(watch);
 workspace.windowRemoved.connect(function (w) { if (w === watched) { watched = null; report(); } });
 watch(workspace.activeWindow);
+
+function shell(method, arg) {
+    callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", method, arg);
+}
+registerShortcut("Huginn Screenshot", "Huginn: take a screenshot of the whole screen", "Print", function () { shell("Screenshot", "screen"); });
+registerShortcut("Huginn Screenshot App", "Huginn: open Screenshot to choose what to take", "Shift+Print", function () { shell("Screenshot", "choose"); });
+registerShortcut("Huginn Screenshot Choose", "Huginn: open Screenshot to choose what to take", "Meta+Shift+S", function () { shell("Screenshot", "choose"); });
+registerShortcut("Huginn Search", "Huginn: Search everything", "Meta+Space", function () { shell("Search", ""); });

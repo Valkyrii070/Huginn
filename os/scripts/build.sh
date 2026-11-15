@@ -173,6 +173,34 @@ stage_install() {
     fi
 }
 
+# Rounded corners for every window, as Huginn's own apps draw theirs: KDE-Rounded-Corners (a KWin effect, GPL-3.0,
+# vendor/rounded-corners), built here against this very KWin. Its build tools come and go again; the libraries the
+# effect itself uses stay.
+build_rounded_corners() {
+    local src="$ROOT/vendor/rounded-corners" pin="66d7ce9"
+    if [ ! -d "$src/src" ] && command -v git >/dev/null 2>&1; then      # fetched once, at the version tested with this KWin
+        git clone -q https://github.com/matinlotfali/KDE-Rounded-Corners "$src" && git -C "$src" checkout -q "$pin" || rm -rf "$src"
+    fi
+    [ -d "$src/src" ] || { warn "no vendor/rounded-corners: other apps' windows keep square corners"; return 0; }
+    rm -rf "$CHROOT/tmp/rc"; cp -r "$src" "$CHROOT/tmp/rc"
+    local deps="cmake g++ make extra-cmake-modules kwin-dev qt6-base-private-dev qt6-base-dev-tools libkf6kcmutils-dev libkf6configwidgets-dev libkf6i18n-dev libdrm-dev gettext"
+    in_chroot sh -c "dpkg-query -W -f='\${Package}\n' | sort > /tmp/rc-before.txt"
+    if in_chroot env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $deps > "$WORK/rc-deps.log" 2>&1 \
+       && in_chroot sh -c "cd /tmp/rc && cmake -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc) && cmake --install build" > "$WORK/rc-build.log" 2>&1; then
+        # keep what the effect links against; everything else the build brought in goes again
+        in_chroot sh -c 'for f in $(find /usr/lib/x86_64-linux-gnu/qt6/plugins -name "*roundcorners*" -o -name "*shapecorners*" | grep "\.so$"); do
+            ldd "$f" | awk "/=> \\//{print \$3}" | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | sort -u | xargs -r apt-mark manual >/dev/null; done'
+        install -D -m 644 "$src/LICENSE" "$CHROOT/usr/share/doc/huginn-rounded-corners/LICENSE"
+    else
+        warn "the rounded-corners effect didn't build (see $WORK/rc-build.log): other apps' windows keep square corners"
+        tail -15 "$WORK/rc-build.log" "$WORK/rc-deps.log" 2>/dev/null || true
+    fi
+    in_chroot sh -c "dpkg-query -W -f='\${Package}\n' | sort > /tmp/rc-after.txt; comm -13 /tmp/rc-before.txt /tmp/rc-after.txt > /tmp/rc-new.txt"
+    in_chroot sh -c 'grep -E -- "-dev\$|^(cmake|cmake-data|g\+\+|g\+\+-[0-9]+|make|extra-cmake-modules|gettext|qt6-base-dev-tools)\$" /tmp/rc-new.txt | xargs -r env DEBIAN_FRONTEND=noninteractive apt-get purge -y' > "$WORK/rc-purge.log" 2>&1 || true
+    in_chroot env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge >> "$WORK/rc-purge.log" 2>&1 || true
+    rm -rf "$CHROOT/tmp/rc" "$CHROOT"/tmp/rc-*.txt
+}
+
 stage_customise() {
     log "Apply overlay, theme and system defaults"
     rsync -a --chown=root:root "$ROOT/config/overlay/" "$CHROOT/"
@@ -217,6 +245,18 @@ stage_customise() {
     # Compiled once here: users can't write next to these files, so otherwise every start compiles them again (the
     # shell and the apps are large Python files; on a slow computer that alone takes seconds at every sign-in).
     in_chroot python3 -m compileall -q /usr/share/huginn-apps /usr/share/huginn-shell
+
+    build_rounded_corners
+
+    # huginn-grab: KWin hands pictures of the screen only to programs a .desktop file names, by their executable;
+    # Huginn's apps are Python, so this small native helper is the one named (native/huginn-grab.c).
+    if command -v cc >/dev/null 2>&1 && pkg-config --exists gio-2.0 gio-unix-2.0 2>/dev/null; then
+        cc -O2 -Wall -o "$WORK/huginn-grab" "$ROOT/native/huginn-grab.c" $(pkg-config --cflags --libs gio-2.0 gio-unix-2.0) \
+            && install -D -m 755 "$WORK/huginn-grab" "$CHROOT/usr/libexec/huginn/huginn-grab" \
+            || warn "huginn-grab didn't build: screenshots fall back to KDE's portal backend"
+    else
+        warn "no C compiler or GIO headers here: huginn-grab isn't built (screenshots fall back to KDE's portal backend)"
+    fi
 
     # X11 apps in Huginn's own compositor (the preview session): xwayland-satellite, built with Huginn's patch by
     # scripts/build-xwayland-satellite.sh (here, if it isn't yet and cargo is installed).

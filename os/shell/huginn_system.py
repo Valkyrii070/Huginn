@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +24,10 @@ SHELL_XML = """<node><interface name="org.huginn.Shell">
   <method name="Active"><arg type="s" name="caption" direction="in"/><arg type="s" name="app" direction="in"/>
     <arg type="s" name="desktop" direction="in"/><arg type="b" name="maximized" direction="in"/></method>
   <method name="Activated"><arg type="s" name="app" direction="in"/><arg type="b" name="found" direction="in"/></method>
+  <method name="ToggleLauncher"/>
+  <method name="Launcher"><arg type="s" name="what" direction="in"/></method>
+  <method name="Search"><arg type="s" name="text" direction="in"/></method>
+  <method name="Screenshot"><arg type="s" name="what" direction="in"/></method>
 </interface></node>"""
 HISTORY = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "huginn" / "notifications.jsonl"
 
@@ -43,6 +48,8 @@ def _js(text: str) -> str:
 class System(QObject):
     changed = Signal()
     activeChanged = Signal()
+    launcherWanted = Signal()                              # Super on its own (KWin asks)
+    searchWanted = Signal(str)                             # Meta+Space: Search everything
 
     def __init__(self, demo: bool, apps=None):
         super().__init__()
@@ -59,9 +66,12 @@ class System(QObject):
         self._bt_path = ""
         self._pending = {}                                 # dock clicks waiting for KWin to say if a window was there
         self.sb = self.yb = None
+        self._power = {"sleep": True, "restart": True, "shutdown": True}
+        self.lastPower = ""                                 # (tests) the last power action asked for
+        self._shooting = False
         if demo:
             self._battery = {"present": True, "percent": 82, "charging": False}
-            self._network = {"wifiDevice": True, "wifiOn": True, "kind": "wifi", "name": "Home", "signal": 78}
+            self._network = {"wifiDevice": True, "wifiOn": True, "kind": "wifi", "name": "Home", "signal": 78, "wifiName": "Home", "wired": False, "wiredName": ""}
             self._bt = {"present": True, "on": True}
             self._levels = {"brightness": 0.68, "volume": 0.42, "muted": False}
             self._night = {"available": True, "on": False}
@@ -85,12 +95,19 @@ class System(QObject):
                                      "/org/freedesktop/NetworkManager", None, Gio.DBusSignalFlags.NONE, lambda *a: self._later(self._read_network))
             self.yb.signal_subscribe("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged", None, None,
                                      Gio.DBusSignalFlags.NONE, lambda *a: self._later(self._read_bluetooth))
+        from PySide6.QtGui import QGuiApplication
+        if QGuiApplication.instance():
+            app = QGuiApplication.instance()
+            app.primaryScreenChanged.connect(lambda *_: self.primaryScreenChanged.emit())
+            app.screenAdded.connect(lambda *_: self.primaryScreenChanged.emit())
+            app.screenRemoved.connect(lambda *_: QTimer.singleShot(0, self.primaryScreenChanged.emit))
         self._pump = QTimer(self, interval=40, timeout=lambda: GLib.MainContext.default().iteration(False))
         if not qt_runs_glib():
             self._pump.start()
         self._slow = QTimer(self, interval=20000, timeout=self.refresh)        # the Wi‑Fi signal, and anything missed
         self._slow.start()
         QTimer.singleShot(800, self.refresh)
+        QTimer.singleShot(1500, self._read_power)
         QTimer.singleShot(1200, self._ask_kwin)            # KWin's own script reports changes; this asks for the start
 
     def _ask_kwin(self):
@@ -140,14 +157,28 @@ if (!w || w.normalWindow || w.dialog)
         if not self.yb:
             return
         nm, base = "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager"
-        out = {"wifiDevice": False, "wifiOn": bool(self._get(self.yb, nm, base, nm, "WirelessEnabled", False)), "kind": "none", "name": "", "signal": 0}
+        out = {"wifiDevice": False, "wifiOn": bool(self._get(self.yb, nm, base, nm, "WirelessEnabled", False)), "kind": "none", "name": "", "signal": 0,
+               "wifiName": "", "wired": False, "wiredName": ""}
         devices = self._get(self.yb, nm, base, nm, "Devices", []) or []
+
+        def active_id(d):
+            """The connection a device is using (each device's own, not only the one the internet goes through)."""
+            ac = self._get(self.yb, nm, d, nm + ".Device", "ActiveConnection", "/")
+            if not ac or ac == "/" or self._get(self.yb, nm, ac, nm + ".Connection.Active", "State", 0) != 2:   # 2: activated
+                return ""
+            return self._get(self.yb, nm, ac, nm + ".Connection.Active", "Id", "") or ""
         for d in devices:
-            if self._get(self.yb, nm, d, nm + ".Device", "DeviceType", 0) == 2:
+            kind = self._get(self.yb, nm, d, nm + ".Device", "DeviceType", 0)
+            if kind == 2:
                 out["wifiDevice"] = True
+                out["wifiName"] = out["wifiName"] or active_id(d)
                 ap = self._get(self.yb, nm, d, nm + ".Device.Wireless", "ActiveAccessPoint", "/")
                 if ap and ap != "/":
                     out["signal"] = int(self._get(self.yb, nm, ap, nm + ".AccessPoint", "Strength", 0) or 0)
+            elif kind == 1:
+                name = active_id(d)
+                if name:
+                    out["wired"], out["wiredName"] = True, out["wiredName"] or name
         primary = self._get(self.yb, nm, base, nm, "PrimaryConnection", "/")
         if primary and primary != "/":
             kind = self._get(self.yb, nm, primary, nm + ".Connection.Active", "Type", "") or ""
@@ -284,6 +315,77 @@ if (!w || w.normalWindow || w.dialog)
         if not self._demo:
             self._session("ClearNotifications")
 
+    # ------------------------------------------------------------------ power (the start menu's bottom row)
+    def _read_power(self) -> None:
+        """Which of Sleep / Restart / Shut Down logind will do here ("na" means the machine can't, e.g. sleep in a VM)."""
+        if not self.yb:
+            return
+        caps = {}
+        for key, method in (("sleep", "CanSuspend"), ("restart", "CanReboot"), ("shutdown", "CanPowerOff")):
+            try:
+                v = self.yb.call_sync("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", method,
+                                      None, GLib.VariantType("(s)"), 0, 1500, None).unpack()[0]
+                caps[key] = v != "na"
+            except GLib.Error:
+                caps[key] = True
+        if caps != self._power:
+            self._power = caps
+            self.changed.emit()
+
+    @Slot(str)
+    def screenshot(self, what: str) -> None:
+        """screen: the whole screen into Pictures › Screenshots at once (with a banner); choose: the Screenshot app."""
+        if self._demo:
+            return
+        apps = "/usr/share/huginn-apps"
+        if what == "choose":
+            subprocess.Popen(["python3", f"{apps}/huginn_app.py", "screenshot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return
+        if self._shooting:
+            return
+        self._shooting = True
+
+        def run():
+            try:
+                subprocess.run(["python3", f"{apps}/huginn_capture.py", "--save"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            self._shooting = False
+        threading.Thread(target=run, daemon=True).start()
+
+    @Slot(str)
+    def power(self, what: str) -> None:
+        """lock, sleep, restart, shutdown or signout. The session daemon does it (it locks before sleeping); without
+        it, logind directly."""
+        if what not in ("lock", "sleep", "restart", "shutdown", "signout"):
+            return
+        self.lastPower = what
+        if self._demo:
+            print(f"huginn-shell: power: {what} (preview: nothing happens)", file=__import__("sys").stderr)
+            return
+
+        def fallback(conn, res):
+            try:
+                conn.call_finish(res)
+            except GLib.Error:
+                self._power_direct(what)
+        if self.sb:
+            self.sb.call("org.huginn.Session", "/org/huginn/Session", "org.huginn.Session", "Do", GLib.Variant("(s)", (what,)),
+                         None, 0, 3000, None, fallback)
+        else:
+            self._power_direct(what)
+
+    def _power_direct(self, what: str) -> None:
+        if what == "lock":
+            cmd = ["loginctl", "lock-session"]
+        elif what == "signout":
+            cmd = ["loginctl", "terminate-session", os.environ.get("XDG_SESSION_ID", "")]
+        else:
+            cmd = ["systemctl", {"sleep": "suspend", "restart": "reboot", "shutdown": "poweroff"}[what]]
+        if shutil.which(cmd[0]):
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
     @Slot(str)
     def openSettings(self, page: str) -> None:
         if not self._demo:
@@ -292,6 +394,18 @@ if (!w || w.normalWindow || w.dialog)
 
     # ------------------------------------------------------------------ the app in front (KWin)
     def _shell_call(self, conn, sender, path, iface, method, params, inv):
+        if method in ("ToggleLauncher", "Launcher"):            # Super (KWin)
+            self.launcherWanted.emit()
+            inv.return_value(None)
+            return
+        if method == "Search":                                   # Meta+Space (KWin's script)
+            self.searchWanted.emit(params.unpack()[0])
+            inv.return_value(None)
+            return
+        if method == "Screenshot":                               # Print and Meta+Shift+S (KWin's script)
+            inv.return_value(None)
+            self.screenshot(params.unpack()[0])
+            return
         if method == "Active":
             caption, resource, desktop, maximized = params.unpack()
             app = self._app_name(desktop or resource)
@@ -382,3 +496,18 @@ callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Activated
     nightLight = Property("QVariantMap", lambda self: self._night, notify=changed)
     notifications = Property("QVariantList", lambda self: self._notes, notify=changed)
     active = Property("QVariantMap", lambda self: self._active, notify=activeChanged)
+    powerCaps = Property("QVariantMap", lambda self: self._power, notify=changed)
+
+    def _primary(self) -> str:
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen() if QGuiApplication.instance() else None
+        return screen.name() if screen else ""
+    primaryScreenChanged = Signal()
+    primaryScreen = Property(str, _primary, notify=primaryScreenChanged)
+
+    def _screens(self) -> list:
+        """The screens as QScreen objects (QML's own Qt.application.screens are a different type, which layer-shell
+        surfaces can't be given), for one wallpaper per screen."""
+        from PySide6.QtGui import QGuiApplication
+        return list(QGuiApplication.screens()) if QGuiApplication.instance() else []
+    screenList = Property("QVariantList", _screens, notify=primaryScreenChanged)

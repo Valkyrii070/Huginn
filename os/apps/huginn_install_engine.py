@@ -3,7 +3,10 @@ as /usr/libexec/huginn-install-engine), reads one JSON plan on stdin (passwords 
 disk) and writes one JSON line per step to stdout: {"step", "label", "fraction"}, then {"done": true} or
 {"error": "...", "log": "..."}.
 
-    the plan     {"mode": "erase" | "free" | "manual", "disk": "/dev/sda", "firmware": "uefi" | "bios",
+    the plan     {"mode": "erase" | "free" | "shrink" | "manual", "disk": "/dev/sda", "firmware": "uefi" | "bios",
+                  "removable": false (a USB drive: GRUB only in its own fallback place, the computer's boot list untouched),
+                  "shrinkPart": "/dev/sda3", "keepBytes": 200e9 (shrink: Windows' partition keeps this much; Huginn OS
+                  goes in the room made after it),
                   "encrypt": false, "passphrase": "", "root": "/dev/sda3", "efi": "/dev/sda1", "formatEfi": false,
                   "hostname": "…", "user": {"name", "realName", "password", "autologin"}, "timezone": "Europe/Oslo",
                   "locale": "nb_NO.UTF-8", "keyboard": {"layout": "no", "variant": ""}, "kernelArgs": ""}
@@ -14,6 +17,8 @@ disk) and writes one JSON line per step to stdout: {"step", "label", "fraction"}
                  a swap file, then unmount.
 
 Each disk action goes through Engine.run(), so tests can run the same engine against disk images.
+
+    --probe-ntfs PART   (root) how far Windows' partition can shrink: one JSON line {"size", "min", "problem"}
 """
 import json
 import os
@@ -105,10 +110,15 @@ def good_username(name: str) -> bool:
 def check_plan(p: dict) -> list:
     """What's wrong with a plan (empty when it's fine)."""
     problems = []
-    if p.get("mode") not in ("erase", "free", "manual"):
+    if p.get("mode") not in ("erase", "free", "shrink", "manual"):
         problems.append("No way to use the disk was chosen.")
-    if p.get("mode") in ("erase", "free") and not str(p.get("disk", "")).startswith("/"):        # a disk, or a disk image
+    if p.get("mode") in ("erase", "free", "shrink") and not str(p.get("disk", "")).startswith("/"):    # a disk, or a disk image
         problems.append("No disk was chosen.")
+    if p.get("mode") == "shrink":
+        if not str(p.get("shrinkPart", "")).startswith("/"):
+            problems.append("No partition to make room in was chosen.")
+        if int(p.get("keepBytes") or 0) <= 0:
+            problems.append("How much room to leave Windows wasn't chosen.")
     if p.get("mode") == "manual":
         if not str(p.get("root", "")).startswith("/"):
             problems.append("No partition for Huginn OS was chosen.")
@@ -163,6 +173,8 @@ class Engine:
             self.log(out[-4000:])
         if check and r.returncode != 0:
             said = [l.strip() for l in (r.stderr or r.stdout).splitlines() if l.strip() and not l.strip().startswith("dmesg(1)")]
+            if Path(cmd[0]).name == "ntfsresize":
+                raise Failed(why_ntfs(out))
             raise Failed(f"{Path(cmd[2] if chroot else cmd[0]).name} failed: {said[-1] if said else 'exit ' + str(r.returncode)}")
         return r.stdout
 
@@ -209,7 +221,11 @@ class Engine:
                 self.dev["efi"] = p["efi"]
             return
         parts = layout(p.get("firmware", "uefi"), bool(p.get("encrypt")))
-        if p["mode"] == "free":
+        if p["mode"] == "erase":
+            self.unmount_disk(disk)                               # a USB drive the live session opened, say
+        if p["mode"] == "shrink":
+            p["freeStart"] = self.shrink(disk, p["shrinkPart"], int(p["keepBytes"]))
+        if p["mode"] in ("free", "shrink"):
             have = self.existing_esp(disk) if p.get("firmware") == "uefi" else 0
             if have:                                              # share the disk's EFI partition (Windows' too)
                 self.dev["efi"], self.reuse_efi = self.part_path(disk, have), True
@@ -230,6 +246,41 @@ class Engine:
         for (role, _mib, _t), n in zip(parts, numbers):
             self.dev[role] = self.part_path(disk, n)
         self.step("disk", 1)
+
+    def unmount_disk(self, disk: str) -> None:
+        """Everything on the disk the live session has open (a USB drive opens itself when plugged in) is closed."""
+        try:
+            data = json.loads(self.run(["lsblk", "-J", "-o", "PATH,MOUNTPOINTS,FSTYPE", disk], check=False) or "{}")
+        except ValueError:
+            return
+        def walk(nodes):
+            for n in nodes or []:
+                yield n
+                yield from walk(n.get("children"))
+        for n in walk(data.get("blockdevices")):
+            if n.get("fstype") == "swap":
+                self.run(["swapoff", n["path"]], check=False)
+            for m in n.get("mountpoints") or []:
+                if m and m not in ("/", "/cdrom", "/boot", "/boot/efi") and not m.startswith("/run/live"):
+                    self.run(["umount", "-l", m], check=False)
+
+    def shrink(self, disk: str, part: str, keep: int) -> int:
+        """Make room after Windows: its NTFS partition is shrunk to `keep` bytes (ntfsresize moves what it must), then
+        the partition itself. Returns the first sector of the room made. Nothing is changed unless ntfsresize says
+        first that it can do it."""
+        self.step("disk", 0, "Checking Windows' partition")
+        self.unmount_disk(part)
+        self.run(["ntfsresize", "--no-action", "--size", str(keep), part], timeout=900)   # (refuses when it can't: see why_ntfs)
+        self.step("disk", 0.2, "Making room beside Windows (this can take a while)")
+        self.run(["ntfsresize", "--size", str(keep), part], stdin="y\n", timeout=6 * 3600)
+        n = int(re.search(r"(\d+)$", part).group(1))
+        sectors = ((keep + (1 << 20)) // 512 + 2047) // 2048 * 2048         # the filesystem, a margin, whole MiB
+        self.run(["sfdisk", "--no-reread", "-N", str(n), disk], stdin=f", {sectors}\n", timeout=120)
+        self.reread(disk)
+        data = json.loads(self.run(["sfdisk", "--json", disk]))
+        mine = next(q for q in data["partitiontable"]["partitions"] if q["node"].endswith(str(n)) and re.search(r"(\d+)$", q["node"]).group(1) == str(n))
+        start = mine["start"] + mine["size"]
+        return (start + 2047) // 2048 * 2048
 
     def existing_esp(self, disk: str) -> int:
         """The number of the disk's EFI system partition, 0 when it has none."""
@@ -469,10 +520,15 @@ class Engine:
             base = ["grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi", "--bootloader-id=ubuntu", "--recheck"]
             if (t / "usr/lib/shim").is_dir() or (t / "usr/lib/grub/x86_64-efi-signed").is_dir():
                 base.append("--uefi-secure-boot")
-            self.run(base + ([] if nvram else ["--no-nvram"]), chroot=True, timeout=600)
+            if p.get("removable"):
+                # A USB drive: GRUB goes only where any computer looks on a drive it's given (EFI/BOOT/BOOTX64.EFI),
+                # and the computer's own list of things to start (and Windows on its disk) are left as they were.
+                self.run(base + ["--removable", "--no-nvram"], chroot=True, timeout=600)
+            else:
+                self.run(base + ([] if nvram else ["--no-nvram"]), chroot=True, timeout=600)
             # Firmware that forgets its boot entries starts EFI/BOOT/BOOTX64.EFI. On a disk of its own Huginn OS puts
             # itself there too (GRUB may already have); beside another system, that system's fallback is left alone.
-            if p["mode"] == "erase" and not (t / "boot/efi/EFI/BOOT/BOOTX64.EFI").exists():
+            if p["mode"] == "erase" and not p.get("removable") and not (t / "boot/efi/EFI/BOOT/BOOTX64.EFI").exists():
                 self.run(base + ["--removable", "--no-nvram"], chroot=True, timeout=600)
         else:
             self.run(["grub-install", "--target=i386-pc", "--recheck", p["disk"]], chroot=True, timeout=600)
@@ -524,10 +580,38 @@ class Engine:
             return False
 
 
+def why_ntfs(text: str) -> str:
+    """ntfsresize's refusals, said so a person knows what to do in Windows."""
+    low = text.lower()
+    if "hibernat" in low:
+        return ("Windows didn't shut down completely (Fast Startup). Start Windows, hold Shift while you choose Shut Down "
+                "(or turn off Fast Startup in Power Options), then try again.")
+    if "chkdsk" in low or "inconsistent" in low or "dirty" in low or "corrupt" in low:
+        return "Windows wants to check this disk first. In Windows, run \u201cchkdsk C: /f\u201d and restart, then try again."
+    if "bitlocker" in low or "encrypted" in low:
+        return "This Windows partition is locked with BitLocker. Turn BitLocker off (or shrink it in Windows) first."
+    line = [l for l in text.splitlines() if l.strip()]
+    return line[-1].strip() if line else "Windows' partition couldn't be read."
+
+
+def probe_ntfs(part: str) -> dict:
+    r = subprocess.run(["ntfsresize", "--info", "--no-progress-bar", part], capture_output=True, text=True, timeout=900,
+                       env=dict(os.environ, LC_ALL="C"))
+    out = r.stdout + r.stderr
+    size = re.search(r"Current volume size:\s*(\d+) bytes", out)
+    least = re.search(r"You might resize at (\d+) bytes", out)
+    if r.returncode != 0 or not size or not least:
+        return {"size": int(size.group(1)) if size else 0, "min": 0, "problem": why_ntfs(out)}
+    return {"size": int(size.group(1)), "min": int(least.group(1)), "problem": ""}
+
+
 def main() -> int:
     if os.geteuid() != 0:
         print(json.dumps({"error": "The installer engine needs to run as root."}))
         return 1
+    if len(sys.argv) == 3 and sys.argv[1] == "--probe-ntfs" and re.fullmatch(r"/dev/[A-Za-z0-9/_-]+", sys.argv[2]):
+        print(json.dumps(probe_ntfs(sys.argv[2])))
+        return 0
     try:
         plan = json.loads(sys.stdin.read())
     except ValueError:

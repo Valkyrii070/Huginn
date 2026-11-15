@@ -52,6 +52,18 @@ def when(path: Path) -> str:
     return stamp.strftime("%H:%M") if stamp.date() == dt.date.today() else stamp.strftime("%b ") + str(stamp.day)
 
 
+
+def note_recent(path: str) -> None:
+    """Into the desktop's shared recent list (the start menu's app islands and Search everything read it)."""
+    try:
+        import huginn_recent
+        from PySide6.QtGui import QGuiApplication
+        app = QGuiApplication.desktopFileName() or "huginn-writer"
+        huginn_recent.note(path, app, f"python3 /usr/share/huginn-apps/huginn_app.py {app.replace('huginn-', '')} %u")
+    except Exception:                                      # noqa: BLE001  (never in the way of opening the file)
+        pass
+
+
 class Bridge:
     """LibreOffice as a file converter, run headless. Present only when `soffice` is installed."""
     exe = shutil.which("soffice") or shutil.which("libreoffice")
@@ -210,6 +222,7 @@ class Writer(FileList):
 
     @Slot(str)
     def open(self, path: str) -> None:
+        note_recent(path)
         if self._dirty:
             self.save()
         source = Path(path)
@@ -722,6 +735,7 @@ class Sheets(FileList):
 
     @Slot(str)
     def open(self, path: str) -> None:
+        note_recent(path)
         if self._dirty:
             self.save()
         source = Path(path)
@@ -841,6 +855,7 @@ class Slides(FileList):
 
     @Slot(str)
     def open(self, path: str) -> None:
+        note_recent(path)
         if self._dirty:
             self.save()
         source, target, dropped = Path(path), Path(path), None

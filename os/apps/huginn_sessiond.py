@@ -110,6 +110,10 @@ class Bus:
         except GLib.Error:
             return (None, None) if fds is not None else None
 
+    def fire(self, name, path, iface, method, args=None, timeout=120000):
+        """Call and don't wait (logind may stop to ask for a password first)."""
+        self.conn.call(name, path, iface, method, args, None, Gio.DBusCallFlags.ALLOW_INTERACTIVE_AUTHORIZATION, timeout, None, None)
+
     def get(self, name, path, iface, prop, default=None):
         got = self.call(name, path, "org.freedesktop.DBus.Properties", "Get", GLib.Variant("(ss)", (iface, prop)), "(v)")
         return got[0] if got else default
@@ -170,6 +174,7 @@ SESSION_XML = """<node><interface name="org.huginn.Session">
   <method name="SetVolume"><arg type="d" name="level" direction="in"/></method>
   <method name="SetMuted"><arg type="b" name="muted" direction="in"/></method>
   <method name="SetDoNotDisturb"><arg type="b" name="on" direction="in"/></method>
+  <method name="Do"><arg type="s" name="action" direction="in"/></method>
   <method name="Answer"><arg type="s" name="key" direction="in"/><arg type="s" name="text" direction="in"/><arg type="s" name="identity" direction="in"/></method>
   <property name="DoNotDisturb" type="b" access="read"/>
 </interface></node>"""
@@ -631,6 +636,10 @@ class Session(QObject):
         if method == "SetDoNotDisturb":
             self.notes.set_quiet(bool(args[0]))
             return None
+        if method == "Do":                                    # the start menu's power row: someone at the computer asked
+            if args[0] in ("lock", "sleep", "hibernate", "restart", "shutdown", "signout"):
+                self.do(args[0], interactive=True)
+            return None
         if method == "ClearNotifications":
             try:
                 HISTORY.unlink()
@@ -784,8 +793,12 @@ class Session(QObject):
         else:
             self.sb.call("org.freedesktop.ScreenSaver", "/ScreenSaver", "org.freedesktop.ScreenSaver", "Lock")
 
-    def do(self, what: str) -> None:
-        """Carry out an action by its name: sleep, hibernate, shutdown, restart, lock, screenOff, nothing."""
+    def do(self, what: str, interactive: bool = False) -> None:
+        """Carry out an action by its name: sleep, hibernate, shutdown, restart, signout, lock, screenOff, nothing.
+        interactive: a person asked (the start menu), so logind may ask for a password if it needs one."""
+        if what == "signout" and self.yb:
+            self.yb.fire("org.freedesktop.login1", "/org/freedesktop/login1/session/auto", "org.freedesktop.login1.Session", "Terminate")
+            return
         if what == "lock":
             self.lock()
         elif what == "screenOff":
@@ -799,7 +812,10 @@ class Session(QObject):
                 can = self.yb.call("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "CanHibernate", None, "(s)")
                 if not can or can[0] != "yes":
                     method = "Suspend"
-            self.yb.call("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", method, GLib.Variant("(b)", (False,)))
+            if interactive:
+                self.yb.fire("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", method, GLib.Variant("(b)", (True,)))
+            else:
+                self.yb.call("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", method, GLib.Variant("(b)", (False,)))
 
     # ---------------------------------------------------------------- power: the lid and the button
     def take_inhibitors(self) -> None:

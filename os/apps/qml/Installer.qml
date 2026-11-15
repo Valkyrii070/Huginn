@@ -182,7 +182,14 @@ GlassWindow {
                                 Label { text: (Backend.chosenDisk.sizeText || "") + " · " + (Backend.chosenDisk.kind || "") + (Backend.chosenDisk.systems && Backend.chosenDisk.systems.length ? " · has " + Backend.chosenDisk.systems.join(" and ") : ""); secondary: true } }
                             Rectangle { objectName: "diskBar"; width: parent.width; height: 34; radius: 10; color: Theme.t.group; border.width: 1; border.color: Theme.t.islandLine; clip: true
                                 Row { anchors.fill: parent; anchors.margins: 3; spacing: 2
-                                    Repeater { model: Backend.mode === "erase" ? [{ label: "Huginn OS", holds: "Huginn", share: 1, sizeText: Backend.chosenDisk.sizeText }] : (Backend.chosenDisk.bar || [])
+                                    Repeater { model: Backend.mode === "erase" ? [{ label: "Huginn OS", holds: "Huginn", share: 1, sizeText: Backend.chosenDisk.sizeText }]
+                                                    : Backend.mode === "shrink" && Backend.shrink.state === "ok" ? (Backend.chosenDisk.bar || []).reduce(function (out, b) {
+                                                          if (b.holds === "Windows" && Math.abs(b.share - Backend.chosenDisk.shrinkSize / Backend.chosenDisk.size) < 0.001) {
+                                                              out.push({ label: b.label, holds: "Windows", share: b.share - Backend.shrink.huginnFraction, sizeText: Backend.shrink.windowsText })
+                                                              out.push({ label: "Huginn OS", holds: "Huginn", share: Backend.shrink.huginnFraction, sizeText: Backend.shrink.huginnText })
+                                                          } else out.push(b)
+                                                          return out }, [])
+                                                    : (Backend.chosenDisk.bar || [])
                                         Rectangle { required property var modelData
                                             readonly property bool ours: modelData.holds === "Huginn" || (modelData.free && Backend.mode === "free") || (Backend.mode === "manual" && modelData.label === Backend.root)
                                             width: Math.max(6, (parent.width - 2 * ((Backend.chosenDisk.bar || []).length)) * modelData.share); height: parent.height; radius: 7
@@ -192,9 +199,14 @@ GlassWindow {
                                                 color: parent.ours ? Theme.t.onAccent : "#FFFFFF"; font.weight: Font.DemiBold } } } } } }
                         // how to use it
                         Repeater {
-                            model: [{ id: "erase", glyph: "trash", title: "Erase the disk and install Huginn OS",
-                                      line: "Everything on " + (Backend.chosenDisk.model || "the disk") + " is deleted" + (Backend.chosenDisk.systems && Backend.chosenDisk.systems.length ? ", " + Backend.chosenDisk.systems.join(" and ") + " too." : "."), ok: true },
-                                    { id: "free", glyph: "split", title: Backend.chosenDisk.systems && Backend.chosenDisk.systems.length ? "Install beside " + Backend.chosenDisk.systems.join(" and ") : "Use the free space",
+                            model: [{ id: "shrink", glyph: "split", title: "Install beside " + (Backend.chosenDisk.shrinkLabel || "Windows"),
+                                      line: Backend.chosenDisk.bitlocker && !Backend.chosenDisk.shrinkPart ? "Windows is locked with BitLocker here. Turn BitLocker off in Windows first, or shrink it there (Disk Management)."
+                                          : "Windows gives Huginn OS some of its room. Its files stay; you'll choose which to start each time.",
+                                      ok: !!Backend.chosenDisk.shrinkPart, show: !!Backend.chosenDisk.shrinkPart || !!Backend.chosenDisk.bitlocker },
+                                    { id: "erase", glyph: "trash", title: "Erase the disk and install Huginn OS",
+                                      line: "Everything on " + (Backend.chosenDisk.model || "the disk") + " is deleted" + (Backend.chosenDisk.systems && Backend.chosenDisk.systems.length ? ", " + Backend.chosenDisk.systems.join(" and ") + " too." : ".")
+                                            + (Backend.chosenDisk.mounted ? " (It's open in Files now; it will be closed first.)" : ""), ok: true },
+                                    { id: "free", glyph: "split", title: Backend.chosenDisk.systems && Backend.chosenDisk.systems.length ? "Use the free space beside " + Backend.chosenDisk.systems.join(" and ") : "Use the free space",
                                       line: !Backend.chosenDisk.freeBytes ? "There's no free space on this disk. Make room first (Windows: Disk Management › Shrink Volume)."
                                           : Backend.chosenDisk.systems && Backend.chosenDisk.systems.length ? Backend.chosenDisk.freeText + " of free space. You'll choose which system to start each time the computer starts."
                                           : Backend.chosenDisk.freeText + " of free space. What's already on the disk stays as it is.",
@@ -204,7 +216,8 @@ GlassWindow {
                                 objectName: "mode-" + modelData.id
                                 readonly property bool on: Backend.mode === modelData.id
                                 // an empty disk: "use the free space" would be the same as erasing it
-                                visible: !(modelData.id === "free" && !(Backend.chosenDisk.parts && Backend.chosenDisk.parts.length))
+                                visible: !(modelData.id === "free" && !(Backend.chosenDisk.parts && Backend.chosenDisk.parts.length)) && modelData.show !== false
+                                        && !(modelData.id === "free" && !Backend.chosenDisk.freeBytes && !!Backend.chosenDisk.shrinkPart)
                                 width: diskCol.width; height: 64; radius: 16; opacity: modelData.ok ? 1 : 0.5
                                 color: on ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.16) : (mh.containsMouse ? Theme.t.hover : Theme.t.group)
                                 border.width: 1; border.color: on ? Theme.t.accent : Theme.t.islandLine
@@ -215,6 +228,23 @@ GlassWindow {
                                         Label { text: modelData.title; font.weight: Font.DemiBold }
                                         Label { width: parent.width; text: modelData.line; secondary: true; font.pixelSize: 12; elide: Text.ElideRight } } }
                                 MouseArea { id: mh; anchors.fill: parent; hoverEnabled: true; enabled: modelData.ok; cursorShape: Qt.PointingHandCursor; onClicked: Backend.setMode(modelData.id) } } }
+                        // beside Windows: how much room it gives
+                        Rectangle { objectName: "shrinkBox"; visible: Backend.mode === "shrink"; width: parent.width; height: shrinkCol.height + 28; radius: 16; color: Theme.t.group; border.width: 1; border.color: Theme.t.islandLine
+                            Column { id: shrinkCol; x: 16; y: 14; width: parent.width - 32; spacing: 12
+                                Label { visible: Backend.shrink.state !== "ok"; width: parent.width; wrapMode: Text.Wrap
+                                    text: Backend.shrink.state === "probing" ? "Looking at how much room Windows can give\u2026 (this can take a minute)" : Backend.shrink.why; secondary: Backend.shrink.state === "probing" }
+                                Row { visible: Backend.shrink.state === "ok"; width: parent.width
+                                    Label { width: parent.width / 2; text: (Backend.chosenDisk.shrinkLabel || "Windows") + " keeps " + Backend.shrink.windowsText; font.weight: Font.DemiBold }
+                                    Label { width: parent.width / 2; horizontalAlignment: Text.AlignRight; text: "Huginn OS gets " + Backend.shrink.huginnText; font.weight: Font.DemiBold; color: Theme.t.accent } }
+                                Item { objectName: "shrinkSlider"; visible: Backend.shrink.state === "ok"; width: parent.width; height: 28
+                                    Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 8; radius: 4; color: "#2F6FDB" }
+                                    Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; width: parent.width * Backend.shrink.share; height: 8; radius: 4; color: Theme.t.accent }
+                                    Rectangle { x: parent.width * (1 - Backend.shrink.share) - width / 2; anchors.verticalCenter: parent.verticalCenter; width: 24; height: 24; radius: 12; color: "white"; border.width: 1; border.color: Theme.t.islandLine }
+                                    MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.SizeHorCursor
+                                        function set(x) { Backend.setShare(1 - Math.max(0, Math.min(1, x / width))) }
+                                        onPressed: function (m) { set(m.x) } onPositionChanged: function (m) { if (pressed) set(m.x) } } }
+                                Label { visible: Backend.shrink.state === "ok"; width: parent.width; wrapMode: Text.Wrap; font.pixelSize: 12; secondary: true
+                                    text: "Windows needs " + Backend.shrink.windowsLeast + " for what's on it now. Shrinking moves some of its files and can take a while; back up anything important first." } } }
                         // choosing partitions
                         Column { visible: Backend.mode === "manual"; width: parent.width; spacing: 4
                             Repeater { model: Backend.chosenDisk.parts || []
@@ -313,7 +343,9 @@ GlassWindow {
                                     Label { id: val; x: 150; y: 13; width: parent.width - 170; text: modelData.value; wrapMode: Text.WordWrap
                                         color: modelData.warn ? Theme.t.danger : Theme.t.text; font.weight: modelData.warn ? Font.DemiBold : Font.Normal } } } } }
                     Label { width: parent.width; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 12
-                        text: Backend.mode === "erase" ? "Pressing Erase and Install deletes everything on the disk. This can't be undone." : "Pressing Install changes the disk as shown. Back up anything important first." }
+                        text: Backend.mode === "erase" ? "Pressing Erase and Install deletes everything on the disk. This can't be undone."
+                              : Backend.mode === "shrink" ? "Pressing Install shrinks Windows as shown, then installs. Windows' files stay, but back up anything important first."
+                              : "Pressing Install changes the disk as shown. Back up anything important first." }
                 }
             }
         }

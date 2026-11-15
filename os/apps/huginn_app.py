@@ -3968,6 +3968,8 @@ class Capture(QObject):
         if os.environ.get("WAYLAND_DISPLAY"):
             if self._portal(choose):
                 return
+            if self._direct():
+                return
         screen = QGuiApplication.primaryScreen()
         shot = screen.grabWindow(0) if screen else None
         if shot is None or shot.isNull() or not shot.save(str(self._tmp)):
@@ -3993,11 +3995,30 @@ class Capture(QObject):
             return False
         return True
 
+    def _direct(self, why: str = "") -> bool:
+        """Without the portal (or when it gave nothing): KWin through Huginn's helper. False if that isn't here."""
+        import huginn_capture
+        if not huginn_capture.helper() or os.environ.get("HUGINN_COMPOSITOR"):
+            return False
+        problem = huginn_capture.kwin_grab(str(self._tmp))
+        if problem:
+            huginn_capture.note(f"Screenshot app: portal: {why or 'no answer'}; helper: {problem}")
+            self._done("", f"No screenshot was taken: {problem}. (Details in ~/.cache/huginn/screenshot.log)")
+        else:
+            self._done(str(self._tmp))
+        return True
+
     @Slot("QDBusMessage")
     def portalReply(self, message) -> None:
         args = message.arguments()
-        uri = args[1].get("uri", "") if len(args) > 1 and args[0] == 0 and isinstance(args[1], dict) else ""
-        self._done(QUrl(uri).toLocalFile() if uri else "", "" if uri else "No screenshot was taken.")
+        code = args[0] if args else 2
+        uri = args[1].get("uri", "") if len(args) > 1 and code == 0 and isinstance(args[1], dict) else ""
+        if uri:
+            self._done(QUrl(uri).toLocalFile())
+        elif code == 1:
+            self._done("")                                   # you cancelled: nothing to say
+        elif not self._direct(f"answered {code}"):
+            self._done("", "No screenshot was taken.")
 
     def _done(self, path: str, problem: str = "") -> None:
         self._busy = False
@@ -4496,6 +4517,7 @@ class Store(QObject):
         super().__init__()
         self._demo, self._flatpak = demo, shutil.which("flatpak")
         self._apps, self._category, self._query, self._current = {}, "Discover", "", ""
+        self._queue = []
         self._busy, self._progress, self._ready = "", "", False
         self._process = None
         self._loaded.connect(self._adopt)
@@ -4645,6 +4667,12 @@ class Store(QObject):
     ready = Property(bool, lambda self: self._ready, notify=changed)
     category = Property(str, lambda self: self._category, notify=changed)
     busy = Property(str, lambda self: self._busy, notify=changed)
+    queued = Property("QVariantList", lambda self: [q[0] for q in self._queue], notify=changed)   # waiting their turn
+
+    @Slot(str)
+    def unqueue(self, app_id: str) -> None:
+        self._queue = [q for q in self._queue if q[0] != app_id]
+        self.changed.emit()
     progress = Property(str, lambda self: self._progress, notify=changed)
     count = Property(int, lambda self: len(self._apps), notify=changed)
     categories = Property("QVariantList", lambda self: [{"name": n, "icon": i} for n, i in CATEGORIES], constant=True)
@@ -4700,8 +4728,10 @@ class Store(QObject):
 
     # -- actions -----------------------------------------------------------------------------------
     def _run(self, app_id: str, verb: str, args: list) -> None:
-        if self._busy:
-            self.failed.emit("One thing at a time: wait for the current install or removal to finish.")
+        if self._busy:                                      # one at a time: the rest wait their turn, in order
+            if app_id != self._busy and all(q[0] != app_id for q in self._queue):
+                self._queue.append((app_id, verb, args))
+                self.changed.emit()
             return
         if self._demo or not self._flatpak:
             self._apps[app_id]["installed"] = verb == "install"
@@ -4723,15 +4753,39 @@ class Store(QObject):
             ok = code == 0
             if ok:
                 self._apps[app_id]["installed"] = verb == "install"
+                if verb == "install":
+                    self._dress(app_id)
             else:
                 self.failed.emit(f"Couldn't {'install' if verb == 'install' else 'remove'} {self._apps[app_id]['name']}. {self._progress}")
             self._busy, self._progress, self._process = "", "", None
             self.changed.emit()
+            if self._queue:                                     # the next one waiting
+                nxt = self._queue.pop(0)
+                QTimer.singleShot(0, lambda: self._run(*nxt))
 
         proc.readyRead.connect(output)
         proc.finished.connect(done)
         self._process = proc
         proc.start(self._flatpak, args)
+
+    def _dress(self, app_id: str) -> None:
+        """So an app from the App Store wears Huginn's look too: the style its toolkit needs, from Flathub, quietly
+        after it. Qt/KDE apps get the Kvantum style for their runtime (it reads ~/.config/Kvantum); GTK apps get
+        the Breeze theme (Flatpak usually adds it by itself, as the system's GTK theme is Breeze)."""
+        try:
+            runtime = subprocess.run([self._flatpak, "info", "--show-runtime", app_id], capture_output=True, text=True, timeout=20).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        name, _, rest = runtime.partition("/")
+        branch = rest.rpartition("/")[2]
+        wanted = []
+        if name.startswith("org.kde.Platform") and branch:
+            wanted.append(f"org.kde.KStyle.Kvantum//{branch}")
+        if name.startswith(("org.gnome.Platform", "org.freedesktop.Platform", "org.kde.Platform")):
+            wanted.append("org.gtk.Gtk3theme.Breeze")
+        if wanted:
+            from PySide6.QtCore import QProcess
+            QProcess.startDetached(self._flatpak, ["install", "-y", "--noninteractive", "flathub"] + wanted)
 
     @Slot(str)
     def install(self, app_id: str) -> None:
@@ -5050,6 +5104,9 @@ def main() -> int:
 
     sp = QStandardPaths
     target = Path(args.target).expanduser() if args.target else None
+    if target and target.is_file() and not (args.shot or args.demo):     # the shared recent list (start menu, Search)
+        import huginn_recent
+        huginn_recent.note(str(target), f"huginn-{args.app}", f"python3 /usr/share/huginn-apps/huginn_app.py {args.app} %u")
     if args.app == "files":
         backend = Files(target if target and target.exists() else Path.home(), persist=not (args.shot or args.demo))
     elif args.app == "calendar":
@@ -5162,6 +5219,11 @@ def main() -> int:
     elif args.app == "installer":
         import huginn_installer
         backend = huginn_installer.Installer(args.demo)
+        if args.demo and args.page:                         # previews: "disk" or "disk:shrink" opens that step
+            step, _, mode = args.page.partition(":")
+            backend.showStep(step)
+            if mode:
+                backend.setMode(mode)
     elif args.app == "tempo":
         import huginn_tempo
         backend = huginn_tempo.Tempo(args.demo)

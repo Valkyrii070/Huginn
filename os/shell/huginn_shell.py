@@ -91,6 +91,7 @@ class Theme(QObject):
         t.update({"space" + k.title(): v for k, v in tk["space"].items()})
         t.update({"panelOpacity": tk["glass"]["panel_opacity"], "popupOpacity": tk["glass"]["popup_opacity"],
                   "hoverMs": tk["motion"]["hover_ms"], "pressScale": tk["motion"]["press_scale"],
+                  "openMs": tk["motion"].get("open_ms", 220), "closeMs": tk["motion"].get("close_ms", 150), "moveMs": tk["motion"].get("move_ms", 260),
                   "font": tk["font"]["ui"], "fontMono": tk["font"]["mono"]})
         # Glass surfaces: the window colour at panel / popup opacity (KWin adds the blur behind them).
         base = tk[mode]["window"].lstrip("#")
@@ -136,7 +137,7 @@ class Theme(QObject):
                 t["group"] = "#1FFFFFFF" if self._dark else "#FFFFFFFF"
             t["icon"] = ink
         if s.reduceMotion:
-            t["hoverMs"], t["pressScale"] = 0, 1.0
+            t["hoverMs"], t["pressScale"], t["openMs"], t["closeMs"], t["moveMs"] = 0, 1.0, 0, 0, 0
         return t
 
     t = Property("QVariantMap", lambda self: self._build(), notify=changed)
@@ -316,6 +317,35 @@ DEMO_APPS = [("News", True), ("Maps", True), ("Huginn", False), ("Files", False)
              ("Calendar", False), ("Notes", False), ("Writer", False), ("Music", False), ("Terminal", False),
              ("Settings", False), ("Photos", False), ("App Store", False)]
 DEMO_RUNNING = ["Huginn", "Files", "Writer"]
+DEMO_GROUPS = {"News": "internet", "Maps": "utilities", "Huginn": "internet", "Files": "system", "Mail": "internet", "Calendar": "work",
+               "Notes": "utilities", "Writer": "work", "Music": "media", "Terminal": "system", "Settings": "system", "Photos": "media",
+               "App Store": "system"}
+# The start menu's groups, from a .desktop file's Categories (first rule that matches wins).
+GROUP_RULES = (("games", {"Game"}), ("utilities", {"Utility", "Accessibility"}),
+               ("internet", {"Network", "WebBrowser", "Email", "Chat", "InstantMessaging", "Feed", "News", "Telephony", "RemoteAccess", "P2P"}),
+               ("work", {"Office", "Development", "IDE", "WordProcessor", "Spreadsheet", "Presentation", "Calendar", "ContactManagement",
+                         "Finance", "ProjectManagement", "Education", "Science"}),
+               ("create", {"AudioVideoEditing", "Recorder", "Midi", "Sequencer", "2DGraphics", "3DGraphics", "RasterGraphics", "VectorGraphics"}),
+               ("media", {"AudioVideo", "Audio", "Video", "Player", "Graphics", "Photography", "TV", "Music"}))
+
+
+def app_colours() -> dict:
+    """Each of Huginn's own apps' colour, [dark, light], by app key (tokens.json "apps")."""
+    try:
+        return {k: v for k, v in load_tokens().get("apps", {}).items() if not k.startswith("_")}
+    except SystemExit:
+        return {}
+
+
+RECENT = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "huginn" / "recent-apps.json"
+DOCK = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "huginn" / "dock.json"
+DEFAULT_PINNED = ["Huginn", "Files", "Mail", "Calendar", "Notes", "Writer", "Music", "Terminal", "Settings"]
+DEMO_RECENT = ["Huginn", "Files", "Writer", "Mail", "Music", "Notes"]
+
+
+def group_of(categories: str) -> str:
+    cats = {c for c in (categories or "").split(";") if c}
+    return next((g for g, names in GROUP_RULES if cats & names), "system" if cats & {"System", "Settings"} else "utilities")
 # Line icons for Huginn's own apps, by the app key in "huginn_app.py <key>" (see qml/Glyph.qml).
 APP_GLYPHS = {"files": "folder", "calendar": "calendar", "mail": "mail", "settings": "gear", "monitor": "cpu",
               "store": "bag", "video": "video", "music": "music", "notes": "note", "photos": "image",
@@ -375,13 +405,23 @@ class Apps(QObject):
         super().__init__()
         self._demo = demo
         if demo:
-            self._apps = [{"name": n, "exec": "", "icon": "", "web": w, "glyph": DEMO_GLYPHS.get(n, ""), "image": "",
+            self._apps = [{"name": n, "exec": "", "icon": "", "web": w, "glyph": DEMO_GLYPHS.get(n, ""), "image": "", "group": DEMO_GROUPS.get(n, "utilities"),
+                           "keywords": "", "about": "",
                            "own": "" if w else own_icon("browser" if n == "Huginn" else next((k for k in APP_GLYPHS if k == n.lower() or n.lower().startswith(k)), ""))} for n, w in DEMO_APPS]
+            colours = app_colours()
+            for a in self._apps:
+                a.update({"execRaw": "", "mimes": [], "actions": [{"name": "New Window", "exec": ""}] if a["name"] in ("Huginn", "Files", "Writer") else [],
+                          "file": "", "flatpak": a["name"] == "Podcasts", "id": "huginn-" + a["name"].lower()})
+                key = "browser" if a["name"] == "Huginn" else next((k for k in colours if k == a["name"].lower() or a["name"].lower().startswith(k)), "")
+                a["colours"] = colours.get(key, [])
+            self._apps.sort(key=lambda a: (not a["web"], a["name"].lower()))
+            self._recent = list(DEMO_RECENT)
             self._running = list(DEMO_RUNNING) + ["Mail"]
             self._badges = {"Mail": 3}
         else:
             self._badges = {}
             self._apps = self._scan()
+            self._recent = self._read_recent()
             self._running = []
             self._matchers = [(a["name"], self._matcher(a["exec"])) for a in self._apps]
             self._timer = QTimer(self, interval=2000, timeout=self._poll)
@@ -405,6 +445,7 @@ class Apps(QObject):
         dirs = [Path.home() / ".local/share/applications"]
         dirs += [Path(d) / "applications" for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
         seen, apps = set(), []
+        colours = app_colours()
         for folder in dirs:
             for path in sorted(folder.glob("*.desktop")) if folder.is_dir() else []:
                 if path.name in seen:
@@ -423,11 +464,29 @@ class Apps(QObject):
                 glyph = APP_GLYPHS.get(app_key(command), "globe" if name == "Huginn" else "")
                 key = app_key(command)
                 apps.append({"name": name, "icon": entry.get("Icon", ""), "exec": command, "id": path.stem,
+                             "group": "internet" if entry.get(WEB_APP_KEY, "false").lower() == "true" else group_of(entry.get("Categories", "")),
+                             "keywords": " ".join(filter(None, (entry.get("GenericName", ""), entry.get("Keywords", "").replace(";", " "),
+                                                               entry.get("Comment", "")))),
+                             "about": entry.get("GenericName", "") or entry.get("Comment", ""),
+                             "colours": colours.get(key, []),
                              "wm": entry.get("StartupWMClass", "") or (f"huginn-{key}" if key else path.stem),
                              "web": entry.get(WEB_APP_KEY, "false").lower() == "true",
                              "glyph": glyph, "image": "" if glyph else cls._image(entry.get("Icon", "")),
-                             "own": own_icon("browser" if name == "Huginn" else app_key(command) if app_key(command) in APP_GLYPHS else "")})
+                             "own": own_icon("browser" if name == "Huginn" else app_key(command) if app_key(command) in APP_GLYPHS else ""),
+                             "execRaw": entry.get("Exec", ""), "mimes": [m for m in entry.get("MimeType", "").split(";") if m],
+                             "actions": cls._actions(parser, entry), "file": str(path),
+                             "flatpak": "flatpak" in str(path) or bool(entry.get("X-Flatpak", ""))})
         return sorted(apps, key=lambda a: (not a["web"], a["name"].lower()))
+
+    @staticmethod
+    def _actions(parser, entry) -> list:
+        """The .desktop file's own extra actions ("New Window", "New Private Window"…), for the app's island."""
+        out = []
+        for key in [a for a in entry.get("Actions", "").split(";") if a]:
+            section = f"Desktop Action {key}"
+            if parser.has_section(section) and parser[section].get("Exec"):
+                out.append({"name": parser[section].get("Name", key), "exec": parser[section]["Exec"]})
+        return out[:4]
 
     @staticmethod
     def _matcher(command: str):
@@ -517,6 +576,133 @@ class Apps(QObject):
         parts = shlex.split(command) if command else []
         if parts:
             QProcess.startDetached(parts[0], parts[1:])
+        app = next((a for a in self._apps if a["exec"] and a["exec"] == command), None)
+        if app:
+            self.used(app["name"])
+
+    @Slot(str)
+    def used(self, name: str) -> None:
+        """The start menu's Recent row: the last six apps opened from the shell, newest first."""
+        self._recent = [name] + [n for n in self._recent if n != name][:11]
+        self.changed.emit()
+        if self._demo:
+            return
+        try:
+            RECENT.parent.mkdir(parents=True, exist_ok=True)
+            RECENT.write_text(json.dumps(self._recent), encoding="utf-8")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _read_recent() -> list:
+        try:
+            got = json.loads(RECENT.read_text(encoding="utf-8"))
+            return [n for n in got if isinstance(n, str)][:12]
+        except (OSError, ValueError):
+            return []
+
+    # ------------------------------------------------------------------ the dock's apps, and each app's island
+    def _read_pins(self) -> list:
+        if self._demo:
+            return list(DEFAULT_PINNED)
+        try:
+            got = json.loads(DOCK.read_text(encoding="utf-8")).get("pinned")
+            return [n for n in got if isinstance(n, str)] if isinstance(got, list) else list(DEFAULT_PINNED)
+        except (OSError, ValueError, AttributeError):
+            return list(DEFAULT_PINNED)
+
+    def _pins(self) -> list:
+        if not hasattr(self, "_pinned"):
+            self._pinned = self._read_pins()
+        return self._pinned
+    pinned = Property("QVariantList", _pins, notify=changed)
+
+    @Slot(str, bool)
+    def setPinned(self, name: str, on: bool) -> None:
+        pins = [n for n in self._pins() if n != name] + ([name] if on else [])
+        self._pinned = pins
+        self.changed.emit()
+        if not self._demo:
+            try:
+                DOCK.parent.mkdir(parents=True, exist_ok=True)
+                DOCK.write_text(json.dumps({"pinned": pins}), encoding="utf-8")
+            except OSError:
+                pass
+
+    def _find(self, name: str):
+        return next((a for a in self._apps if a["name"] == name), None)
+
+    @Slot(str, result="QVariantMap")
+    def island(self, name: str) -> dict:
+        """What an app's island shows: its recent files, its own actions, whether it's in the dock, and whether the
+        App Store can remove it."""
+        app = self._find(name)
+        if not app:
+            return {}
+        if self._demo:
+            recent = {"Writer": [("Iceland trip plan.odt", "Documents › Travel", "1:12 AM"), ("Cover letter, final.odt", "Documents", "yesterday"),
+                                 ("Book club notes.odt", "Documents", "3 days ago")],
+                      "Music": [("Late drive", "Playlist", "today")]}.get(name, [])
+            files = [{"name": n, "path": "", "where": w, "when": t} for n, w, t in recent]
+        else:
+            for d in (Path("/usr/share/huginn-apps"), HERE.parent / "apps"):     # (the shared recent list lives with the apps)
+                if (d / "huginn_recent.py").exists() and str(d) not in sys.path:
+                    sys.path.append(str(d))
+            import huginn_recent
+            files = huginn_recent.for_app([app.get("id", ""), name, Path(shlex.split(app["exec"])[0]).name if app["exec"] else ""], app.get("mimes", []), 4)
+        return {"name": name, "about": app.get("about", ""), "recent": files, "actions": [a["name"] for a in app.get("actions", [])],
+                "pinned": name in self._pins(), "removable": bool(app.get("flatpak")), "running": name in self._running,
+                "opensFiles": bool(app.get("mimes")) or self._demo}
+
+    @staticmethod
+    def _expand(exec_line: str, path: str = "") -> list:
+        """A .desktop Exec line as an argument list, with %f/%u (and friends) filled in or dropped."""
+        try:
+            parts = shlex.split(exec_line)
+        except ValueError:
+            return []
+        out = []
+        for p in parts:
+            if p in ("%f", "%F", "%u", "%U"):
+                if path:
+                    out.append(path)
+            elif re.fullmatch(r"%[a-zA-Z]", p):
+                continue
+            else:
+                out.append(p.replace("%%", "%"))
+        if path and not any(p in ("%f", "%F", "%u", "%U") for p in parts):
+            out.append(path)
+        return out
+
+    @Slot(str, str)
+    def openWith(self, name: str, path: str) -> None:
+        app = self._find(name)
+        if not app or self._demo:
+            return
+        argv = self._expand(app.get("execRaw") or app["exec"], path)
+        if argv:
+            QProcess.startDetached(argv[0], argv[1:])
+            self.used(name)
+
+    @Slot(str, int)
+    def runAction(self, name: str, index: int) -> None:
+        app = self._find(name)
+        if not app or self._demo or not (0 <= index < len(app.get("actions", []))):
+            return
+        argv = self._expand(app["actions"][index]["exec"])
+        if argv:
+            QProcess.startDetached(argv[0], argv[1:])
+            self.used(name)
+
+    @Slot(str)
+    def showInStore(self, name: str) -> None:
+        if not self._demo:
+            QProcess.startDetached("python3", ["/usr/share/huginn-apps/huginn_app.py", "store", "--page", "installed"])
+
+    def _recent_apps(self) -> list:
+        by_name = {a["name"]: a for a in self._apps}
+        return [by_name[n] for n in self._recent if n in by_name][:6]
+    recent = Property("QVariantList", _recent_apps, notify=changed)
 
 
 class Tabs(QObject):
@@ -716,7 +902,8 @@ def main() -> int:
     ap.add_argument("--socket", default="huginn-0", help="--compositor: the Wayland socket apps connect to")
     ap.add_argument("--no-services", action="store_true", help="--compositor: don't start the session's services in it")
     ap.add_argument("--shot", metavar="PNG")
-    ap.add_argument("--open", choices=["cc", "launcher", "tabs"], default="")
+    ap.add_argument("--open", choices=["cc", "launcher", "tabs", "search"], default="")
+    ap.add_argument("--query", default="", help="with --open search or launcher in a preview: what's typed")
     ap.add_argument("--realm", default="")
     ap.add_argument("--menus", action="store_true", help="preview: start with the app menus open")
     ap.add_argument("--arrive", action="store_true", help="preview: play the arrival after the sign-in screen")
@@ -760,9 +947,13 @@ def main() -> int:
     from huginn_system import System
     status = System(demo=args.preview, apps=apps)              # battery, network, Bluetooth, levels, the app in front
     ctx.setContextProperty("Status", status)
+    from huginn_search import Search
+    search = Search(apps, tabs, demo=args.preview)               # Search everything (Super+Space)
+    ctx.setContextProperty("SearchData", search)
     ctx.setContextProperty("Settings", settings)
     ctx.setContextProperty("startOpen", args.open)
     ctx.setContextProperty("startMenus", args.menus)
+    ctx.setContextProperty("startQuery", args.query)
     ctx.setContextProperty("Me", me())
     ctx.setContextProperty("arriving", args.arrive or not (args.preview or args.windowed))
     comp = None

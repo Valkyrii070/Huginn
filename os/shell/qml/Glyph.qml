@@ -121,6 +121,8 @@ Canvas {
         case "battery": box(3, 7.5, 16, 9, 2.5); line(21, 10.5, 21, 13.5); c.fillRect(5.5, 10, 7, 4); break
         case "keyboard": box(2.5, 6, 19, 12, 2.5); dot(6.5, 9.8, 0.9); dot(10, 9.8, 0.9); dot(13.5, 9.8, 0.9); dot(17, 9.8, 0.9); line(7.5, 14.2, 16.5, 14.2); break
         case "refresh": c.beginPath(); c.arc(12, 12, 7.5, Math.PI * 1.15, Math.PI * 2.85); c.stroke(); line(4.4, 5.5, 4.6, 9.4, 8.5, 9.2); break
+        case "power": c.beginPath(); c.arc(12, 13, 7.5, -Math.PI * 0.3, Math.PI * 1.3); c.stroke(); line(12, 3, 12, 11); break
+        case "signout": line(10, 4, 5, 4, 5, 20, 10, 20); line(10, 12, 20, 12); line(16, 8, 20, 12, 16, 16); break
         case "leaf": c.beginPath(); c.moveTo(5, 19); c.quadraticCurveTo(4, 6, 19, 5); c.quadraticCurveTo(19, 18, 6, 18); c.stroke(); line(5, 19, 13, 11); break
         case "headphones": c.beginPath(); c.arc(12, 13, 8, Math.PI, 0); c.stroke(); box(3.5, 13, 4.5, 7, 1.5); box(16, 13, 4.5, 7, 1.5); break
         case "speaker": box(6, 3, 12, 18, 3); ring(12, 14, 3.5); dot(12, 7, 1.2); break

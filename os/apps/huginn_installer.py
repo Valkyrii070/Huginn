@@ -169,7 +169,12 @@ def disk_view(path: str, model: str, tran: str, removable: bool, size: int, part
     systems = sorted({p["holds"] for p in parts if p["holds"] in ("Windows", "Linux", "macOS")})
     best = max(free, key=lambda s: s[1]) if free else None
     kind = {"nvme": "NVMe drive", "sata": "SATA drive", "usb": "USB drive", "mmc": "Memory card", "virtio": "Virtual disk"}.get(tran, "Disk")
+    windows = [p for p in parts if p["holds"] == "Windows" and p.get("fstype") == "ntfs" and p["size"] >= 50 * 10 ** 9]
+    shrink = max(windows, key=lambda p: p["size"]) if windows else None
+    locked = any((p.get("fstype") or "").lower() == "bitlocker" for p in parts)
     return {"path": path, "model": model or kind, "kind": kind, "removable": removable, "size": size, "sizeText": size_text(size),
+            "shrinkPart": shrink["path"] if shrink else "", "shrinkSize": shrink["size"] if shrink else 0,
+            "shrinkLabel": (shrink["label"] or "Windows") if shrink else "", "bitlocker": locked,
             "parts": parts, "systems": systems, "big": size >= MIN_BYTES,
             "freeStart": best[0] if best else 0, "freeBytes": best[1] * SECTOR if best else 0, "freeText": size_text(best[1] * SECTOR) if best else "",
             "hasEsp": any(p["holds"] == "EFI" for p in parts), "mounted": any(p["mounted"] for p in parts),
@@ -275,6 +280,8 @@ class Installer(QObject):
         self._disks = demo_disks() if demo else read_disks()
         self._disk = next((d["path"] for d in self._disks if d["big"] and not d["removable"]), self._disks[0]["path"] if self._disks else "")
         self._mode = "erase"
+        self._shrink = {"state": "", "size": 0, "min": 0, "huginn": 0, "why": ""}     # beside Windows: probing → ok | no
+        self._probe = None
         self._root = ""
         self._efi = ""
         self._format_efi = False
@@ -323,6 +330,12 @@ class Installer(QObject):
             self._step -= 1
             self.changed.emit()
 
+    def showStep(self, name: str) -> None:
+        """(previews) open a step by its name, as if the ones before it were done."""
+        if name in STEPS:
+            self._step = STEPS.index(name)
+            self.changed.emit()
+
     @Slot(int)
     def goTo(self, i: int) -> None:
         if 0 <= i < self._step and self._state == "setup":
@@ -337,8 +350,14 @@ class Installer(QObject):
                 return "There's no disk to put Huginn OS on."
             if self._mode == "erase" and not d.get("big"):
                 return f"Huginn OS needs about {size_text(MIN_BYTES)}; this disk has {d.get('sizeText')}."
-            if self._mode == "erase" and d.get("mounted"):
-                return "Something on this disk is in use. Close it (or eject it in Files) first."
+            if self._mode == "shrink":
+                sh = self._shrink
+                if sh["state"] == "probing":
+                    return "Looking at how much room Windows can give\u2026"
+                if sh["state"] != "ok":
+                    return sh["why"] or "Windows' partition couldn't be looked at."
+                if sh["huginn"] < MIN_BYTES:
+                    return f"Give Huginn OS about {size_text(MIN_BYTES)} at least."
             if self._mode == "free" and d.get("freeBytes", 0) < MIN_BYTES:
                 return f"The free space on this disk is {d.get('freeText') or 'none'}; Huginn OS needs about {size_text(MIN_BYTES)}."
             if self._mode == "manual":
@@ -474,14 +493,18 @@ class Installer(QObject):
         if any(d["path"] == path for d in self._disks):
             self._disk, self._root, self._efi = path, "", ""
             d = self.chosenDisk
-            if self._mode == "free" and not d.get("freeBytes"):
+            if (self._mode == "free" and not d.get("freeBytes")) or (self._mode == "shrink" and not d.get("shrinkPart")):
                 self._mode = "erase"
+            elif self._mode == "shrink":
+                self._start_probe()
             self.changed.emit()
 
     @Slot(str)
     def setMode(self, mode: str) -> None:
-        if mode in ("erase", "free", "manual"):
+        if mode in ("erase", "free", "shrink", "manual"):
             self._mode = mode
+            if mode == "shrink":
+                self._start_probe()
             if mode == "manual":
                 self._encrypt = False
                 esp = next((p["path"] for p in self.chosenDisk.get("parts", []) if p["holds"] == "EFI"), "")
@@ -536,8 +559,11 @@ class Installer(QObject):
              "hostname": engine.good_hostname(u["hostname"] or (u["name"] + "-" + chassis())),
              "user": {"name": u["name"], "realName": u["realName"].strip(), "password": u["password"], "autologin": u["autologin"]},
              "timezone": self._zone, "locale": self._lang + ".UTF-8", "keyboard": {"layout": self._layout, "variant": ""}}
+        p["removable"] = bool(d.get("removable")) or d.get("kind") == "USB drive"
         if self._mode == "free":
             p["freeStart"] = d.get("freeStart", 0)
+        if self._mode == "shrink":
+            p.update(shrinkPart=d.get("shrinkPart", ""), keepBytes=self._shrink["size"] - self._shrink["huginn"])
         if self._mode == "manual":
             p.update(root=self._root, efi=self._efi, formatEfi=self._format_efi)
         return p
@@ -546,8 +572,10 @@ class Installer(QObject):
         d, u = self.chosenDisk, self._you
         where = {"erase": f"Erase {d.get('model', '')} ({d.get('sizeText', '')}) and put Huginn OS on all of it",
                  "free": f"Put Huginn OS in the {d.get('freeText', '')} of free space on {d.get('model', '')}" + (f", beside {' and '.join(d.get('systems'))}" if d.get("systems") else ""),
+                 "shrink": f"Shrink {d.get('shrinkLabel', 'Windows')} to {size_text(self._shrink['size'] - self._shrink['huginn'])} and put Huginn OS "
+                           f"in the {size_text(self._shrink['huginn'])} that frees, on {d.get('model', '')}. You'll choose which to start each time",
                  "manual": f"Put Huginn OS on {self._root} (it will be formatted)" + (f", starting from {self._efi}" if self._efi else "")}[self._mode]
-        rows = [{"label": "Disk", "value": where, "warn": self._mode == "erase"},
+        rows = [{"label": "Disk", "value": where, "warn": self._mode in ("erase", "shrink")},
                 {"label": "Encryption", "value": "On: the disk asks for its password when the computer starts" if self._encrypt else "Off"},
                 {"label": "You", "value": f"{u['realName'].strip()} ({u['name']})" + (", signing in by yourself" if u["autologin"] else "")},
                 {"label": "Computer name", "value": engine.good_hostname(u["hostname"])},
@@ -555,6 +583,63 @@ class Installer(QObject):
                 {"label": "Keyboard", "value": self.layoutLabel},
                 {"label": "Time zone", "value": self.zoneLabel}]
         return rows
+
+    # ---------------------------------------------------------------- beside Windows
+    def _start_probe(self) -> None:
+        """How far Windows' partition can shrink: the engine asks ntfsresize (as root, through pkexec; on the live
+        system no password is asked). It also says when Windows can't be shrunk now (Fast Startup, a disk check)."""
+        d = self.chosenDisk
+        part = d.get("shrinkPart", "")
+        if not part:
+            self._shrink = {"state": "no", "size": 0, "min": 0, "huginn": 0, "why": "There's no Windows partition here to make room in."}
+            return
+        if self._probe is not None:
+            return
+        self._shrink = {"state": "probing", "size": d.get("shrinkSize", 0), "min": 0, "huginn": 0, "why": ""}
+        if self._demo:
+            QTimer.singleShot(600, lambda: self._probed(json.dumps({"size": d.get("shrinkSize", 0), "min": 142 * 10 ** 9, "problem": ""}), part))
+            return
+        proc = QProcess(self)
+        self._probe = proc
+        proc.setProgram("pkexec")
+        proc.setArguments([ENGINE, "--probe-ntfs", part])
+        proc.finished.connect(lambda *_: self._probed(bytes(proc.readAllStandardOutput()).decode("utf-8", "replace"), part))
+        proc.start()
+
+    def _probed(self, out: str, part: str) -> None:
+        self._probe = None
+        try:
+            got = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
+        except ValueError:
+            got = {}
+        size, least, why = int(got.get("size") or 0), int(got.get("min") or 0), got.get("problem") or ""
+        if not size or not least or why:
+            self._shrink = {"state": "no", "size": size, "min": least, "huginn": 0,
+                            "why": why or "Windows' partition couldn't be looked at (the password may have been refused)."}
+        else:
+            keep_least = least + 10 * 10 ** 9                       # Windows keeps what it has, and room to work in
+            room = max(0, size - keep_least)
+            huginn = min(room, max(MIN_BYTES * 2, size // 3)) // GIB * GIB
+            self._shrink = {"state": "ok", "size": size, "min": keep_least, "huginn": huginn, "why": ""}
+        self.changed.emit()
+
+    @Slot(float)
+    def setShare(self, fraction: float) -> None:
+        """The slider: how much of the room Windows can give goes to Huginn OS (0…1)."""
+        sh = self._shrink
+        if sh["state"] != "ok":
+            return
+        room = max(0, sh["size"] - sh["min"])
+        self._shrink = dict(sh, huginn=int(max(0.0, min(1.0, fraction)) * room) // GIB * GIB)
+        self.changed.emit()
+
+    def _shrink_view(self) -> dict:
+        sh = self._shrink
+        room = max(1, sh["size"] - sh["min"])
+        return {"state": sh["state"], "why": sh["why"], "share": sh["huginn"] / room if sh["state"] == "ok" else 0,
+                "huginnText": size_text(sh["huginn"]), "windowsText": size_text(sh["size"] - sh["huginn"]),
+                "huginnFraction": sh["huginn"] / max(1, self.chosenDisk.get("size", 1)), "windowsLeast": size_text(sh["min"])}
+    shrink = Property("QVariantMap", _shrink_view, notify=changed)
 
     summary = Property("QVariantList", _summary, notify=changed)
     fraction = Property(float, lambda self: self._fraction, notify=progressed)

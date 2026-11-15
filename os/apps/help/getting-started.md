@@ -2,7 +2,10 @@
 The desktop, windows and where things are.
 
 ## Open an app
-Click the round orb at the left end of the dock to see every app, then type a few letters of its name. Apps you use often can stay pinned in the middle of the dock; an open app has a glowing bar under its tile.
+Press Super (the Windows key), or click the round orb at the left end of the dock, for the start menu: your recent apps, every app (it scrolls; the pills along the top show one group), and Lock, Sleep, Restart, Shut Down and Sign Out at the bottom. Type a few letters to find an app; press Tab to search everything instead. Right-click an app (here, in the dock or in Search) for its own island: its recent files, things it can do, and Keep in the dock. An open app has a glowing bar under its tile.
+
+## Search everything
+Press Super+Space, or click the magnifier in the top bar. Type, and apps, files, Settings pages, sums ("84.60 × 15%", "5 km in mi") and Huginn's open tabs come up; Enter opens the top one, Tab narrows it to one kind. Everything is searched on this computer; only "Search the web" sends what you typed anywhere. Before you type, it offers what you were doing last: the file you had open, the song you paused.
 
 ## Move and size a window
 Huginn windows have no title bar. Drag a window by its top strip or by its name island in the top-left corner. Drag the bottom-right corner to resize it, and double-click the top strip to make it fill the screen.
@@ -20,7 +23,7 @@ The control centre slides out from the top bar on the right: Wi‑Fi and Bluetoo
 App Store installs apps from Flathub. Web apps you install from the Huginn browser appear alongside the others.
 
 ## Switch windows and keys to know
-Hold Alt and press Tab to see your open windows; let go of Alt to go to the one picked (Shift+Tab goes back, Escape stays put). Super on its own opens the app list, Super+L locks, Print saves a screenshot to Pictures › Screenshots. Clicking an open app in the dock brings its window forward instead of opening another.
+Hold Alt and press Tab to see your open windows; let go of Alt to go to the one picked (Shift+Tab goes back, Escape stays put). Super on its own opens the start menu, Super+Space searches everything, Super+L locks, Print saves a screenshot of the whole screen to Pictures › Screenshots, and Shift+Print (or Super+Shift+S) opens Screenshot to choose what to take. Clicking an open app in the dock brings its window forward instead of opening another.
 
 ## When an app asks
 Some things apps can only do by asking you first, in a card of Huginn's own: using the camera or taking screenshots ("Allow …?", answered once), which app should open a file or a link (**Open With**, the last one you used already picked), or a colour from the screen (the screen holds still with a magnifier: click the colour). An app that asks for a screenshot holds the screen still too: drag over the part to share, or take the whole screen; Escape says no.

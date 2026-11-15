@@ -105,6 +105,16 @@ def apply(realm: str, dark: bool, contrast: bool = False, force: bool = False) -
     # Qt and KDE apps: the widget style and the colours
     if (SHARE / "Kvantum" / name).is_dir():
         _write(CONFIG / "Kvantum" / "kvantum.kvconfig", f"[General]\ntheme={name}\n")
+        # A copy beside it: apps from the App Store (Flatpak) can't see /usr/share, but may read ~/.config/Kvantum
+        # (a system-wide Flatpak override lets them), so they wear the same style.
+        try:
+            mine = CONFIG / "Kvantum" / name
+            mine.mkdir(parents=True, exist_ok=True)
+            for f in (SHARE / "Kvantum" / name).iterdir():
+                if f.is_file() and (not (mine / f.name).exists() or (mine / f.name).stat().st_mtime < f.stat().st_mtime):
+                    shutil.copy2(f, mine / f.name)
+        except OSError:
+            pass
     if (SHARE / "color-schemes" / f"{name}.colors").exists():
         _run(["plasma-apply-colorscheme", name])
     # GTK 3 and 4: Breeze-GTK in Huginn's colours; libadwaita's named colours for GTK 4

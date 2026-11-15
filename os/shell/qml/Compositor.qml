@@ -61,7 +61,7 @@ WaylandCompositor {
         var best = null
         windows.forEach(function (w) { if (!w.minimised && !w.closing && w.role === "" && (!best || w.stack > best.stack)) best = w })
         focused = best
-        if (best) best.activate()
+        if (best && screen.open !== "launcher" && screen.open !== "search") best.activate()   // (the menu and Search keep the keys while open)
     }
     function place(c) {
         c.placed = true
@@ -90,7 +90,8 @@ WaylandCompositor {
             c.x = Math.max(f.x, Math.min(f.x + f.width - Math.min(c.width, f.width), c.x))
             c.y = Math.max(f.y + (c.decorated ? 44 : 0), c.y)
         }
-        c.activate()
+        if (screen.open === "launcher" || screen.open === "search") raise(c)   // (a window that arrives while they're open doesn't take their keys)
+        else c.activate()
     }
     function appWindows(app) {
         var wm = (app.wm || "").toLowerCase(), id = (app.id || "").toLowerCase()
@@ -146,6 +147,7 @@ WaylandCompositor {
             readonly property Item wallpaperLayer: desk
             readonly property bool frostOn: Comp.frost && !(typeof Settings !== "undefined" && Settings.reduceTransparency)
             property string open: ""                 // "launcher", "cc" or ""
+            onOpenChanged: if (open === "" && comp.focused && !Comp.locked) comp.focused.activate()   // the keys go back to the window
             property bool tabsOpen: false
             property bool settled: !arriving
             Component.onCompleted: Comp.setScreen(screen)
@@ -176,6 +178,7 @@ WaylandCompositor {
                 opacity: screen.settled ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 500 } }
                 onControlCentre: screen.open = screen.open === "cc" ? "" : "cc"
                 onLauncher: screen.open = screen.open === "launcher" ? "" : "launcher"
+                onSearch: screen.open = screen.open === "search" ? "" : "search"
                 onWindowAction: function (action) { if (!comp.focused) return; if (action === "close") comp.focused.close(); else if (action === "minimise") comp.focused.minimise() }
             }
             // a maximised window of another app: its controls sit in the middle of the bar
@@ -203,6 +206,8 @@ WaylandCompositor {
                 Behavior on opacity { NumberAnimation { duration: 500 } }
                 Behavior on anchors.bottomMargin { NumberAnimation { duration: 550; easing.type: Easing.OutCubic } }
                 activate: function (app) { return comp.activateApp(app) }
+                menuOpen: screen.open === "launcher"
+                onIslandWanted: function (app, x) { screen.open = ""; islandLayer.shown = true; dockIsland.open(app); dockIsland.x = Math.max(comp.ms.x + 8, Math.min(comp.ms.x + comp.ms.width - dockIsland.width - 8, dock.x + x - dockIsland.width / 2)) }
                 onLauncher: screen.open = screen.open === "launcher" ? "" : "launcher"
                 onControlCentre: screen.open = screen.open === "cc" ? "" : "cc"
                 onTabsWanted: function (show) { if (show) { tabsHide.stop(); tabsShow.start() } else { tabsShow.stop(); tabsHide.restart() } }
@@ -238,9 +243,32 @@ WaylandCompositor {
                 objectName: "launcher"
                 z: 2010
                 onDone: screen.open = ""
-                visible: opacity > 0; opacity: screen.open === "launcher" ? 1 : 0
-                x: dock.x; y: comp.ms.y + comp.ms.height - height - 92
-                Behavior on opacity { NumberAnimation { duration: 150 } }   // (its search field takes the keys when it shows)
+                onSearchEverything: function (text) { search.startText = text; screen.open = "search" }
+                shown: screen.open === "launcher"           // (its search field takes the keys when it shows)
+                height: Math.min(660, comp.ms.height - 132)
+                x: comp.ms.x + (comp.ms.width - width) / 2; y: comp.ms.y + comp.ms.height - height - 92
+                orb: Qt.point(dock.x + 32 - x, dock.y + 32 - y)
+            }
+            Rectangle {   // the room behind the menu and Search dims a little
+                x: comp.ms.x; y: comp.ms.y; width: comp.ms.width; height: comp.ms.height; z: 2005; color: "black"
+                opacity: launcher.presence * 0.22 + search.presence * 0.4; visible: opacity > 0
+            }
+            Search {
+                id: search
+                objectName: "search"
+                z: 2020
+                x: comp.ms.x; y: comp.ms.y; width: comp.ms.width; height: comp.ms.height
+                shown: screen.open === "search"
+                onDone: { screen.open = ""; startText = "" }
+            }
+            Item {   // an app's island from the dock (right-click or a long press on its tile)
+                id: islandLayer
+                property bool shown: false
+                z: 2030
+                x: 0; y: 0; width: parent.width; height: parent.height
+                visible: shown
+                MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onClicked: islandLayer.shown = false }
+                AppIsland { id: dockIsland; y: dock.y - height - 10; onDone: islandLayer.shown = false }
             }
 
             // ---- Alt+Tab
@@ -287,6 +315,7 @@ WaylandCompositor {
                 function onMinimiseActive() { if (comp.focused) comp.focused.minimise() }
                 function onMaximiseActive() { if (comp.focused) comp.focused.toggleMaximised() }
                 function onToggleLauncher() { screen.open = screen.open === "launcher" ? "" : "launcher" }
+                function onToggleSearch() { screen.open = screen.open === "search" ? "" : "search" }
                 function onFlash() { flashAnim.restart() }
             }
             // ---- the screen turned off (the session daemon asks): black, until anything is touched

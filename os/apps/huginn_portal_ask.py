@@ -167,6 +167,13 @@ def capture(bus) -> tuple:
         except GLib.Error as err:
             return "", err.message
     if has("org.kde.KWin"):
+        # Huginn's own helper first (KWin knows it by name), then KDE's portal backend (which KWin also knows).
+        import huginn_capture
+        dest = RUNTIME / f"screen-{int(time.time() * 1000)}.png"
+        first = huginn_capture.kwin_grab(str(dest))
+        if not first:
+            return str(dest), ""
+        print(f"huginn-portal: huginn-grab: {first}; trying KDE's backend", file=sys.stderr)
         # KDE's backend takes it through KWin and saves it in Pictures (and fails when there's no Pictures folder);
         # it moves to our own folder at once.
         pictures = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES) or str(Path.home() / "Pictures")
@@ -178,10 +185,12 @@ def capture(bus) -> tuple:
                                           GLib.Variant("(ossa{sv})", (handle, "", "", {"interactive": GLib.Variant("b", False), "modal": GLib.Variant("b", False)})),
                                           GLib.VariantType("(ua{sv})"), 0, 60000, None).unpack()   # (slow when drawing with the CPU)
         except GLib.Error as err:
-            return "", err.message
+            huginn_capture.note(f"portal: KDE's backend: {err.message}")
+            return "", f"{first}; KDE's backend: {err.message}"
         made = QUrl(results.get("uri", "")).toLocalFile() if code == 0 else ""
         if not made or not os.path.isfile(made):
-            return "", "KWin didn't give a picture."
+            huginn_capture.note(f"portal: KDE's backend answered {code} with no picture")
+            return "", f"{first}; KWin didn't give KDE's backend a picture either."
         dest = RUNTIME / f"screen-{int(time.time() * 1000)}.png"
         try:
             shutil.move(made, dest)

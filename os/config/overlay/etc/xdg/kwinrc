@@ -2,3 +2,22 @@
 [Plugins]
 # Tells Huginn's top bar which app is in front (/usr/share/kwin-wayland/scripts/huginnactive).
 huginnactiveEnabled=true
+# Window animations: opening and closing (Scale), minimising (Squash), menus and popups, the blur behind glass.
+scaleEnabled=true
+squashEnabled=true
+fadingpopupsEnabled=true
+slidingpopupsEnabled=true
+blurEnabled=true
+contrastEnabled=true
+maximizeEnabled=true
+dialogparentEnabled=true
+startupfeedbackEnabled=true
+
+[ModifierOnlyShortcuts]
+# The Super (Windows) key on its own opens Huginn's start menu.
+Meta=org.huginn.Shell,/org/huginn/Shell,org.huginn.Shell,ToggleLauncher
+
+[Round-Corners]
+# Every window gets the same rounded corners as Huginn's own (the window radius of tokens.json).
+Size=14
+InactiveCornerRadius=14

@@ -87,6 +87,7 @@ class Compositor(QObject):
     minimiseActive = Signal()
     maximiseActive = Signal()
     toggleLauncher = Signal()
+    toggleSearch = Signal()                                    # Super+Space: Search everything
     flash = Signal()                    # a screenshot was taken
     unlockAnswer = Signal(bool, str)
     screensChanged = Signal()
@@ -214,6 +215,9 @@ class Compositor(QObject):
             return True
         if meta and key == Qt.Key_L:
             self.lock()
+            return True
+        if meta and key == Qt.Key_Space:
+            self.toggleSearch.emit()
             return True
         if alt and key in (Qt.Key_Tab, Qt.Key_Backtab):
             self._switching = True

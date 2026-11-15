@@ -842,6 +842,46 @@ Fixed along the way:
 - Still slow in a VM without a graphics card: KWin draws with the CPU, so signing in takes a minute or two there and
   animations stutter. A real computer with a GPU doesn't have that.
 
+## Tested on a real PC (2026-11-15): what changed
+
+Booted from USB on a desktop (AMD Radeon RX 9070 XT, Ethernet and Wi‑Fi, two and three monitors). What it found,
+and what changed:
+
+- **The start menu, rebuilt** (Super). Islands over the dock: a greeting and the app search on top; in the middle the
+  groups, Recent and every app, scrolling, lit in the colour of the app under the pointer; below, you and Lock, Sleep,
+  Restart, Shut Down, Sign Out (the last three ask once more). It grows out of the dock's orb as the realm's light
+  sweeps up through the glass and each app appears as it passes; closing pulls it back into the orb (Reduce Motion: a
+  fade). Tab hands what you typed to Search everything.
+- **Search everything** (Super+Space, or the magnifier in the top bar): a bar in the middle of the screen and results
+  as islands: the top hit big (a picture shows itself), then apps, files, Settings pages and Huginn's open tabs in a
+  fixed order, and the web always last. Before you type: pick up where you left off (recent files, paused music),
+  suggested apps and quick actions. Sums, units and temperatures are worked out on the computer. Nothing typed
+  leaves it unless you choose "Search the web".
+- **Each app's own island** (right-click, a long press, or the Menu key / Shift+F10), the same in the start menu, the
+  dock and Search: its recent files (the desktop's shared recent list, which Huginn's apps now write to), its own
+  actions (New Window, New Private Window…), Keep in the dock (now remembered) and Uninstall for App Store apps.
+- **Installing beside Windows.** The installer offered only "erase" or existing free space; now it can shrink
+  Windows' partition (ntfsresize, after asking it first whether it can: Fast Startup, a pending disk check and
+  BitLocker are explained in words), with a slider for how much room Huginn OS gets. A USB drive the live session had
+  opened is closed first instead of refused, and an install on a USB drive puts its boot files only on that drive,
+  leaving the computer's boot list and Windows alone.
+- **Screenshots.** KWin hands pictures of the screen only to programs it knows by their executable, and Huginn's apps
+  are Python; a small native helper (native/huginn-grab.c, built into /usr/libexec/huginn) is the one it knows now.
+  The Screenshot app falls back to it and says why if a picture still fails (~/.cache/huginn/screenshot.log). Print
+  saves the whole screen to Pictures › Screenshots at once; Shift+Print and Super+Shift+S open Screenshot.
+- **The third monitor was black**: the wallpaper was drawn on one screen only. Every screen has its own now (and a
+  screen plugged in later gets one).
+- **Animations.** KWin's window effects are on explicitly (open/close, minimise, popups); the start menu, Search, the
+  control centre and app islands move instead of popping.
+- **The App Store queues** a second install (or removal) instead of refusing it, and store apps wear Huginn's look:
+  a system-wide Flatpak override lets them read the GTK, Kvantum and KDE colour settings, Huginn's Kvantum theme is
+  copied where they can see it, and the matching style extensions come along with an app.
+- **Every window has rounded corners**, other apps' too: KDE-Rounded-Corners (a KWin effect, GPL-3.0) is built into
+  the image against its KWin, at Huginn's window radius.
+- **The control centre** shows the Wi‑Fi network you're on even while Ethernet carries the internet.
+- **Huginn's welcome tour** counts as shown only once it has been on screen, so a first start that ends early (Huginn
+  restarting itself to finish setting up) no longer skips it.
+
 ## Huginn, the browser
 
 Inside the Huginn repository (this kit is its `os/` folder) the image ships the repository's own browser. A kit used
