@@ -52,7 +52,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-venv python3-gi gir1.2-glib-2.0 python3-numpy python3-scipy \
-            python3-cryptography python3-pil libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 fonts-noto-core
+            python3-cryptography python3-pil libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 fonts-noto-core \
+            libpulse0 libpulse-mainloop-glib0   # Qt Multimedia (Camera, Podcasts, Recorder)
           python3 -m venv --system-site-packages /tmp/venv
           /tmp/venv/bin/pip install PySide6
       - name: Apps and shell, headless
