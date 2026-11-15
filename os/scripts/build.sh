@@ -233,7 +233,7 @@ stage_customise() {
     # Huginn Shell and the tokens it reads.
     install -d "$CHROOT/usr/share/huginn-shell/qml"
     install -m 755 "$ROOT"/shell/*.py "$CHROOT/usr/share/huginn-shell/"
-    install -m 644 "$ROOT"/shell/qml/*.qml "$CHROOT/usr/share/huginn-shell/qml/"
+    install -m 644 "$ROOT"/shell/qml/*.qml "$ROOT"/shell/qml/*.js "$CHROOT/usr/share/huginn-shell/qml/"
     install -m 644 "$ROOT/tokens/tokens.json" "$CHROOT/usr/share/huginn-os/tokens.json"
     install -d "$CHROOT/usr/share/huginn-apps/qml"
     install -m 755 "$ROOT"/apps/*.py "$CHROOT/usr/share/huginn-apps/"

@@ -20,6 +20,8 @@ GlassWindow {
     readonly property var out: engine.item ? engine.item.audio : stubAudio
     Loader { id: engine; active: !demo; source: "Engine.qml"; visible: false }
     Connections { target: engine.item; function onEnded() { win.play(win.current + 1) } }
+    MprisLink { player: win.player; title: win.song ? win.song.title : ""; artist: win.song ? win.song.artist || "" : ""; album: win.song ? win.song.album || "" : ""
+        onNext: win.play(win.current + 1); onPrevious: win.play(win.current - 1); onRaise: { win.raise(); win.requestActivate() } }
     islands: [
         Island {
             anchors { right: parent.right; rightMargin: 12 } y: 12

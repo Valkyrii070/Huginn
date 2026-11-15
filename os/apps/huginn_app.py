@@ -3845,6 +3845,12 @@ class Capture(QObject):
         self._tmp = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / f"huginn-capture-{os.getpid()}.png"
         self._rec, self._rec_state, self._rec_path, self._rec_since = None, "", "", 0.0      # "", "asking", "on", "ending"
         self._rec_line.connect(self._rec_said)
+        self._live = None
+
+    def set_live(self, live) -> None:
+        """While recording, the dock's live island shows it (a red bubble, as for any screen sharing) with Stop."""
+        self._live = live
+        live.action.connect(lambda key, what: self.stopRecording() if key == "recording" and what == "stop" else None)
 
     # ---------------------------------------------------------------- recording the screen as video
     _rec_line = Signal(str)
@@ -3885,11 +3891,16 @@ class Capture(QObject):
     def _rec_said(self, line: str) -> None:
         if line == "STARTED":
             self._rec_state, self._rec_since = "on", time.time()
+            if self._live is not None:
+                self._live.report("recording", {"kind": "screen", "title": "Screenshot is recording the screen", "sub": "Since " + time.strftime("%H:%M"),
+                                                "glyph": "display", "actions": [{"id": "stop", "label": "Stop and save", "glyph": "stop", "tone": "danger"}]})
         elif line.startswith("ERROR:"):
             self._rec_problem = line[6:].strip()
         elif line.startswith("NOTE:"):
             self.failed.emit(line[5:].strip())
         elif line.startswith("EXIT"):
+            if self._live is not None:
+                self._live.end("recording")
             was, problem = self._rec_state, getattr(self, "_rec_problem", "")
             self._rec, self._rec_state, self._rec_problem = None, "", ""
             path = Path(self._rec_path)
@@ -4519,7 +4530,7 @@ class Store(QObject):
         self._apps, self._category, self._query, self._current = {}, "Discover", "", ""
         self._queue = []
         self._busy, self._progress, self._ready = "", "", False
-        self._process = None
+        self._process, self._live, self._verb = None, None, ""
         self._loaded.connect(self._adopt)
         self._web = self._sample_web() if demo else self._scan_web()
         if demo:
@@ -4661,6 +4672,24 @@ class Store(QObject):
         self._apps, self._ready = apps, True
         self.changed.emit()
 
+    def set_live(self, live) -> None:
+        """The dock's live island shows what's installing (and how many wait); its button brings the store forward."""
+        self._live = live
+
+    def _live_say(self) -> None:
+        if self._live is None:
+            return
+        if not self._busy:
+            self._live.end("install")
+            return
+        name = (self._apps.get(self._busy) or {}).get("name", self._busy)
+        found = re.findall(r"(\d{1,3}(?:\.\d+)?)\s*%", self._progress or "")
+        waiting = len(self._queue)
+        self._live.report("install", {"kind": "progress", "title": f"{'Installing' if self._verb == 'install' else 'Removing'} {name}",
+                                      "sub": "App Store" + (f" · {waiting} more waiting" if waiting else ""), "glyph": "download",
+                                      "progress": min(100.0, float(found[-1])) / 100 if found else -1,
+                                      "actions": [{"id": "open", "label": "App Store", "glyph": "bag"}]})
+
     # -- what the pages show -----------------------------------------------------------------------
     available = Property(bool, lambda self: bool(self._flatpak) or self._demo or bool(self._web), notify=changed)
     catalogue = Property(bool, lambda self: bool(self._flatpak) or self._demo, constant=True)
@@ -4673,6 +4702,7 @@ class Store(QObject):
     def unqueue(self, app_id: str) -> None:
         self._queue = [q for q in self._queue if q[0] != app_id]
         self.changed.emit()
+        self._live_say()
     progress = Property(str, lambda self: self._progress, notify=changed)
     count = Property(int, lambda self: len(self._apps), notify=changed)
     categories = Property("QVariantList", lambda self: [{"name": n, "icon": i} for n, i in CATEGORIES], constant=True)
@@ -4732,14 +4762,16 @@ class Store(QObject):
             if app_id != self._busy and all(q[0] != app_id for q in self._queue):
                 self._queue.append((app_id, verb, args))
                 self.changed.emit()
+                self._live_say()
             return
         if self._demo or not self._flatpak:
             self._apps[app_id]["installed"] = verb == "install"
             self.changed.emit()
             return
         from PySide6.QtCore import QProcess
-        self._busy, self._progress = app_id, "Starting…"
+        self._busy, self._progress, self._verb = app_id, "Starting…", verb
         self.changed.emit()
+        self._live_say()
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
 
@@ -4748,6 +4780,7 @@ class Store(QObject):
             if text:
                 self._progress = text[-1][:90]
                 self.changed.emit()
+                self._live_say()
 
         def done(code, _status):
             ok = code == 0
@@ -4759,6 +4792,7 @@ class Store(QObject):
                 self.failed.emit(f"Couldn't {'install' if verb == 'install' else 'remove'} {self._apps[app_id]['name']}. {self._progress}")
             self._busy, self._progress, self._process = "", "", None
             self.changed.emit()
+            self._live_say()
             if self._queue:                                     # the next one waiting
                 nxt = self._queue.pop(0)
                 QTimer.singleShot(0, lambda: self._run(*nxt))
@@ -5259,6 +5293,15 @@ def main() -> int:
     ctx.setContextProperty("Theme", theme)
     ctx.setContextProperty("Settings", settings)
     ctx.setContextProperty("Backend", backend)
+    # The dock's live island: what this app is doing (a timer, an install, a recording), and for players the standard
+    # media controls (MPRIS). Previews and screenshots tell nobody.
+    from huginn_live import LiveReport, Mpris
+    quiet = bool(args.demo or args.shot)
+    live_report = LiveReport(APPS[args.app][0], quiet=quiet)
+    ctx.setContextProperty("LiveIsland", live_report)
+    if hasattr(backend, "set_live"):
+        backend.set_live(live_report)
+    ctx.setContextProperty("Mpris", Mpris(args.app, APPS[args.app][0], f"huginn-{args.app}", quiet=quiet) if args.app in ("music", "podcasts", "video") else None)
     ctx.setContextProperty("demo", args.demo)
     ctx.setContextProperty("startPage", args.page)
     ctx.setContextProperty("startHidden", bool(args.background))

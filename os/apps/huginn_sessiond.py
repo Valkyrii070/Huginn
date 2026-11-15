@@ -712,6 +712,11 @@ class Session(QObject):
     osdState = Property("QVariantMap", lambda self: self._osd, notify=osdChanged)
 
     def media(self, what: str) -> None:
+        # The dock's live island first: the keys work on whatever is playing there (two players: the one it shows).
+        if what in ("playPause", "play", "pause", "next", "previous"):
+            handled = self.sb.call("org.huginn.Live", "/org/huginn/Live", "org.huginn.Live", "Media", GLib.Variant("(s)", (what,)), "(b)", 1000)
+            if handled and handled[0]:
+                return
         names = (self.sb.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", None, "(as)") or ([],))[0]
         players = [n for n in names if n.startswith("org.mpris.MediaPlayer2.")]
         if not players:

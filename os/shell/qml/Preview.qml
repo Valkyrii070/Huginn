@@ -6,7 +6,7 @@ Window {
     id: win
     width: 1600; height: 1000; visible: true; title: "Huginn Shell preview"
     color: Theme.t.window
-    property string open: startOpen === "tabs" ? "" : startOpen
+    property string open: startOpen === "tabs" || startOpen === "live" ? "" : startOpen
     property bool tabsOpen: startOpen === "tabs"
     Timer { id: tabsShow; interval: 350; onTriggered: { Tabs.refresh(); win.tabsOpen = true } }
     Timer { id: tabsHide; interval: 350; onTriggered: win.tabsOpen = false }
@@ -21,6 +21,21 @@ Window {
         onLauncher: win.open = win.open === "launcher" ? "" : "launcher"
         onControlCentre: win.open = win.open === "cc" ? "" : "cc"
         onTabsWanted: function (show) { if (show) { tabsHide.stop(); tabsShow.start() } else { tabsShow.stop(); tabsHide.restart() } }
+        onLiveHover: function (inside) { if (inside) { liveHide.stop(); liveShow.start() } else { liveShow.stop(); liveHide.restart() } }
+        onLiveFocus: function (id) { win.liveFocus = id; win.liveOpen = true }
+    }
+    property bool liveOpen: startOpen === "live"
+    property string liveFocus: ""
+    Timer { id: liveShow; interval: 300; onTriggered: win.liveOpen = true }
+    Timer { id: liveHide; interval: 350; onTriggered: { win.liveOpen = false; win.liveFocus = "" } }
+    LivePanel {
+        objectName: "livePanel"
+        shown: (win.liveOpen || Live.ringing) && Live.active
+        focusId: win.liveFocus
+        x: Math.min(parent.width - width - 8, dock.x + dock.liveRight - width); y: dock.y - height - 10
+        originX: dock.x + dock.liveCentre - x
+        onPointer: function (inside) { if (inside) liveHide.stop(); else if (startOpen !== "live") liveHide.restart() }
+        onOpenWanted: function (app) { dock.openApp(app) }
     }
     Arrival { anchors.fill: parent; z: 50; playing: arriving; opacity: arriving ? 1 : 0 }
     TabStack {

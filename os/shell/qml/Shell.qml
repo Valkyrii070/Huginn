@@ -12,6 +12,14 @@ QtObject {
     property string searchText: ""
     property var dockIsland: null              // the app whose island is open over the dock
     property real dockIslandX: 0
+    // the live island, opened: after a moment of pointing at it (and while the pointer stays on it or the opened
+    // island), or by itself while a call or an alarm rings
+    property bool liveOpen: false
+    property string liveFocus: ""
+    readonly property bool liveShown: (liveOpen || Live.ringing) && Live.active && shell.open === "" && shell.dockIsland === null   // (dockIsland alone is the AppIsland's id)
+    property Timer liveShow: Timer { interval: 300; onTriggered: shell.liveOpen = true }
+    property Timer liveHide: Timer { interval: 350; onTriggered: { shell.liveOpen = false; shell.liveFocus = "" } }
+    function livePointer(inside) { if (inside) { liveHide.stop(); if (!liveOpen) liveShow.start() } else { liveShow.stop(); liveHide.restart() } }
     property Timer tabsShow: Timer { interval: 350; onTriggered: { Tabs.refresh(); shell.tabsOpen = true } }
     property Timer tabsHide: Timer { interval: 350; onTriggered: shell.tabsOpen = false }
     property Connections keys: Connections {
@@ -66,8 +74,9 @@ QtObject {
             opacity: shell.settled ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } } onControlCentre: shell.open = shell.open === "cc" ? "" : "cc"; onLauncher: shell.open = shell.open === "launcher" ? "" : "launcher"
             onSearch: shell.open = shell.open === "search" ? "" : "search" }
     },
-    Window {   // dock
-        visible: true; width: dock.width; height: 78; color: "transparent"
+    Window {   // dock. Wider than the dock, so the live island can grow and shrink without the surface changing size
+        id: dockWin
+        visible: true; width: Math.max(dock.width, dock.restWidth + 780); height: 78; color: "transparent"
         LayerShell.Window.scope: "huginn-dock"
         LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
         LayerShell.Window.layer: LayerShell.Window.LayerTop
@@ -84,6 +93,26 @@ QtObject {
             menuOpen: shell.open === "launcher"
             onIslandWanted: function (app, x) { shell.open = ""; shell.dockIslandX = x; shell.dockIsland = app }
             onTabsWanted: function (show) { if (show) { shell.tabsHide.stop(); shell.tabsShow.start() } else { shell.tabsShow.stop(); shell.tabsHide.restart() } }
+            onLiveHover: function (inside) { shell.livePointer(inside) }
+            onLiveFocus: function (id) { shell.liveFocus = id; shell.liveHide.stop(); shell.liveOpen = true }
+        }
+    },
+    Window {   // the live island, opened: just above the dock, lined up with the island's right edge
+        id: liveWin
+        visible: shell.liveShown || livePanel.visible; width: dockWin.width; height: livePanel.height + 60; color: "transparent"
+        LayerShell.Window.scope: "huginn-live"
+        LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
+        LayerShell.Window.layer: LayerShell.Window.LayerTop
+        LayerShell.Window.anchors: LayerShell.Window.AnchorBottom
+        LivePanel {
+            id: livePanel
+            shown: shell.liveShown; focusId: shell.liveFocus
+            readonly property real dockX: (liveWin.width - dock.width) / 2
+            x: Math.max(8, Math.min(liveWin.width - width - 8, dockX + dock.liveRight - width))
+            y: liveWin.height - height - 10
+            originX: dockX + dock.liveCentre - x
+            onPointer: function (inside) { shell.livePointer(inside) }
+            onOpenWanted: function (app) { dock.openApp(app) }
         }
     },
     Window {   // the name of the dock item under the pointer; never takes clicks

@@ -22,6 +22,30 @@ GlassWindow {
     property real until: 0
     property bool counting: false
     property bool rang: false
+    property real total: 0                 // the whole length of the timer that's running (it grows with +1 min)
+    // The dock's live island shows the timer while it runs (a ring counting down) and rings there when it's done;
+    // its buttons (Pause, +1 min, Cancel, Stop) work from there too.
+    readonly property string liveKey: rang ? "rang" : counting ? "on:" + until + ":" + total : left > 0 ? "paused:" + Math.round(left) : "off"
+    onLiveKeyChanged: {
+        var plus = { id: "add60", label: "+1 min" }, cancel = { id: "cancel", label: "Cancel", glyph: "x" }
+        if (rang) LiveIsland.report("timer", { kind: "alarm", title: "Timer", glyph: "bell",
+            actions: [{ id: "stop", label: "Stop", glyph: "stop", tone: "danger" }, { id: "again", label: "Again", glyph: "refresh" }] })
+        else if (counting) LiveIsland.report("timer", { kind: "timer", title: "Timer", ends: until, total: total, paused: false,
+            actions: [plus, { id: "pause", label: "Pause", glyph: "pause", tone: "primary" }, cancel] })
+        else if (left > 0) LiveIsland.report("timer", { kind: "timer", title: "Timer", left: left, total: total, paused: true,
+            actions: [plus, { id: "resume", label: "Resume", glyph: "play", tone: "primary" }, cancel] })
+        else LiveIsland.end("timer")
+    }
+    function startTimer(ms) { rang = false; total = ms; until = Date.now() + ms; left = ms; counting = true }
+    Connections { target: LiveIsland
+        function onAction(key, what) {
+            if (key !== "timer") return
+            if (what === "pause" && win.counting) { win.left = win.until - Date.now(); win.counting = false }
+            else if (what === "resume" && win.left > 0) { win.until = Date.now() + win.left; win.counting = true }
+            else if (what === "add60") { if (win.counting) win.until += 60000; else win.left += 60000; win.total += 60000 }
+            else if (what === "cancel" || what === "stop") { win.counting = false; win.left = 0; win.rang = false }
+            else if (what === "again") win.startTimer(win.setMinutes * 60000)
+        } }
     function fmt(ms, tenths) { var t = Math.max(0, ms), m = Math.floor(t / 60000), s = Math.floor(t / 1000) % 60; return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s + (tenths ? "." + Math.floor(t / 100) % 10 : "") }
     Timer { interval: 1000; running: true; repeat: true; triggeredOnStart: true; onTriggered: { var d = new Date(); win.now = Qt.formatTime(d, "HH:mm:ss"); win.today = Qt.formatDate(d, "dddd, MMMM d"); win.sAngle = d.getSeconds() * 6; win.mAngle = d.getMinutes() * 6 + d.getSeconds() / 10; win.hAngle = (d.getHours() % 12) * 30 + d.getMinutes() / 2; if (d.getSeconds() === 0 || win.cities.length === 0) win.cities = Backend.world() } }
     Timer { interval: 50; running: win.running || win.counting; repeat: true
@@ -70,6 +94,6 @@ GlassWindow {
         Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: 10
             Btn { width: 110; height: 36; text: "Cancel"; visible: win.counting || win.left > 0; onClicked: { win.counting = false; win.left = 0; win.rang = false } }
             Btn { width: 110; height: 36; primary: !win.counting; text: win.counting ? "Pause" : (win.left > 0 ? "Resume" : "Start")
-                onClicked: { win.rang = false; if (win.counting) { win.counting = false } else { win.until = Date.now() + (win.left > 0 ? win.left : win.setMinutes * 60000); win.left = win.until - Date.now(); win.counting = true } } } }
-        Label { width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 12; text: "The timer runs while Clock is open. Sound and alarms that work with Clock closed come later." } }
+                onClicked: { win.rang = false; if (win.counting) { win.counting = false } else if (win.left > 0) { win.until = Date.now() + win.left; win.counting = true } else win.startTimer(win.setMinutes * 60000) } } }
+        Label { width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 12; text: "The timer runs while Clock is open, and shows in the dock's live island. Sound and alarms that work with Clock closed come later." } }
 }

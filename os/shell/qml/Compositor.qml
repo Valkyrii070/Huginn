@@ -211,6 +211,28 @@ WaylandCompositor {
                 onLauncher: screen.open = screen.open === "launcher" ? "" : "launcher"
                 onControlCentre: screen.open = screen.open === "cc" ? "" : "cc"
                 onTabsWanted: function (show) { if (show) { tabsHide.stop(); tabsShow.start() } else { tabsShow.stop(); tabsHide.restart() } }
+                onLiveHover: function (inside) { screen.livePointer(inside) }
+                onLiveFocus: function (id) { screen.liveFocus = id; liveHide.stop(); screen.liveOpen = true }
+            }
+            // the live island, opened: after a moment of pointing at it, or by itself while a call or an alarm rings
+            property bool liveOpen: false
+            property string liveFocus: ""
+            function livePointer(inside) { if (inside) { liveHide.stop(); if (!liveOpen) liveShow.start() } else { liveShow.stop(); liveHide.restart() } }
+            Timer { id: liveShow; interval: 300; onTriggered: screen.liveOpen = true }
+            Timer { id: liveHide; interval: 350; onTriggered: { screen.liveOpen = false; screen.liveFocus = "" } }
+            LivePanel {
+                objectName: "livePanel"
+                z: 2002
+                shown: (screen.liveOpen || Live.ringing) && Live.active && screen.open === "" && !islandLayer.shown && dock.visible
+                focusId: screen.liveFocus
+                x: Math.max(comp.ms.x + 8, Math.min(comp.ms.x + comp.ms.width - width - 8, dock.x + dock.liveRight - width)); y: dock.y - height - 10
+                originX: dock.x + dock.liveCentre - x
+                onPointer: function (inside) { screen.livePointer(inside) }
+                onOpenWanted: function (app) { dock.openApp(app) }
+            }
+            Connections {   // two players: the one whose window isn't in front gets the island
+                target: comp
+                function onFocusedChanged() { Live.setFront(comp.focused && comp.focused.app ? String(comp.focused.app.file || "").split("/").pop() : "") }
             }
             Timer { id: tabsShow; interval: 350; onTriggered: { Tabs.refresh(); screen.tabsOpen = true } }
             Timer { id: tabsHide; interval: 350; onTriggered: screen.tabsOpen = false }

@@ -16,6 +16,8 @@ GlassWindow {
     QtObject { id: stubAudio; property real volume: 0.7 }
     readonly property var player: engine.item ? engine.item.player : stub
     readonly property var out: engine.item ? engine.item.audio : stubAudio
+    MprisLink { player: win.player; title: win.clip ? win.clip.title : ""
+        onNext: win.play(win.current + 1); onPrevious: win.play(win.current - 1); onRaise: { win.raise(); win.requestActivate() } }
     islands: [
         Island { anchors { right: parent.right; rightMargin: 12 } y: 12
             Seg { icon: "list"; text: "Videos"; on: win.showList; onClicked: win.showList = !win.showList }

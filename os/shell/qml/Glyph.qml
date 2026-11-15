@@ -23,6 +23,7 @@ Canvas {
         case "lock": box(5, 10.5, 14, 10, 2.5); c.beginPath(); c.arc(12, 10.5, 4, Math.PI, 0); c.stroke(); dot(12, 15.5, 1.2); break
         case "history": c.beginPath(); c.arc(12, 12, 8.5, -Math.PI * 0.85, Math.PI * 0.75); c.stroke(); line(3.2, 5.2, 4.2, 9.6, 8.4, 8.2); line(12, 7.5, 12, 12, 15, 14); break
         case "mic": box(9, 3, 6, 11, 3); c.beginPath(); c.arc(12, 11, 6, 0, Math.PI); c.stroke(); line(12, 17, 12, 21); line(9, 21, 15, 21); break
+        case "mute": box(9, 3, 6, 11, 3); c.beginPath(); c.arc(12, 11, 6, 0, Math.PI); c.stroke(); line(12, 17, 12, 21); line(9, 21, 15, 21); line(4, 3.5, 20, 20.5); break
         case "sun": ring(12, 12, 4); line(12, 2.5, 12, 5); line(12, 19, 12, 21.5); line(2.5, 12, 5, 12); line(19, 12, 21.5, 12); line(5.3, 5.3, 7, 7); line(17, 17, 18.7, 18.7); line(5.3, 18.7, 7, 17); line(17, 7, 18.7, 5.3); break
         case "moon": c.beginPath(); c.arc(12, 12, 8, Math.PI * 0.35, Math.PI * 1.65); c.arc(16.5, 12, 6.2, Math.PI * 1.36, Math.PI * 0.64, true); c.closePath(); c.stroke(); break
         case "cloud": c.beginPath(); c.arc(8, 15, 4, Math.PI * 0.5, Math.PI * 1.5); c.arc(12, 10.5, 4.6, Math.PI * 1.15, Math.PI * 1.9); c.arc(16.5, 14.5, 4.5, Math.PI * 1.45, Math.PI * 0.5); c.closePath(); c.stroke(); break

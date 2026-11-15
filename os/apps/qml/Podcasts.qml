@@ -20,6 +20,9 @@ GlassWindow {
         onSeekableChanged: if (seekable && win.now.spot > 0 && position < 1000) position = win.now.spot * 1000
         onErrorOccurred: function (error, text) { toast.say("That episode wouldn't play: " + text, true) } }
     Timer { interval: 8000; repeat: true; running: win.playing; onTriggered: Backend.heard(player.position / 1000, player.duration / 1000) }
+    MprisLink { player: player; title: win.now && win.now.title ? win.now.title : ""; artist: win.now && win.now.show ? win.now.show : ""; art: win.now && win.now.image ? win.now.image : ""
+        onNext: player.position = Math.min(player.duration, player.position + 30000); onPrevious: player.position = Math.max(0, player.position - 15000)
+        onRaise: { win.raise(); win.requestActivate() } }
 
     islands: [
         Island { anchors { right: parent.right; rightMargin: 12 } y: 12

@@ -1054,7 +1054,7 @@ class Podcasts(Worker):
         e = next((x for x in s.get("episodes", []) if x["id"] == episode), None)
         if e:
             local = self._kept_path(s, e) if not self._demo else None
-            self._now = dict(e, show=s["title"], showId=s["id"], spot=int(s.get("spot", {}).get(e["id"], 0)),
+            self._now = dict(e, show=s["title"], showId=s["id"], image=s.get("image", ""), spot=int(s.get("spot", {}).get(e["id"], 0)),
                              url=QUrl.fromLocalFile(str(local)).toString() if local is not None and local.exists() else e["url"])
             self.changed.emit()
 

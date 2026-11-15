@@ -882,6 +882,36 @@ and what changed:
 - **Huginn's welcome tour** counts as shown only once it has been on screen, so a first start that ends early (Huginn
   restarting itself to finish setting up) no longer skips it.
 
+## The live island (2026-11-15)
+
+Worked out with mockups (bubbles for more than one thing, it opens when you point at it, screen sharing treated like the
+camera and microphone, and the two-players rule), then built:
+
+- **What it hears about** (`shell/huginn_island.py`): anything with the standard media controls (MPRIS: Huginn's
+  Music, Podcasts and Media Player now publish them; the Huginn browser and Spotify-like apps already do), apps that
+  report over `org.huginn.Live` on the session bus (`apps/huginn_live.py`: Clock's timer, App Store installs,
+  Screenshot's recording), the Privacy Report's watcher (screen, camera, microphone), files arriving in Downloads,
+  Calendar events starting within 10 minutes, and calls through KDE Connect.
+- **The rules**: one island for the most important thing (a call, a timer or alarm going off, something playing, a
+  timer counting down, an event, downloads and installs); up to two more as round bubbles beside it, a "+N" when
+  there's more; clicking a bubble or scrolling swaps it in. The screen, camera and microphone aren't in that order:
+  each says so in the island for 4 seconds, then stays as a bubble (and a dot in the top bar) for as long as it's on,
+  never bumped and not counted. Two things playing: the one whose window isn't in front wins, else the newest.
+- **The island itself** (`LiveIsland.qml`): grows out of the dock's end and resizes as what it shows changes (the old
+  content fades as the new one comes in); bubbles pop in and out and slide. Point at it for 0.3 s and it opens
+  (`LivePanel.qml`): a full player with the cover, a scrubber you can drag and the transport; a timer's ring with
+  +1 min / Pause / Cancel; a call with its replies; an event with Join; installs with their progress; who is using the
+  screen, camera or microphone; and below, everything else going on. Calls and alarms open it by themselves. The
+  play/pause key works on whatever it shows (the session daemon asks the island first). All of it follows Reduce
+  Motion.
+- **Calls through KDE Connect**: the computer can't answer or decline a phone call, so the island offers Silence,
+  quick text replies and Phone. Apps that can answer (a calling app reporting `kind: "call"` with Answer/Decline) get
+  those buttons.
+- Tested: the rules on their own; a real session bus with two player processes and a reporting app (what wins, the
+  buttons reaching the apps, two players and the window in front, the media key, the screen shared and stopped,
+  apps quitting); Clock's timer driven from the island (start, pause, +1 min, resume, cancel); KWin nested on X11
+  with a player and a ringing call (the island opens by itself); both compositor suites; every app in the smoke test.
+
 ## Huginn, the browser
 
 Inside the Huginn repository (this kit is its `os/` folder) the image ships the repository's own browser. A kit used

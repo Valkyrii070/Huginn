@@ -871,32 +871,6 @@ class Glance(QObject):
     upNext = Property("QVariantList", lambda self: self._next, notify=changed)
 
 
-class Live(QObject):
-    """The dock's live tile: one line about something happening right now, or nothing.
-
-    For now it knows one thing: files still arriving in the Downloads folder.
-    """
-    changed = Signal()
-
-    def __init__(self, demo: bool):
-        super().__init__()
-        self._count = 1 if demo else 0
-        if not demo:
-            self._folder = Path.home() / "Downloads"
-            self._timer = QTimer(self, interval=2000, timeout=self._poll)
-            self._timer.start()
-
-    def _poll(self) -> None:
-        count = sum(1 for pattern in DOWNLOAD_PARTS for _ in self._folder.glob(pattern)) if self._folder.is_dir() else 0
-        if count != self._count:
-            self._count = count
-            self.changed.emit()
-
-    active = Property(bool, lambda self: self._count > 0, notify=changed)
-    glyph = Property(str, lambda self: "download", notify=changed)
-    text = Property(str, lambda self: "Downloading %d file%s" % (self._count, "" if self._count == 1 else "s"), notify=changed)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--preview", action="store_true")
@@ -905,12 +879,13 @@ def main() -> int:
     ap.add_argument("--socket", default="huginn-0", help="--compositor: the Wayland socket apps connect to")
     ap.add_argument("--no-services", action="store_true", help="--compositor: don't start the session's services in it")
     ap.add_argument("--shot", metavar="PNG")
-    ap.add_argument("--open", choices=["cc", "launcher", "tabs", "search"], default="")
+    ap.add_argument("--open", choices=["cc", "launcher", "tabs", "search", "live"], default="")
     ap.add_argument("--query", default="", help="with --open search or launcher in a preview: what's typed")
     ap.add_argument("--realm", default="")
     ap.add_argument("--menus", action="store_true", help="preview: start with the app menus open")
     ap.add_argument("--arrive", action="store_true", help="preview: play the arrival after the sign-in screen")
     ap.add_argument("--menu-style", choices=["dropdown", "inline"], default="", help="override the saved menu style for this run")
+    ap.add_argument("--live", default="", help="preview: what the live island shows (one, call, share, announce, event, none; default: music, a download, a timer)")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dark", action="store_true")
     mode.add_argument("--light", action="store_true")
@@ -937,7 +912,8 @@ def main() -> int:
     if args.menu_style:
         settings.override("menuStyle", args.menu_style)
     apps = Apps(demo=args.preview)
-    tabs, live = Tabs(apps, demo=args.preview), Live(demo=args.preview)
+    from huginn_island import Live
+    tabs, live = Tabs(apps, demo=args.preview), Live(demo=args.preview, scenario=args.live)
     engine = QQmlApplicationEngine()
     engine.addImageProvider("sysicon", SysIcon())
     ctx = engine.rootContext()
@@ -950,6 +926,7 @@ def main() -> int:
     from huginn_system import System
     status = System(demo=args.preview, apps=apps)              # battery, network, Bluetooth, levels, the app in front
     ctx.setContextProperty("Status", status)
+    status.activeChanged.connect(lambda: live.setFront(status.active.get("appId", "")))    # two players: the one not in front wins
     from huginn_search import Search
     search = Search(apps, tabs, demo=args.preview)               # Search everything (Super+Space)
     ctx.setContextProperty("SearchData", search)
@@ -976,7 +953,7 @@ def main() -> int:
         def grab():
             window.grabWindow().save(args.shot)
             app.quit()
-        QTimer.singleShot(600, grab)
+        QTimer.singleShot(int(os.environ.get("HUGINN_SHOT_DELAY", "600")), grab)
     code = app.exec()
     del engine          # tear the QML down before the Python objects it binds to
     return code

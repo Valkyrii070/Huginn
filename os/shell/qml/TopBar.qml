@@ -85,6 +85,21 @@ Item {
         }
     }
 
+    Row {   // the screen, the camera, the microphone: a dot for each while it's in use (it can't be turned off)
+        anchors { right: searchButton.left; rightMargin: 6; verticalCenter: parent.verticalCenter }
+        spacing: 5
+        Repeater {
+            model: [["screen", "#FF5A5F", "Your screen is being shared"], ["camera", "#3DD6B5", "The camera is on"], ["mic", "#FFB340", "The microphone is on"]]
+            Rectangle {
+                required property var modelData
+                visible: !!Live.privacy[modelData[0]]
+                width: 8; height: 8; radius: 4; color: modelData[1]
+                anchors.verticalCenter: parent.verticalCenter
+                Rectangle { anchors.centerIn: parent; width: 16; height: 16; radius: 8; color: parent.color; opacity: 0.25; z: -1 }
+                Accessible.name: modelData[2]
+            }
+        }
+    }
     Pressable {   // Search everything
         id: searchButton
         anchors { right: statusPill.left; rightMargin: 4; verticalCenter: parent.verticalCenter }

@@ -1,8 +1,8 @@
 import QtQuick
 
 // The dock: three separate islands. Left, the orb that opens the launcher. Middle, apps: pinned ones,
-// then anything else that is running, then web apps installed from Huginn. Right, a live tile that
-// appears only while something is happening (see Live in huginn_shell.py).
+// then anything else that is running, then web apps installed from Huginn. Right, the live island, there only while
+// something is going on (LiveIsland.qml; what it knows: huginn_island.py).
 // An open app shows a bar in the realm's accent colour with a soft glow under its tile.
 Row {
     id: dock
@@ -31,6 +31,16 @@ Row {
     onNativesChanged: { tipFor = ""; tipText = "" }
     readonly property var pinnedNames: Apps.pinned          // "Keep in the dock" in an app's island changes it
     signal islandWanted(var app, real x)   // right-click (or Menu key) on an app: its island, centred on x (dock coordinates)
+    signal liveHover(bool inside)          // the pointer is on the live island (the host opens it after a moment)
+    signal liveFocus(string id)            // a screen/camera/mic bubble was clicked: open the live island on it
+    readonly property real liveRight: liveIsland.x + liveIsland.pillRight       // where the opened live island lines up
+    readonly property real liveCentre: liveIsland.x + liveIsland.pillCentre
+    readonly property real restWidth: orbIsland.width + spacing + appsIsland.width   // the dock without the live island
+    function appNamed(name) { var all = Apps.all; for (var i = 0; i < all.length; i++) if (all[i].name === name) return all[i]; return null }
+    function openApp(name) {   // bring it forward if it has a window, else start it
+        var app = appNamed(name)
+        if (app && !(dock.activate && dock.activate(app))) Apps.launch(app.exec)
+    }
     readonly property var natives: {
         var all = Apps.all, run = Apps.running, out = [], i
         for (i = 0; i < pinnedNames.length; i++)
@@ -80,6 +90,7 @@ Row {
     }
 
     Island {
+        id: orbIsland
         width: 64
         Pressable {
             anchors.centerIn: parent; width: 44; height: 44; radius: 13; onClicked: dock.launcher()
@@ -119,28 +130,14 @@ Row {
             Repeater { model: dock.webApps; Tile { required property var modelData; app: modelData; inlineTip: dock.inlineTips; onHoveredChanged: dock.hover(this, modelData, open, hovered) } }
         }
     }
-    Island {
-        visible: Live.active
-        width: live.width + 26
-        Row {
-            id: live; anchors.centerIn: parent; spacing: 10
-            Rectangle {
-                width: 44; height: 44; radius: 13; color: Theme.t.view; border.width: 1; border.color: Theme.t.line
-                Glyph { anchors.centerIn: parent; name: Live.glyph; size: 22; ink: Theme.t.accent }
-            }
-            Column {
-                anchors.verticalCenter: parent.verticalCenter; spacing: 6
-                Label { text: Live.text; font.pixelSize: 13; font.weight: Font.Medium }
-                // How far along is not known, so the bar sweeps and does not fill.
-                Rectangle {
-                    width: 132; height: 4; radius: 2; color: Theme.t.line; clip: true
-                    Rectangle {
-                        width: 44; height: 4; radius: 2; color: Theme.t.accent
-                        SequentialAnimation on x { running: Live.active; loops: Animation.Infinite
-                            NumberAnimation { from: -44; to: 132; duration: 1400; easing.type: Easing.InOutQuad } }
-                    }
-                }
-            }
+    LiveIsland {
+        id: liveIsland
+        onHovered: function (inside) { dock.liveHover(inside) }
+        onFocusWanted: function (id) { dock.liveFocus(id) }
+        onOpenWanted: function (app) { dock.openApp(app) }
+        onIslandWanted: function (name, x) {
+            var app = dock.appNamed(name)
+            if (app) dock.islandWanted(app, liveIsland.x + x)
         }
     }
 }
