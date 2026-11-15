@@ -700,8 +700,11 @@ class Apps(QObject):
             QProcess.startDetached("python3", ["/usr/share/huginn-apps/huginn_app.py", "store", "--page", "installed"])
 
     def _recent_apps(self) -> list:
+        """The last six apps opened; on a new account, topped up with the dock's apps so nothing starts empty."""
         by_name = {a["name"]: a for a in self._apps}
-        return [by_name[n] for n in self._recent if n in by_name][:6]
+        names = [n for n in self._recent if n in by_name]
+        names += [n for n in self._pins() if n in by_name and n not in names]
+        return [by_name[n] for n in names][:6]
     recent = Property("QVariantList", _recent_apps, notify=changed)
 
 

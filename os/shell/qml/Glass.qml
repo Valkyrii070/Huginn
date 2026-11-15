@@ -11,7 +11,9 @@ Rectangle {
     property bool wallpaperOnly: false
     readonly property var host: Window.window
     readonly property Item behind: host && host.frostOn === true ? ((wallpaperOnly ? host.wallpaperLayer : host.backdrop) || null) : null
-    color: popup ? Theme.t.popup : Theme.t.glass
+    property bool dense: false              // menus and Search: nearly solid where nothing frosts behind them
+    readonly property color base: popup ? Theme.t.popup : Theme.t.glass
+    color: dense && !behind ? Qt.rgba(base.r, base.g, base.b, Math.max(base.a, 0.95)) : base
     radius: Theme.t.radiusTile + 2
     border.width: 1
     border.color: Theme.t.line

@@ -7,7 +7,7 @@ import QtQuick
 // Keys: Up/Down, Enter, Escape. It tints itself with the app's own colour.
 Glass {
     id: isle
-    popup: true; radius: 22; width: 300
+    popup: true; dense: true; radius: 22; width: 300
     height: col.height + 16
     signal done()
     property var app: null

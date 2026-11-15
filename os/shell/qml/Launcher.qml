@@ -143,7 +143,7 @@ Item {
     component Isle: Glass {
         id: isle
         property real s: 1
-        popup: true
+        popup: true; dense: true
         opacity: 0
         transform: Scale { origin.x: root.orb.x - isle.x; origin.y: root.orb.y - isle.y; xScale: isle.s; yScale: isle.s }
     }
@@ -258,16 +258,18 @@ Item {
             }
         }
 
-        Flow {   // the groups; the selected one sits on a pill that slides between them
+        Rectangle {   // the selected group's pill, sliding between them (beside the Flow, not in it)
+            id: pill
+            height: 32; radius: 16; color: Theme.t.accent; visible: !root.searching && width > 0
+            property real cx: 0; property real cy: 0
+            x: chips.x + cx; y: chips.y + cy
+            Behavior on cx { NumberAnimation { duration: root.still ? 0 : 240; easing.type: Easing.OutCubic } }
+            Behavior on cy { NumberAnimation { duration: root.still ? 0 : 240; easing.type: Easing.OutCubic } }
+            Behavior on width { NumberAnimation { duration: root.still ? 0 : 240; easing.type: Easing.OutCubic } }
+        }
+        Flow {   // the groups
             id: chips
             x: 18; y: 16; width: parent.width - 36; spacing: 6
-            Rectangle {
-                id: pill
-                height: 32; radius: 16; color: Theme.t.accent; visible: !root.searching && width > 0
-                Behavior on x { NumberAnimation { duration: root.still ? 0 : 240; easing.type: Easing.OutCubic } }
-                Behavior on y { NumberAnimation { duration: root.still ? 0 : 240; easing.type: Easing.OutCubic } }
-                Behavior on width { NumberAnimation { duration: root.still ? 0 : 240; easing.type: Easing.OutCubic } }
-            }
             Repeater {
                 model: root.present
                 Item {
@@ -275,7 +277,7 @@ Item {
                     required property var modelData
                     readonly property bool on: root.group === modelData.id && !root.searching
                     width: chipLabel.width + 26; height: 32
-                    function place() { if (on) { pill.x = x; pill.y = y; pill.width = width } }
+                    function place() { if (on) { pill.cx = x; pill.cy = y; pill.width = width } }
                     onOnChanged: place()
                     onXChanged: place()
                     Component.onCompleted: place()
@@ -394,7 +396,7 @@ Item {
         opacity: 0
         transform: Scale { origin.x: root.orb.x - foot.x; origin.y: root.orb.y - foot.y; xScale: foot.s; yScale: foot.s }
         Glass {
-            popup: true; height: 52; radius: 26; width: who.width + 30
+            popup: true; dense: true; height: 52; radius: 26; width: who.width + 30
             Row {
                 id: who
                 x: 10; anchors.verticalCenter: parent.verticalCenter; spacing: 10
@@ -408,7 +410,7 @@ Item {
         }
         Glass {
             id: powerPill
-            popup: true; height: 52; radius: 26
+            popup: true; dense: true; height: 52; radius: 26
             anchors.right: parent.right
             width: root.confirm ? askRow.width + 30 : buttons.width + 14
             Behavior on width { NumberAnimation { duration: root.still ? 0 : 200; easing.type: Easing.OutCubic } }

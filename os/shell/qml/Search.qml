@@ -136,7 +136,7 @@ Item {
     Glass {
         id: bar
         property real drop: 0
-        popup: true; radius: 24
+        popup: true; dense: true; radius: 24
         x: root.lx; y: Math.round(root.height * 0.1) + drop; width: root.w; height: 68
         opacity: 0
         MouseArea { anchors.fill: parent; onClicked: input.forceActiveFocus() }
@@ -184,7 +184,7 @@ Item {
         id: isl
         property string title: ""
         property int order: 0
-        popup: true; radius: 24
+        popup: true; dense: true; radius: 24
         opacity: Math.max(0, Math.min(1, root.rise * 1.6 - order * 0.12))
         transform: Translate { y: (1 - Math.min(1, root.rise * 1.3)) * (14 + isl.order * 4) }
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }     // (clicks on an island stay there)

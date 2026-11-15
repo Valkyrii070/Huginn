@@ -21,3 +21,8 @@ Meta=org.huginn.Shell,/org/huginn/Shell,org.huginn.Shell,ToggleLauncher
 # Every window gets the same rounded corners as Huginn's own (the window radius of tokens.json).
 Size=14
 InactiveCornerRadius=14
+# Square when they fill the screen (the bar turns solid then), and never on the desktop's own layers (the shell
+# runs as python3, and its wallpaper, bar and dock are rounded or flat already).
+DisableRoundMaximize=true
+DisableRoundTile=true
+Exclusions=python3
