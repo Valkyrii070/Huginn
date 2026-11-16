@@ -1166,8 +1166,9 @@ over when the side island would reach them (`GlassWindow.middleX`).
   half how much it covers, half how far it reaches, at most a quarter bigger or smaller, never past 164 of 256),
   so a list or a bolt no longer looks small beside a wallet or a controller. The pictures that were only lines
   are solid objects with white details now, like the rest: Activity Monitor's screen, the Passwords key, the
-  Screenshot frame, Podcasts and Backup as discs, Contacts as a card, Reminders' bullets. Writer's page is solid
-  (it was see-through, murky on the dark glass) and Terminal's window is in its colour (it was black on black).
+  Screenshot frame, Podcasts and Backup as discs, Contacts as a card. Writer's page is solid (it was see-through,
+  murky on the dark glass). Terminal and Reminders keep their own drawings (preferred as they were), only placed
+  like the rest.
   Calendar keeps its exact drawing: the dock writes the date at fixed places on it.
 - **Signing out** goes through the compositor (`org.huginn.Compositor.SignOut`): every window is asked to close, and
   once they've gone the compositor ends the session itself. Ending it through logind (as before) also ended SDDM's

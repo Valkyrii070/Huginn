@@ -72,10 +72,9 @@ PICS = {
     "disks": f'<circle {W} cx="128" cy="128" r="72"/><circle fill="{{c}}" opacity=".25" cx="128" cy="128" r="50"/><circle fill="{{c}}" cx="128" cy="128" r="22"/><circle {W} cx="128" cy="128" r="7"/>',
     "camera": f'<rect {W} x="98" y="66" width="60" height="30" rx="10"/><rect {W} x="48" y="84" width="160" height="110" rx="22"/><circle fill="{{c}}" cx="128" cy="140" r="34"/><circle {W} opacity=".45" cx="128" cy="140" r="16"/><circle fill="{{c}}" cx="184" cy="106" r="7"/>',
     "recorder": f'<rect {W} x="102" y="48" width="52" height="94" rx="26"/><path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" d="M80 124a48 48 0 0 0 96 0"/><rect {W} x="122" y="170" width="12" height="26"/><rect {W} x="98" y="192" width="60" height="13" rx="6.5"/>',
-    "reminders": "".join(f'<circle {W} cx="80" cy="{y}" r="18"/>' for y in (88, 128, 168))
-                 + f'<path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M72 88l6 7 11-13"/>'
-                 + "".join(f'<circle fill="{{c}}" opacity=".9" cx="80" cy="{y}" r="7"/>' for y in (128, 168))
-                 + "".join(f'<rect {W} x="110" y="{y}" width="{w}" height="16" rx="8"/>' for y, w in ((80, 88), (120, 88), (160, 60))),
+    "reminders": f'<circle {W} cx="84" cy="90" r="17"/><path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M76 90l6 7 11-13"/>'
+                 + "".join(f'<circle fill="none" stroke="#fff" stroke-width="9" cx="84" cy="{y}" r="13"/>' for y in (130, 170))
+                 + "".join(f'<rect {W} opacity="{o}" x="114" y="{y}" width="{w}" height="14" rx="7"/>' for y, w, o in ((83, 82, 0.6), (123, 82, 1), (163, 56, 1))),
     "phone": f'<rect {W} x="84" y="44" width="88" height="168" rx="22"/><rect fill="{{c}}" x="96" y="64" width="64" height="118" rx="10"/><rect {W} opacity=".5" x="112" y="76" width="32" height="8" rx="4"/><circle fill="{{c}}" cx="128" cy="196" r="7"/>',
     "print": f'<rect {W} opacity=".8" x="84" y="52" width="88" height="48" rx="8"/><rect {W} x="48" y="92" width="160" height="76" rx="18"/><circle fill="{{c}}" cx="182" cy="116" r="7"/>'
              f'<rect {W} stroke="{{c}}" stroke-width="5" x="80" y="140" width="96" height="64" rx="8"/><rect fill="{{c}}" opacity=".7" x="96" y="160" width="64" height="8" rx="4"/><rect fill="{{c}}" opacity=".7" x="96" y="178" width="40" height="8" rx="4"/>',
@@ -151,9 +150,9 @@ DETAIL = {
               + "".join(f'<rect fill="{{c}}" opacity=".8" x="70" y="{y}" width="{w}" height="9" rx="4.5"/>' for y, w in ((78, 64), (98, 76), (118, 52), (138, 64)))
               + f'<path fill="#16191E" opacity=".35" d="M178 72l32 32-82 82-46 10 10-46z"/>'
               f'<path fill="{{c}}" d="M174 66l32 32-82 82-42 8 8-42z"/><path {W} d="M162 78l32 32-9 9-32-32z"/><path {W} d="M86 188l5-28 23 23z"/>',
-    "terminal": f'<rect {W} x="42" y="62" width="172" height="132" rx="24"/><path fill="{{c}}" opacity=".16" d="M66 62h124a24 24 0 0 1 24 24v8H42v-8a24 24 0 0 1 24-24z"/>'
-                + "".join(f'<circle fill="{{c}}" opacity=".85" cx="{x}" cy="78" r="5"/>' for x in (62, 78, 94))
-                + f'<path fill="none" stroke="{{c}}" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" d="M72 116l26 22-26 22"/><rect fill="{{c}}" x="114" y="154" width="36" height="13" rx="6.5"/>',
+    "terminal": f'<rect fill="#0E1319" x="44" y="66" width="168" height="124" rx="20"/><path fill="#fff" opacity=".12" d="M64 66h128a20 20 0 0 1 20 20v8H44v-8a20 20 0 0 1 20-20z"/>'
+                + "".join(f'<circle fill="#fff" opacity=".7" cx="{x}" cy="80" r="4.5"/>' for x in (62, 76, 90))
+                + f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M72 112l26 22-26 22"/><rect {W} x="114" y="150" width="30" height="12" rx="6"/><rect {W} opacity=".7" x="152" y="142" width="14" height="22" rx="3"/>',
     "weather": f'<circle fill="#FFE08A" cx="100" cy="100" r="30"/>'
                + "".join(f'<rect fill="#FFE08A" x="96" y="50" width="8" height="16" rx="4" transform="rotate({a} 100 100)"/>' for a in range(0, 360, 45))
                + f'<circle {W} cx="108" cy="164" r="30"/><circle {W} cx="150" cy="148" r="40"/><circle {W} cx="186" cy="168" r="26"/><rect {W} x="108" y="166" width="78" height="28"/>',
