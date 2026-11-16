@@ -411,7 +411,8 @@ fn place_new_window(
     activate: bool,
 ) {
     // A first place on the screen the pointer is on; once the window has a size, place_window (huginn.rs) puts it
-    // in the middle.
+    // in the middle. It fades in (render.rs: Opened).
+    window.user_data().insert_if_missing(crate::render::Opened::default);
     window
         .0
         .user_data()

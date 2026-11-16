@@ -213,8 +213,14 @@ where
             continue;
         };
         let at = (loc - w.geometry().loc - geo.loc).to_physical_precise_round(scale);
+        // fading in from when it was first drawn (it has a size once it has drawn something)
+        let alpha = match w.user_data().get::<Opened>() {
+            Some(o) if !w.geometry().size.is_empty() => o.alpha(),
+            Some(_) => 0.0,
+            None => 1.0,
+        };
         out.extend(
-            AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(w, renderer, at, scale.into(), 1.0)
+            AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(w, renderer, at, scale.into(), alpha)
                 .into_iter()
                 .map(|e| OutputRenderElements::Window(Wrap::from(e))),
         );
@@ -225,6 +231,26 @@ where
     }
     layers(&mut out, renderer, &[WlrLayer::Bottom, WlrLayer::Background]);
     out
+}
+
+/// When a window was first drawn: it fades in over its first moments (not with Reduce Motion).
+#[derive(Default)]
+pub struct Opened(pub std::cell::Cell<Option<std::time::Instant>>);
+
+impl Opened {
+    const MS: f64 = 160.0;
+    pub fn alpha(&self) -> f32 {
+        if crate::access::still() {
+            return 1.0;
+        }
+        let start = self.0.get().unwrap_or_else(|| {
+            let now = std::time::Instant::now();
+            self.0.set(Some(now));
+            now
+        });
+        let t = (start.elapsed().as_secs_f64() * 1000.0 / Self::MS).min(1.0);
+        (1.0 - (1.0 - t).powi(3)) as f32
+    }
 }
 
 /// Locked (Huginn): what's drawn is the lock screen's surfaces on this output, on black. Nothing else.
