@@ -614,6 +614,25 @@ Four apps are being taken, round by round, to the level of the professional tool
     browser (search, kinds), adding Dragonfly Hall, the card and every control, a knob saved to the song, Calf
     Monosynth from the library with its knobs as Smart Controls and its 21 presets.
 
+- *Tempo and time-signature changes* (`TempoMap`, `MeterMap` in the engine). A change jumps to its tempo or glides
+  there evenly from the one before (a glide's time is a logarithm, so beats and seconds convert exactly both ways,
+  to 1e-14). Everything follows: where regions start and each time a loop comes round, the notes inside a region
+  over a glide, recordings (lengths, takes, comps, splits), automation, the clock and display (tempo and signature
+  where the playhead is; changing the tempo there changes the change that governs it), the click and the count-in
+  (each beat of the signature, quarters in 4/4, eighths in 6/8), and MIDI files in and out (a glide as steps an
+  eighth apart: MIDI has none). Bars are counted in quarter notes, so 6/8 is three beats a bar (it was six); the
+  ruler, the bar lines, sections, the drummer, loops and new regions go by the bars where they are.
+  - The Tempo lane (Tempo in the toolbar): the tempo as a line along the song; double-click it to add a change,
+    drag one along or up and down, pick one for its tempo, Glide or removing it. Signature changes show there as
+    chips (double-click one to remove it); clicking the display's signature changes it from the playhead's bar on.
+  - Fixed on the way: starting play inside a cycle went silent on every pass after the first until the playhead
+    passed where it started, and the count-in's last block was a whole block long, putting the song's clock out by
+    up to a block.
+  - Tested (15 checks): a jump and a glide timed against working by hand, beats to seconds and back, bar lines
+    across 4/4, 3/4 and 6/8, a note after a change and one inside a region over a glide starting where the map says,
+    and MIDI keeping a jump, a glide and a signature change. On screen: the lane, adding a change, dragging it to
+    117, Glide, a 3/4 bar from bar 6 with the ruler, the lane's chip and the display following.
+
 ## From power-on to the desktop
 
 Every screen between pressing the power button and the desktop is now Huginn's own, and they flow into each other.

@@ -105,36 +105,55 @@ class Player:
         self.written = 0
         self.running = True
         snap = json.loads(json.dumps(project))
-        tempo = float(snap.get("tempo", 120))
-        bpb = int((snap.get("sig") or [4, 4])[0])
-        beat = int(se.beats_to_s(1, tempo) * se.SR)
+        tm, mm = se.TempoMap(snap), se.MeterMap(snap)
         click_hi = (np.sin(2 * np.pi * 1760 * np.arange(1600) / se.SR) * np.exp(-np.arange(1600) / 300)).astype(np.float32) * 0.5
         click_lo = (np.sin(2 * np.pi * 1320 * np.arange(1600) / se.SR) * np.exp(-np.arange(1600) / 300)).astype(np.float32) * 0.35
-        lead = count_in * bpb * beat
+        # the click: each beat of the signature (quarters in 4/4, eighths in 6/8), higher on a bar's first, where the
+        # tempo map puts it; the count-in in the signature and tempo where playing starts
+        start_beat = tm.beat(at_frame / se.SR)
+        sig0 = mm.sig_at(start_beat)
+        unit = int(se.beats_to_s(4.0 / int(sig0[1]), tm.tempo_at(start_beat)) * se.SR)
+        lead = count_in * int(sig0[0]) * unit
+        counting = [(at_frame - lead + i * unit, i % int(sig0[0]) == 0) for i in range(count_in * int(sig0[0]))]
+        clicks = []                                    # the song's own, from the start (a cycle comes round again)
+        for b, _n, sig in mm.bars(se.song_length(snap) + 64):
+            for j in range(int(sig[0])):
+                clicks.append((int(tm.seconds(b + j * 4.0 / int(sig[1])) * se.SR), j == 0))
+        clicks.sort()
+        count_at, click_at = [c[0] for c in counting], [c[0] for c in clicks]
 
         def work():
             m = se.Mixer(snap, audio_dir)
             m.seek(at_frame)
             song = at_frame - lead                             # the count-in plays before the song starts
+            counting_in = lead > 0
+            import bisect
+
+            def click(block, marks, at, s0, s1):
+                for i in range(bisect.bisect_left(at, s0), bisect.bisect_left(at, s1)):
+                    f, first = marks[i]
+                    c = click_hi if first else click_lo
+                    k = f - song
+                    e = min(len(block), k + len(c))
+                    block[k:e] += c[:e - k, None]
             while self.running:
                 if len(self.queue) > 10:
                     time.sleep(0.004)
                     continue
-                n = se.BLOCK
-                if song < at_frame:
+                if counting_in:                                # silence and the count-in's clicks, ending right where the song starts
+                    n = min(se.BLOCK, at_frame - song)
                     block = np.zeros((n, 2), np.float32)
+                    click(block, counting, count_at, song, song + n)
                 else:
+                    n = se.BLOCK
                     block = m.render(n)
-                if metronome or song < at_frame:              # the click: higher on the bar's first beat
-                    for k in range(n):
-                        f = song + k
-                        if f % beat == 0 and f >= -lead:
-                            c = click_hi if (f // beat) % bpb == 0 else click_lo
-                            e = min(n, k + len(c))
-                            block[k:e] += c[:e - k, None]
+                    if metronome:                              # higher on the bar's first beat
+                        click(block, clicks, click_at, song, song + n)
                 levels = dict(m.levels)
                 start = song
                 song += n
+                if counting_in and song >= at_frame:
+                    counting_in = False
                 if cycle and song >= cycle[1] > cycle[0] and start < cycle[1]:   # round again
                     m.seek(cycle[0])
                     song = cycle[0]
@@ -322,6 +341,7 @@ class Tempo(QObject):
         if self._playing:                                    # the song being played follows edits
             self._restart_player()
         self.changed.emit()
+        self.clockChanged.emit()                             # the display too (bar.beat, tempo and signature here)
 
     def _before(self, coalesce=None) -> None:
         if coalesce is not None and coalesce == self._coalesce and self._undo:
@@ -494,15 +514,14 @@ class Tempo(QObject):
         """Bar.beat as the display shows it, and the time."""
         if self._p is None:
             return "1.1"
-        bpb = int(self._p["sig"][0])
-        bar, beat = int(self._pos // bpb) + 1, int(self._pos % bpb) + 1
+        bar, beat = self._mm().where(self._pos)
         return f"{bar}.{beat}"
 
     @Property(str, notify=clockChanged)
     def time(self):
         if self._p is None:
             return "0:00.0"
-        s = se.beats_to_s(self._pos, float(self._p["tempo"]))
+        s = self._tm().seconds(self._pos)
         return f"{int(s // 60)}:{s % 60:04.1f}"
 
     @Property(float, notify=changed)
@@ -533,7 +552,7 @@ class Tempo(QObject):
                 views.append({"name": tk.get("name", f"Take {k + 1}"), "notes": [[n["t"], n["d"], n["p"]] for n in ns], "low": min(ps), "high": max(ps)})
         return {**r, "notes": [dict(n, i=i) for i, n in enumerate(r.get("notes") or [])], "kit": kit, "trackKind": t.get("kind", ""),
                 "colour": self._track_view(t)["colour"] if t else "", "takeViews": views, "comp": r.get("comp") or [], "take": int(r.get("take", 0)),
-                "span": se.beats_to_s(float(r["length"]), float(self._p["tempo"]))}
+                "span": self._tm().clock(float(r["start"]))(float(r["length"]))}
 
     @Slot(str, result="QVariantList")
     def smartControls(self, tid: str) -> list:
@@ -586,6 +605,115 @@ class Tempo(QObject):
         self._before(("master", key))
         self._p.setdefault("master", {})[key] = float(value) if not isinstance(value, (list, dict)) else value
         self._keep()
+
+    # ---------------------------------------------------------------- tempo and time-signature changes
+    @Property(float, notify=clockChanged)
+    def tempoNow(self):
+        """The tempo where the playhead is (the song's own tempo when it never changes)."""
+        return round(self._tm().tempo_at(self._pos), 1) if self._p else 120.0
+
+    @Property("QVariantList", notify=clockChanged)
+    def sigNow(self):
+        return list(self._mm().sig_at(self._pos)) if self._p else [4, 4]
+
+    @Slot(float, float, result="QVariantList")
+    def bars(self, b0: float, b1: float) -> list:
+        """The bar lines between two beats: [beat, its number, its signature where it changes (else "")]."""
+        if self._p is None:
+            return []
+        out, last = [], None
+        for b, n, sig in self._mm().bars(max(0.0, b1)):
+            mark = f"{sig[0]}/{sig[1]}" if (last is not None and list(sig) != last) else ""
+            last = list(sig)
+            if b >= b0 - 1e-6:
+                out.append([b, n, mark])
+        return out
+
+    @Slot(float, float, int, result="QVariantList")
+    def tempoCurve(self, b0: float, b1: float, steps: int) -> list:
+        """[beat, bpm] along the song, for drawing the tempo line."""
+        if self._p is None or steps < 2:
+            return []
+        tm = self._tm()
+        pts = sorted({max(0.0, b0 + (b1 - b0) * k / (steps - 1)) for k in range(steps)} | {p[0] for p in tm.pts if b0 <= p[0] <= b1}
+                     | {p[0] - 1e-4 for p in tm.pts if b0 <= p[0] - 1e-4 <= b1})
+        return [[b, round(tm.tempo_at(b), 2)] for b in pts]
+
+    @Slot(float)
+    def setTempoHere(self, bpm: float) -> None:
+        """The tempo display: changes the tempo playing where the playhead is (a change's, or the song's own)."""
+        changes = (self._p or {}).get("tempoChanges") or []
+        here = [i for i, c in enumerate(changes) if float(c["beat"]) <= self._pos + 1e-6]
+        if here:
+            self.setTempoChange(here[-1], "bpm", bpm)
+        else:
+            self.setSong("tempo", bpm)
+
+    @Slot(float, result=int)
+    def addTempoChange(self, beat: float) -> int:
+        """A tempo change at a beat (the nearest), at the tempo already there; its place in the list."""
+        if self._p is None:
+            return -1
+        beat = round(max(1.0, float(beat)))
+        changes = self._p.setdefault("tempoChanges", [])
+        if any(abs(float(c["beat"]) - beat) < 1e-6 for c in changes):
+            return next(i for i, c in enumerate(changes) if abs(float(c["beat"]) - beat) < 1e-6)
+        self._before()
+        changes.append({"beat": beat, "bpm": round(self._tm().tempo_at(beat), 1), "glide": False})
+        changes.sort(key=lambda c: float(c["beat"]))
+        self._keep()
+        return next(i for i, c in enumerate(changes) if abs(float(c["beat"]) - beat) < 1e-6)
+
+    @Slot(int, str, "QVariant")
+    def setTempoChange(self, index: int, key: str, value) -> None:
+        changes = (self._p or {}).get("tempoChanges") or []
+        if not 0 <= index < len(changes) or key not in ("bpm", "beat", "glide"):
+            return
+        value = value.toVariant() if hasattr(value, "toVariant") else value
+        self._before(("tempoChange", index, key))
+        c = changes[index]
+        if key == "bpm":
+            c["bpm"] = round(max(20.0, min(400.0, float(value))), 1)
+        elif key == "glide":
+            c["glide"] = bool(value)
+        else:
+            beat = round(max(1.0, float(value)) * 4) / 4      # moved along: on a sixteenth, never onto another change
+            if not any(abs(float(o["beat"]) - beat) < 1e-6 for o in changes if o is not c):
+                c["beat"] = beat
+                changes.sort(key=lambda x: float(x["beat"]))
+        self._keep()
+
+    @Slot(int)
+    def removeTempoChange(self, index: int) -> None:
+        changes = (self._p or {}).get("tempoChanges") or []
+        if 0 <= index < len(changes):
+            self._before()
+            changes.pop(index)
+            self._keep()
+
+    @Slot(float, int, int)
+    def setSignatureAt(self, beat: float, num: int, den: int) -> None:
+        """The time signature from the bar a beat is in onwards (the song's own from the first bar)."""
+        if self._p is None or not (1 <= int(num) <= 32 and int(den) in (1, 2, 4, 8, 16, 32)):
+            return
+        at = self._bar_at(max(0.0, float(beat)))
+        self._before()
+        if at < 1e-6:
+            self._p["sig"] = [int(num), int(den)]
+        else:
+            changes = [c for c in self._p.get("sigChanges") or [] if abs(float(c["beat"]) - at) > 1e-6]
+            changes.append({"beat": at, "sig": [int(num), int(den)]})
+            self._p["sigChanges"] = sorted(changes, key=lambda c: float(c["beat"]))
+        self._keep()
+
+    @Slot(float)
+    def removeSignatureAt(self, beat: float) -> None:
+        changes = (self._p or {}).get("sigChanges") or []
+        keep = [c for c in changes if abs(float(c["beat"]) - float(beat)) > 1e-6]
+        if len(keep) != len(changes):
+            self._before()
+            self._p["sigChanges"] = keep
+            self._keep()
 
     # ---------------------------------------------------------------- tracks
     def _add_track(self, kind: str, inst: str, name: str = "") -> dict:
@@ -960,8 +1088,8 @@ class Tempo(QObject):
         audio_keys = ("gain", "fadeIn", "fadeOut", "reverse", "transpose", "follow")
         if key not in ("name", "muted") + audio_keys or (key in audio_keys and r.get("kind") != "audio"):
             return
-        tempo = float(self._p["tempo"])
-        span = se.beats_to_s(float(r["length"]), tempo)
+        tempo = self._tm().tempo_at(float(r["start"]))
+        span = self._tm().clock(float(r["start"]))(float(r["length"]))
         self._before(("region", rid, key))
         if key == "gain":
             value = round(max(-30.0, min(12.0, float(value))), 1)
@@ -1015,13 +1143,13 @@ class Tempo(QObject):
         data = rec.get("audio")
         if data is None:
             return False
-        tempo = float(self._p["tempo"])
-        first = int(se.beats_to_s(c1 - float(rec["start"]), tempo) * se.SR)   # the first pass may start partway round
-        span = int(se.beats_to_s(length, tempo) * se.SR)
+        tm = self._tm()
+        first = int((tm.seconds(c1) - tm.seconds(float(rec["start"]))) * se.SR)   # the first pass may start partway round
+        span = int((tm.seconds(c0 + length) - tm.seconds(c0)) * se.SR)
         if len(data) < first + span // 2:
             return False
         pieces = []
-        lead = int(se.beats_to_s(float(rec["start"]) - c0, tempo) * se.SR)
+        lead = int((tm.seconds(float(rec["start"])) - tm.seconds(c0)) * se.SR)
         pieces.append(np.concatenate([np.zeros((max(0, lead), 2), np.float32), data[:first]]))
         k = first
         while k + se.SR // 10 < len(data):
@@ -1104,8 +1232,7 @@ class Tempo(QObject):
             return
         self._before()
         if r.get("kind") == "audio" and r.get("comp"):
-            tempo = float(self._p["tempo"])
-            m = se.Mixer({"tempo": tempo, "tracks": [], "regions": []}, self._folder)
+            m = se.Mixer({"tempo": self._p["tempo"], "tempoChanges": self._p.get("tempoChanges") or [], "tracks": [], "regions": []}, self._folder)
             audio = m._region_audio({}, dict(r, follow=False, reverse=False, transpose=0, gain=0, fadeIn=0, fadeOut=0))
             folder = (self._folder / "audio") if self._folder else Path("/tmp")
             fname = f"comp-{uuid.uuid4().hex[:6]}.wav"
@@ -1285,9 +1412,8 @@ class Tempo(QObject):
     def addSection(self, name: str, start: float, length: float) -> str:
         if self._p is None:
             return ""
-        bpb = int(self._p["sig"][0])
-        start = max(0.0, round(float(start) / bpb) * bpb)
-        length = max(float(bpb), round(float(length) / bpb) * bpb)
+        start = self._bar_round(max(0.0, float(start)))
+        length = max(self._bar_len(start), self._bar_round(start + float(length)) - start)
         taken = sorted(self._p.get("sections", []), key=lambda x: x["start"])
         for sec in taken:                                     # sections don't overlap: start after one this falls in
             if sec["start"] <= start < sec["start"] + sec["length"]:
@@ -1315,8 +1441,7 @@ class Tempo(QObject):
         value = value.toVariant() if hasattr(value, "toVariant") else value
         self._before(("section", sid, key))
         if key == "length":
-            bpb = int(self._p["sig"][0])
-            value = max(float(bpb), round(float(value) / bpb) * bpb)
+            value = max(self._bar_len(sec["start"]), self._bar_round(sec["start"] + float(value)) - sec["start"])
             nxt = min([x["start"] for x in self._p["sections"] if x["start"] > sec["start"]] or [1e9])
             value = min(value, nxt - sec["start"])
         else:
@@ -1418,7 +1543,7 @@ class Tempo(QObject):
     # ---------------------------------------------------------------- regions
     def _drummer_region(self, t: dict, start: float, bars: int) -> dict:
         d = t.get("drummer") or {}
-        bpb = int(self._p["sig"][0])
+        bpb = max(1, int(round(self._bar_len(start))))        # the drummer plays the bars where it is
         notes = se.drummer(d.get("style", "pop"), float(d.get("complexity", 0.5)), float(d.get("loudness", 0.5)), bars, bpb,
                            float(d.get("fills", 0.4)), seed=int(start) + 11)
         return {"id": self._id("r"), "track": t["id"], "start": float(start), "length": float(bars * bpb), "kind": "drummer", "notes": notes,
@@ -1428,10 +1553,10 @@ class Tempo(QObject):
         for r in self._p["regions"]:
             t = self._t(r["track"])
             if r.get("kind") == "drummer" and t:
-                fresh = self._drummer_region(t, r["start"], int(r["length"] // int(self._p["sig"][0])) or 1)
+                fresh = self._drummer_region(t, r["start"], max(1, int(round(r["length"] / self._bar_len(r["start"])))))
                 r["notes"] = fresh["notes"]
             elif r.get("loop"):
-                bpb = int(self._p["sig"][0])
+                bpb = max(1, int(round(self._bar_len(r["start"]))))
                 r["notes"] = se.loop_notes(r["loop"], int(self._p.get("key", 0)), self._p.get("mode", "major"), bpb)
 
     @Slot(str, str, "QVariant")
@@ -1451,8 +1576,8 @@ class Tempo(QObject):
         if not t or t["kind"] == "audio":
             return ""
         self._before()
-        bpb = int(self._p["sig"][0])
-        start = float(int(max(0, start) // bpb * bpb))
+        start = self._bar_at(max(0.0, float(start)))
+        bpb = self._bar_len(start)
         r = self._drummer_region(t, start, max(1, int(round(length / bpb)))) if t["kind"] == "drummer" else \
             {"id": self._id("r"), "track": tid, "start": start, "length": float(max(bpb, length)), "kind": "midi", "notes": []}
         self._p["regions"].append(r)
@@ -1472,9 +1597,10 @@ class Tempo(QObject):
         kit = se.INSTRUMENTS[inst].get("engine") == "kit"
         if t is None or t["kind"] == "audio" or (se.settings(t.get("instrument") or {}).get("engine") == "kit") != kit:
             t = self._add_track("instrument", inst, name)
-        bpb = int(self._p["sig"][0])
+        at = self._bar_at(max(0.0, float(start)))
+        bpb = max(1, int(round(self._bar_len(at))))
         notes = se.loop_notes(loop_id, int(self._p.get("key", 0)), self._p.get("mode", "major"), bpb)
-        r = {"id": self._id("r"), "track": t["id"], "start": float(int(max(0, start) // bpb * bpb)), "length": float(bars * bpb), "kind": "midi",
+        r = {"id": self._id("r"), "track": t["id"], "start": at, "length": float(bars * bpb), "kind": "midi",
              "notes": notes, "loop": loop_id, "name": name}
         self._p["regions"].append(r)
         self._sel_track, self._sel_region = t["id"], r["id"]
@@ -1520,7 +1646,7 @@ class Tempo(QObject):
             r["length"] = max(0.25, round(float(length) * 4) / 4)
             if r.get("kind") == "drummer":
                 t = self._t(r["track"])
-                r["notes"] = self._drummer_region(t, r["start"], max(1, int(round(r["length"] / int(self._p["sig"][0])))))["notes"]
+                r["notes"] = self._drummer_region(t, r["start"], max(1, int(round(r["length"] / self._bar_len(r["start"])))))["notes"]
             self._keep()
 
     @Slot(str, int)
@@ -1544,7 +1670,7 @@ class Tempo(QObject):
         b["start"], b["length"] = at, r["length"] - cut
         r["length"] = cut
         if r.get("kind") == "audio":
-            b["offset"] = float(r.get("offset", 0)) + se.beats_to_s(cut, float(self._p["tempo"]))
+            b["offset"] = float(r.get("offset", 0)) + self._tm().clock(float(r["start"]))(cut)
         else:
             notes = r.get("notes") or []
             r["notes"] = [n for n in notes if n["t"] < cut]
@@ -1682,7 +1808,38 @@ class Tempo(QObject):
 
     # ---------------------------------------------------------------- the transport
     def _frame(self, beats: float) -> int:
-        return int(se.beats_to_s(beats, float(self._p["tempo"])) * se.SR)
+        return int(self._tm().seconds(beats) * se.SR)
+
+    def _tm(self) -> "se.TempoMap":
+        return se.TempoMap(self._p or {})
+
+    def _mm(self) -> "se.MeterMap":
+        return se.MeterMap(self._p or {})
+
+    def _bar_len(self, at: float = 0.0) -> float:
+        """A bar's length in beats (quarter notes) where `at` is."""
+        mm = self._mm()
+        return mm.bar_len(mm.sig_at(at))
+
+    def _bar_starts(self, upto: float) -> list:
+        return [b for b, _n, _s in self._mm().bars(max(0.0, upto) + 64)]
+
+    def _bar_at(self, beat: float) -> float:
+        """The start of the bar a beat is in."""
+        return max([b for b in self._bar_starts(beat) if b <= beat + 1e-6] or [0.0])
+
+    def _bar_round(self, beat: float) -> float:
+        """The bar line nearest a beat."""
+        return min(self._bar_starts(beat + 32), key=lambda b: abs(b - beat))
+
+    def _bar_after(self, beat: float) -> float:
+        """The first bar line after a beat."""
+        return next((b for b in self._bar_starts(beat + 32) if b > beat + 1e-6), beat + self._bar_len(beat))
+
+    def _bars_span(self, start: float, bars: int) -> float:
+        """How many beats `bars` bars take from a bar line."""
+        starts = [b for b in self._bar_starts(start + bars * 8 + 32) if b >= start - 1e-6]
+        return (starts[bars] if len(starts) > bars else start + bars * self._bar_len(start)) - start
 
     def _restart_player(self) -> None:
         cyc = self._p.get("cycle") or {}
@@ -1704,7 +1861,7 @@ class Tempo(QObject):
         if self._recording:
             self._finish_recording()
         if self._playing:
-            self._pos = se.s_to_beats(self._player.song_frame() / se.SR, float(self._p["tempo"]))
+            self._pos = self._tm().beat(self._player.song_frame() / se.SR)
             self._player.stop()
             self._playing = False
         self._levels = {}
@@ -1735,7 +1892,7 @@ class Tempo(QObject):
             f = self._player.song_frame()
             if f >= 0:
                 was = self._pos
-                self._pos = se.s_to_beats(f / se.SR, float(self._p["tempo"]))
+                self._pos = self._tm().beat(f / se.SR)
                 if self._recording and self._pos < was - 0.5 and (self._p.get("cycle") or {}).get("on"):
                     self._take_wrap()                          # round the cycle: the next take
             if not self._recording and not (self._p.get("cycle") or {}).get("on") and self._pos > se.song_length(self._p) + 4 and not self._held:
@@ -1807,7 +1964,7 @@ class Tempo(QObject):
             return
         self._recording = True
         self._rec = {"track": t["id"], "start": self._pos, "kind": "sound" if t["kind"] == "audio" else "notes", "notes": [], "bytes": bytearray(),
-                     "countIn": 0 if self._playing else int(self._p.get("countIn", 1)) * int(self._p["sig"][0])}
+                     "countIn": 0 if self._playing else int(self._p.get("countIn", 1)) * self._bar_len(self._pos)}
         if self._rec["kind"] == "sound":
             self._start_mic()
         if not self._playing:
@@ -1850,14 +2007,13 @@ class Tempo(QObject):
             rec["notes"].append({"t": start, "d": max(1 / 32, self._pos - start), "p": p, "v": vel})
         if rec["kind"] == "sound":                            # the count-in was recorded too: skip it
             data = np.frombuffer(bytes(rec["bytes"])[:len(rec["bytes"]) // 4 * 4], np.float32)
-            lead = int(rec.get("countIn", 0) * se.beats_to_s(1, float(self._p["tempo"])) * se.SR)
+            lead = int(rec.get("countIn", 0) * se.beats_to_s(1, self._tm().tempo_at(float(rec.get("start", 0)))) * se.SR)
             rec["audio"] = np.repeat(data[lead:, None], 2, axis=1)
         if self._finish_takes(rec):
             return
-        bpb = int(self._p["sig"][0])
-        start = max(0.0, float(int(rec["start"] // bpb * bpb)))
+        start = self._bar_at(max(0.0, float(rec["start"])))
         end = max(self._pos, rec["start"] + 0.25)
-        length = max(float(bpb), float(int((end - start + bpb - 0.001) // bpb + 1) * bpb) if end > start else bpb)
+        length = max(self._bar_len(start), self._bar_after(end) - start)
         if rec["kind"] == "notes":
             if not rec["notes"]:
                 return
@@ -1877,9 +2033,11 @@ class Tempo(QObject):
         folder.mkdir(parents=True, exist_ok=True)
         fname = f"{re.sub(r'[^A-Za-z0-9]+', '-', name).strip('-') or 'sound'}-{uuid.uuid4().hex[:6]}.wav"
         se.write_wav(str(folder / fname), audio, 24)
-        tempo = float(self._p["tempo"])
+        tm = self._tm()
+        tempo = tm.tempo_at(float(start))
         self._before()
-        r = {"id": self._id("r"), "track": tid, "start": round(float(start), 4), "length": round(se.s_to_beats(len(audio) / se.SR, tempo), 4), "kind": "audio",
+        r = {"id": self._id("r"), "track": tid, "start": round(float(start), 4),
+             "length": round(tm.beat(tm.seconds(float(start)) + len(audio) / se.SR) - float(start), 4), "kind": "audio",
              "file": f"audio/{fname}" if self._folder else str(folder / fname), "offset": 0.0, "gain": 0.0, "name": name, "srcTempo": tempo}
         self._p["regions"].append(r)
         self._keep()
@@ -1958,6 +2116,10 @@ class Tempo(QObject):
             self.newProject("empty", Path(path).stem)
             self._p["tracks"] = []
             self._p["tempo"] = round(song["tempo"], 1)
+            # a new song from the file: its tempo and time-signature changes too
+            self._p["sig"] = [int(song["sig"][0]), int(song["sig"][1])]
+            self._p["tempoChanges"] = song.get("tempoChanges") or []
+            self._p["sigChanges"] = song.get("sigChanges") or []
         self._before()
         gm = {0: "grand", 1: "bright", 4: "epiano", 16: "organ", 25: "guitar", 33: "fingered", 38: "bass", 48: "strings", 61: "brass", 81: "lead", 89: "pad"}
         for tr in song["tracks"]:
@@ -1966,8 +2128,8 @@ class Tempo(QObject):
             inst = "drums" if drums else gm.get(tr["program"], nearest)
             t = self._add_track("instrument", inst, tr["name"] or se.INSTRUMENTS[inst]["name"])
             end = max(a + d for a, d, _p, _v in tr["notes"])
-            bpb = int(self._p["sig"][0])
-            length = float(int(end // bpb + 1) * bpb)
+            bars = [b for b, _n, _s in self._mm().bars(end + 64)]
+            length = next((b for b in bars if b > end), end)
             self._p["regions"].append({"id": self._id("r"), "track": t["id"], "start": 0.0, "length": length, "kind": "midi", "name": tr["name"] or "MIDI",
                                        "notes": [{"t": round(a, 4), "d": round(d, 4), "p": p, "v": v} for a, d, p, v in tr["notes"]]})
         self._keep()
@@ -2006,7 +2168,7 @@ class Tempo(QObject):
                     tracks.append({"channel": 9 if kit else min(15, len(tracks) + (1 if len(tracks) >= 9 else 0)), "program": se.INSTRUMENTS.get((t.get("instrument") or {}).get("id"), {}).get("program", 0), "notes": notes})
                     names.append(t["name"])
             target = self._free(folder, name, ".mid")
-            target.write_bytes(se.write_midi(tracks, float(self._p["tempo"]), tuple(self._p["sig"]), names=names))
+            target.write_bytes(se.write_midi(tracks, float(self._p["tempo"]), tuple(self._p["sig"]), names=names, project=self._p))
             self.said.emit(f"Saved {target.name} in Music/Tempo Exports", False)
             return str(target)
         self.said.emit("Exporting…", False)

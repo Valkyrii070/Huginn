@@ -72,6 +72,131 @@ def db(x: float) -> float:
     return 10 ** (x / 20)
 
 
+class TempoMap:
+    """Where each beat falls in time, with the song's tempo changes ("tempoChanges": [{beat, bpm, glide}]): at each
+    change the tempo jumps, or (glide) slides there evenly from the change before. Beats are quarter notes, as
+    everywhere in Tempo. Exact both ways, glides included (a glide's time is a logarithm, its inverse an exponential)."""
+
+    def __init__(self, project: dict):
+        self.base = float(project.get("tempo", 120))
+        pts = [(0.0, self.base, False)]
+        for c in sorted(project.get("tempoChanges") or [], key=lambda c: float(c.get("beat", 0))):
+            b = float(c.get("beat", 0))
+            if b > pts[-1][0] + 1e-9:
+                pts.append((b, max(20.0, min(400.0, float(c.get("bpm", self.base)))), bool(c.get("glide"))))
+        self.pts = pts
+        self.secs = [0.0]                             # the time at each change
+        for i in range(1, len(pts)):
+            self.secs.append(self.secs[-1] + self._span(i - 1, pts[i][0] - pts[i - 1][0]))
+
+    @property
+    def steady(self) -> bool:
+        return len(self.pts) == 1
+
+    def _seg(self, i: int):
+        """Segment i (from change i to change i+1): its start beat, start tempo, and how fast the tempo moves (bpm a
+        beat; 0 when steady until the next change)."""
+        b0, t0, _ = self.pts[i]
+        if i + 1 < len(self.pts) and self.pts[i + 1][2]:
+            b1, t1, _ = self.pts[i + 1]
+            return b0, t0, (t1 - t0) / (b1 - b0)
+        return b0, t0, 0.0
+
+    def _span(self, i: int, beats: float) -> float:
+        _b0, t0, k = self._seg(i)
+        if abs(k) < 1e-9:
+            return beats * 60.0 / t0
+        return 60.0 / k * math.log((t0 + k * beats) / t0)
+
+    def _index(self, beat: float) -> int:
+        i = 0
+        while i + 1 < len(self.pts) and self.pts[i + 1][0] <= beat:
+            i += 1
+        return i
+
+    def seconds(self, beat: float) -> float:
+        if self.steady:
+            return beat * 60.0 / self.base
+        if beat <= 0:
+            return beat * 60.0 / self.base
+        i = self._index(beat)
+        return self.secs[i] + self._span(i, beat - self.pts[i][0])
+
+    def beat(self, seconds: float) -> float:
+        if self.steady or seconds <= 0:
+            return seconds * self.base / 60.0
+        i = 0
+        while i + 1 < len(self.secs) and self.secs[i + 1] <= seconds:
+            i += 1
+        b0, t0, k = self._seg(i)
+        dt = seconds - self.secs[i]
+        if abs(k) < 1e-9:
+            return b0 + dt * t0 / 60.0
+        return b0 + (t0 * math.exp(k * dt / 60.0) - t0) / k
+
+    def tempo_at(self, beat: float) -> float:
+        i = self._index(max(0.0, beat))
+        b0, t0, k = self._seg(i)
+        return t0 + k * (beat - b0)
+
+    def span_key(self, b0: float, b1: float):
+        """What decides the timing between two beats (for keeping drawn regions): the changes that touch it."""
+        if self.steady:
+            return self.base
+        i0, i1 = self._index(b0), self._index(b1)
+        return [b0 % 1e9, [list(p) for p in self.pts[max(0, i0):i1 + 2]]]
+
+    def clock(self, start: float):
+        """Seconds from `start` to `start + beats`: a region's own clock."""
+        s0 = self.seconds(start)
+        return lambda beats: self.seconds(start + beats) - s0
+
+
+class MeterMap:
+    """The song's bars, with its time-signature changes ("sigChanges": [{beat, sig}], each at the start of a bar).
+    A bar is num × 4/den quarter-note beats: 6/8 is three."""
+
+    def __init__(self, project: dict):
+        first = list(project.get("sig") or [4, 4])
+        self.pts = [(0.0, first)]
+        for c in sorted(project.get("sigChanges") or [], key=lambda c: float(c.get("beat", 0))):
+            b = float(c.get("beat", 0))
+            if b > self.pts[-1][0] + 1e-9 and c.get("sig"):
+                self.pts.append((b, [int(c["sig"][0]), int(c["sig"][1])]))
+
+    @staticmethod
+    def bar_len(sig) -> float:
+        return int(sig[0]) * 4.0 / int(sig[1])
+
+    def sig_at(self, beat: float) -> list:
+        sig = self.pts[0][1]
+        for b, sg in self.pts:
+            if b <= beat + 1e-9:
+                sig = sg
+        return sig
+
+    def bars(self, upto: float) -> list:
+        """Each bar's start up to a beat: [(beat, bar number from 1, its signature)]."""
+        out, n = [], 1
+        for i, (b0, sig) in enumerate(self.pts):
+            end = self.pts[i + 1][0] if i + 1 < len(self.pts) else upto + 1.0
+            step = self.bar_len(sig)
+            b = b0
+            while b < end - 1e-9 and b <= upto + 1e-9:
+                out.append((b, n, sig))
+                n += 1
+                b += step
+        return out
+
+    def where(self, beat: float):
+        """(bar, beat in the bar, both from 1) of a beat."""
+        bar, start, sig = 1, 0.0, self.pts[0][1]
+        for b, n, sg in self.bars(beat):
+            bar, start, sig = n, b, sg
+        unit = 4.0 / int(sig[1])                      # a beat of this signature, in quarter notes
+        return bar, int((beat - start) / unit + 1e-6) + 1
+
+
 # ------------------------------------------------------------------------------------------------ envelopes and waves
 def adsr(n: int, sr: int, a: float, d: float, s: float, r: float, held: int) -> np.ndarray:
     """An envelope n samples long: attack, decay to sustain while held, then release from wherever it got to."""
@@ -635,16 +760,21 @@ def region_key(region: dict, inst: dict, tempo: float, extra=None) -> str:
     return hashlib.sha1(json.dumps([region.get("notes"), region.get("length"), inst, tempo, region.get("kind"), extra], sort_keys=True).encode()).hexdigest()
 
 
-def render_midi_region(region: dict, inst: dict, tempo: float, base: Path = None, mfx: dict = None, key: int = 0, mode: str = "major") -> np.ndarray:
+def render_midi_region(region: dict, inst: dict, tempo, base: Path = None, mfx: dict = None, key: int = 0, mode: str = "major",
+                       clock=None) -> np.ndarray:
     """A MIDI region as mono audio, from its start to its last note's tail (stereo from a plugin instrument). Cached
-    until anything in it changes."""
+    until anything in it changes. `clock`: seconds into the region for beats into it, where the tempo changes under
+    it (TempoMap.clock); `tempo` then says what it depends on, for keeping it."""
+    if clock is None:
+        bpm = float(tempo)
+        clock = lambda b: beats_to_s(b, bpm)          # noqa: E731
     if inst.get("id") == "plugin":
-        return _plugin_region(region, inst, tempo, mfx, key, mode)
+        return _plugin_region(region, inst, tempo, mfx, key, mode, clock)
     use_fx = bool(mfx) and region.get("kind") != "drummer" and settings(inst).get("engine") != "kit"
     cache = region_key(region, inst, tempo, [mfx, key, mode, str(base)] if use_fx or settings(inst).get("engine") in ("sampler", "kit") else None)
     if cache in _REGIONS:
         return _REGIONS[cache]
-    length_s = beats_to_s(float(region.get("length", 4)), tempo)
+    length_s = clock(float(region.get("length", 4)))
     pieces = []
     end = int(length_s * SR)
     notes = region.get("notes") or []
@@ -655,8 +785,8 @@ def render_midi_region(region: dict, inst: dict, tempo: float, base: Path = None
         if t >= float(region.get("length", 4)) or t < 0:
             continue
         d = min(float(nt["d"]), float(region.get("length", 4)) - t)
-        sound = instrument_note(inst, int(nt["p"]), int(nt.get("v", 100)), beats_to_s(max(0.01, d), tempo), base)
-        at = int(beats_to_s(t, tempo) * SR)
+        sound = instrument_note(inst, int(nt["p"]), int(nt.get("v", 100)), clock(t + max(0.01, d)) - clock(t), base)
+        at = int(clock(t) * SR)
         pieces.append((at, sound))
         end = max(end, at + len(sound))
     out = np.zeros(end, np.float32)
@@ -668,7 +798,7 @@ def render_midi_region(region: dict, inst: dict, tempo: float, base: Path = None
     return out
 
 
-def _plugin_region(region: dict, inst: dict, tempo: float, mfx: dict, key: int, mode: str) -> np.ndarray:
+def _plugin_region(region: dict, inst: dict, tempo, mfx: dict, key: int, mode: str, clock) -> np.ndarray:
     """A region through a plugin instrument: every note in one pass as MIDI (so it plays its own voices, glides and
     tails), stereo."""
     cache = region_key(region, inst, tempo, [mfx, key, mode, "plugin"])
@@ -683,8 +813,8 @@ def _plugin_region(region: dict, inst: dict, tempo: float, mfx: dict, key: int, 
         t = float(nt["t"])
         if 0 <= t < length:
             d = min(float(nt["d"]), length - t)
-            evs.append([beats_to_s(t, tempo), beats_to_s(max(0.01, d), tempo), int(nt["p"]), int(nt.get("v", 100))])
-    secs = beats_to_s(length, tempo)
+            evs.append([clock(t), clock(t + max(0.01, d)) - clock(t), int(nt["p"]), int(nt.get("v", 100))])
+    secs = clock(length)
     out = lv2.render_notes(inst.get("uri", ""), inst.get("params") or {}, evs, secs, tail=4.0) if lv2 is not None and evs \
         else np.zeros((max(1, int(secs * SR)), 2), np.float32)
     if len(_REGIONS) > 400:
@@ -1108,7 +1238,8 @@ class Mixer:
 
     def load(self, project: dict) -> None:
         self.p = project
-        self.tempo = float(project.get("tempo", 120))
+        self.tempo = float(project.get("tempo", 120))            # where the song starts (echoes keep time with it)
+        self.tm = TempoMap(project)
         self.fx = {}
         for t in project.get("tracks", []):
             self.fx[t["id"]] = [(i, f, make_effect(f, self.tempo)) for i, f in enumerate(t.get("effects", [])) if f.get("on", True)]
@@ -1124,12 +1255,15 @@ class Mixer:
 
     def _take_audio(self, r: dict, file: str) -> np.ndarray:
         """A take's sound as the region plays it: reversed, transposed and following the tempo, as the region says."""
-        ratio = float(r.get("srcTempo") or self.tempo) / self.tempo if r.get("follow") else 1.0
+        here = self.tm.tempo_at(float(r.get("start", 0)))
+        ratio = float(r.get("srcTempo") or here) / here if r.get("follow") else 1.0
         return processed_audio(resolve(file, self.audio_dir), bool(r.get("reverse")), float(r.get("transpose", 0)), ratio), ratio
 
-    def _region_audio(self, track: dict, r: dict):
+    def _region_audio(self, track: dict, r: dict, at_beat: float = None):
+        start = float(r.get("start", 0)) if at_beat is None else at_beat
+        clock = self.tm.clock(start)
         if r.get("kind") == "audio":
-            length = int(beats_to_s(float(r.get("length", 4)), self.tempo) * SR)
+            length = int(clock(float(r.get("length", 4))) * SR)
             if r.get("comp") and r.get("takes"):               # a comp: pieces of several takes, crossfaded
                 a = np.zeros((length, 2), np.float32)
                 xf = int(0.005 * SR)
@@ -1137,7 +1271,7 @@ class Mixer:
                     take = r["takes"][max(0, min(len(r["takes"]) - 1, int(k)))]
                     src, ratio = self._take_audio(r, take.get("file", ""))
                     off = int(float(take.get("offset", r.get("offset", 0))) * ratio * SR)
-                    s0, s1 = int(beats_to_s(float(b0), self.tempo) * SR), min(length, int(beats_to_s(float(b1), self.tempo) * SR))
+                    s0, s1 = int(clock(float(b0)) * SR), min(length, int(clock(float(b1)) * SR))
                     sa, sb = max(0, s0 - xf // 2), min(length, s1 + xf // 2)
                     piece = src[off + sa:off + sb]
                     if not len(piece):
@@ -1163,8 +1297,8 @@ class Mixer:
                 if fo:
                     a[-fo:] *= np.linspace(1, 0, min(fo, len(a)))[:, None]
             return a
-        return render_midi_region(r, track.get("instrument") or {"id": "grand"}, self.tempo, self.audio_dir, track.get("midiFx"),
-                                  int(self.p.get("key", 0)), self.p.get("mode", "major"))
+        return render_midi_region(r, track.get("instrument") or {"id": "grand"}, self.tm.span_key(start, start + float(r.get("length", 4))),
+                                  self.audio_dir, track.get("midiFx"), int(self.p.get("key", 0)), self.p.get("mode", "major"), clock)
 
     def track_block(self, track: dict, s0: int, n: int) -> np.ndarray:
         """One track's sound for samples [s0, s0+n), before its effects: stereo."""
@@ -1172,18 +1306,18 @@ class Mixer:
         for r in self.p.get("regions", []):
             if r.get("track") != track["id"] or r.get("muted"):
                 continue
-            start = int(beats_to_s(float(r["start"]), self.tempo) * SR)
             reps = max(1, int(r.get("loops", 1)))
-            span = int(beats_to_s(float(r.get("length", 4)), self.tempo) * SR)
+            beats = float(r.get("length", 4))
             for k in range(reps):
-                at = start + k * span
+                b = float(r["start"]) + k * beats             # each time round has its own place on the tempo map
+                at = int(self.tm.seconds(b) * SR)
                 if at >= s0 + n:
                     break
                 audio = None
                 # a cheap test before drawing it: does this region (with its tail) reach the block at all?
-                if at + span + int(6 * SR) < s0:
+                if int(self.tm.seconds(b + beats) * SR) + int(6 * SR) < s0:
                     continue
-                audio = self._region_audio(track, r)
+                audio = self._region_audio(track, r, b)
                 end = at + len(audio)
                 if end <= s0:
                     continue
@@ -1241,7 +1375,7 @@ class Mixer:
         """The next n samples of the whole song (stereo float32), and each track's level for the meters. Tracks in a
         stack play into it; the stack's own effects and fader shape them together."""
         s0 = self.pos
-        b0, b1 = s_to_beats(s0 / SR, self.tempo), s_to_beats((s0 + n) / SR, self.tempo)
+        b0, b1 = self.tm.beat(s0 / SR), self.tm.beat((s0 + n) / SR)
         tracks = self.p.get("tracks", [])
         stacks = {t["id"]: t for t in tracks if t.get("kind") == "stack"}
         soloed = {t["id"] for t in tracks if t.get("solo")}
@@ -1318,11 +1452,11 @@ def render_song(project: dict, audio_dir: Path = None, tracks: list = None, tail
         for t in p.get("tracks", []):
             t["mute"] = t["id"] not in wanted
             t["solo"] = False
-    tempo = float(p.get("tempo", 120))
+    tm = TempoMap(p)
     end = song_length(p) if end_beats is None else end_beats
-    total = int((beats_to_s(end - start_beats, tempo) + tail) * SR)
+    total = int((tm.seconds(end) - tm.seconds(start_beats) + tail) * SR)
     m = Mixer(p, audio_dir)
-    m.seek(int(beats_to_s(start_beats, tempo) * SR))
+    m.seek(int(tm.seconds(start_beats) * SR))
     out = np.zeros((max(0, total), 2), np.float32)
     k = 0
     while k < total:
@@ -1371,14 +1505,34 @@ def _vlq(n: int) -> bytes:
     return bytes(reversed(out))
 
 
-def write_midi(tracks: list, tempo: float, sig=(4, 4), in_seconds: bool = False, names: list = None) -> bytes:
+def write_midi(tracks: list, tempo: float, sig=(4, 4), in_seconds: bool = False, names: list = None, project: dict = None) -> bytes:
     """A Standard MIDI File (type 1). tracks: [{channel, program, notes: [(start, dur, pitch, vel)]}] in beats
-    (or seconds with in_seconds)."""
+    (or seconds with in_seconds). With `project`, its tempo changes (a glide as small steps, an eighth of a beat
+    apart: MIDI has no glides) and time-signature changes go in too."""
     ppq = 480
     conv = (lambda x: x * tempo / 60.0) if in_seconds else (lambda x: x)
     head = b"MThd" + struct.pack(">IHHH", 6, 1, len(tracks) + 1, ppq)
-    us = int(60_000_000 / tempo)
-    meta = (b"\x00\xFF\x51\x03" + us.to_bytes(3, "big") + b"\x00\xFF\x58\x04" + bytes([sig[0], int(math.log2(sig[1])), 24, 8]) + b"\x00\xFF\x2F\x00")
+    cond = [(0, 0, b"\xFF\x51\x03" + int(60_000_000 / tempo).to_bytes(3, "big")),
+            (0, 1, b"\xFF\x58\x04" + bytes([sig[0], int(math.log2(sig[1])), 24, 8]))]
+    if project is not None:
+        tm, mm = TempoMap(project), MeterMap(project)
+        for i in range(1, len(tm.pts)):
+            b1, bpm, glide = tm.pts[i]
+            if glide:
+                b0 = tm.pts[i - 1][0]
+                steps = max(1, int((b1 - b0) * 8))
+                for k in range(1, steps):
+                    b = b0 + (b1 - b0) * k / steps
+                    cond.append((int(round(b * ppq)), 0, b"\xFF\x51\x03" + int(60_000_000 / tm.tempo_at(b)).to_bytes(3, "big")))
+            cond.append((int(round(b1 * ppq)), 0, b"\xFF\x51\x03" + int(60_000_000 / bpm).to_bytes(3, "big")))
+        for b, sg in mm.pts[1:]:
+            cond.append((int(round(b * ppq)), 1, b"\xFF\x58\x04" + bytes([int(sg[0]), int(math.log2(int(sg[1]))), 24, 8])))
+    cond.sort(key=lambda e: (e[0], e[1]))
+    meta, last = b"", 0
+    for tick, _k, ev in cond:
+        meta += _vlq(tick - last) + ev
+        last = tick
+    meta += b"\x00\xFF\x2F\x00"
     chunks = [b"MTrk" + struct.pack(">I", len(meta)) + meta]
     for k, t in enumerate(tracks):
         ch = int(t.get("channel", 0)) & 0x0F
@@ -1404,14 +1558,15 @@ def write_midi(tracks: list, tempo: float, sig=(4, 4), in_seconds: bool = False,
 
 
 def read_midi(data: bytes) -> dict:
-    """A Standard MIDI File -> {tempo, sig, tracks: [{name, channel, program, notes: [(start, dur, pitch, vel)]}]}
-    with times in beats (the first tempo is used for the whole song)."""
+    """A Standard MIDI File -> {tempo, sig, tempoChanges, sigChanges, tracks: [{name, channel, program, notes:
+    [(start, dur, pitch, vel)]}]} with times in beats: the first tempo and signature, and the changes after them."""
     if data[:4] != b"MThd":
         raise ValueError("not a MIDI file")
     _, fmt, ntrk, div = struct.unpack(">IHHH", data[4:14])
     ppq = div if not div & 0x8000 else 480
     pos = 14
     tempo, sig = 120.0, (4, 4)
+    tempos, sigs = [], []                             # (beat, bpm), (beat, (num, den)) wherever they come
     out = []
     for _ in range(ntrk):
         if data[pos:pos + 4] != b"MTrk":
@@ -1449,9 +1604,9 @@ def read_midi(data: bytes) -> dict:
                 body = chunk[i:i + ln]
                 i += ln
                 if kind == 0x51 and ln == 3:
-                    tempo = 60_000_000 / int.from_bytes(body, "big")
+                    tempos.append((tick / ppq, 60_000_000 / int.from_bytes(body, "big")))
                 elif kind == 0x58 and ln >= 2:
-                    sig = (body[0], 2 ** body[1])
+                    sigs.append((tick / ppq, (body[0], 2 ** body[1])))
                 elif kind == 0x03:
                     name = body.decode(errors="replace")
                 status = 0
@@ -1481,7 +1636,23 @@ def read_midi(data: bytes) -> dict:
         if notes:
             ch = max(chans, key=chans.get) if chans else 0
             out.append({"name": name, "channel": ch, "program": program, "notes": sorted(notes)})
-    return {"tempo": tempo, "sig": sig, "tracks": out}
+    tempos.sort(key=lambda x: x[0])
+    sigs.sort(key=lambda x: x[0])
+    if tempos and tempos[0][0] < 1e-6:
+        tempo = tempos[0][1]
+    if sigs and sigs[0][0] < 1e-6:
+        sig = sigs[0][1]
+    changes, last = [], tempo
+    for b, bpm in tempos:
+        if b > 1e-6 and abs(bpm - last) > 0.05:
+            changes.append({"beat": round(b, 4), "bpm": round(bpm, 2)})
+            last = bpm
+    meters, lastsig = [], tuple(sig)
+    for b, sg in sigs:
+        if b > 1e-6 and tuple(sg) != lastsig:
+            meters.append({"beat": round(b, 4), "sig": [int(sg[0]), int(sg[1])]})
+            lastsig = tuple(sg)
+    return {"tempo": tempo, "sig": sig, "tempoChanges": changes, "sigChanges": meters, "tracks": out}
 
 
 # ------------------------------------------------------------------------------------------------ loops and the drummer

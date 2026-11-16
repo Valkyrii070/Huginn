@@ -21,6 +21,9 @@ GlassWindow {
     property string selSection: ""
     property var laneMenu: null                   // the knob menu for an automation lane: { tid, x, y }
     property bool duckMenu: false
+    property bool tempoOn: (Backend.song.tempoChanges || []).length > 0 || (Backend.song.sigChanges || []).length > 0   // the Tempo lane
+    property int tempoSel: -1                     // the tempo change picked in it
+    readonly property int tracksTop: 98 + (tempoOn ? 54 : 0)
     property string pluginBrowser: ""             // "effect" while the plugin browser is open
     property string pluginCat: "All"
     property var pluginPanel: null                // a plugin's every control and its presets: { tid, index (-1: the instrument), uri, name }
@@ -122,15 +125,15 @@ GlassWindow {
                         Text { text: Backend.time; color: win.lcd; font.family: Theme.t.fontMono; font.pixelSize: 13; anchors.horizontalCenter: parent.horizontalCenter }
                         Text { text: "TIME"; color: "#8A5A3C"; font.pixelSize: 7; font.letterSpacing: 1; anchors.horizontalCenter: parent.horizontalCenter } }
                     Column { anchors.verticalCenter: parent.verticalCenter
-                        Text { objectName: "lcdTempo"; text: Math.round(win.song.tempo || 120); color: win.lcd; font.family: Theme.t.fontMono; font.pixelSize: 15; anchors.horizontalCenter: parent.horizontalCenter
+                        Text { objectName: "lcdTempo"; text: Math.round(Backend.tempoNow || 120); color: win.lcd; font.family: Theme.t.fontMono; font.pixelSize: 15; anchors.horizontalCenter: parent.horizontalCenter
                             MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.SizeVerCursor; property real y0: 0; property real t0: 120
-                                onPressed: function (m) { y0 = m.y; t0 = win.song.tempo } onPositionChanged: function (m) { Backend.setSong("tempo", Math.round(t0 + (y0 - m.y) / 3)) }
-                                onWheel: function (w) { Backend.setSong("tempo", win.song.tempo + (w.angleDelta.y > 0 ? 1 : -1)) } } }
+                                onPressed: function (m) { y0 = m.y; t0 = Backend.tempoNow } onPositionChanged: function (m) { Backend.setTempoHere(Math.round(t0 + (y0 - m.y) / 3)) }
+                                onWheel: function (w) { Backend.setTempoHere(Backend.tempoNow + (w.angleDelta.y > 0 ? 1 : -1)) } } }
                         Text { text: "TEMPO"; color: "#8A5A3C"; font.pixelSize: 7; font.letterSpacing: 1; anchors.horizontalCenter: parent.horizontalCenter } }
                     Column { anchors.verticalCenter: parent.verticalCenter
-                        Text { text: (win.song.sig || [4, 4]).join("/"); color: win.lcd; font.family: Theme.t.fontMono; font.pixelSize: 13; anchors.horizontalCenter: parent.horizontalCenter
-                            MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: { var opts = [[4, 4], [3, 4], [6, 8], [2, 4], [5, 4]], cur = (win.song.sig || [4, 4]).join("/"), k = 0
-                                for (var i = 0; i < opts.length; i++) if (opts[i].join("/") === cur) k = (i + 1) % opts.length; Backend.setSong("sig", opts[k]) } } }
+                        Text { text: (Backend.sigNow || [4, 4]).join("/"); color: win.lcd; font.family: Theme.t.fontMono; font.pixelSize: 13; anchors.horizontalCenter: parent.horizontalCenter
+                            MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: { var opts = [[4, 4], [3, 4], [6, 8], [2, 4], [5, 4], [7, 8]], cur = (Backend.sigNow || [4, 4]).join("/"), k = 0
+                                for (var i = 0; i < opts.length; i++) if (opts[i].join("/") === cur) k = (i + 1) % opts.length; Backend.setSignatureAt(Backend.position, opts[k][0], opts[k][1]) } } }
                         Text { text: "TIME SIG"; color: "#8A5A3C"; font.pixelSize: 7; font.letterSpacing: 1; anchors.horizontalCenter: parent.horizontalCenter } }
                     Column { anchors.verticalCenter: parent.verticalCenter
                         Text { text: Backend.noteNames[win.song.key || 0].replace(/-?\d+$/, "") + (win.song.mode === "minor" ? " min" : " maj"); color: win.lcd; font.family: Theme.t.fontMono; font.pixelSize: 13; anchors.horizontalCenter: parent.horizontalCenter
@@ -152,6 +155,7 @@ GlassWindow {
             Seg { text: "Drummer"; onClicked: Backend.addTrack("drummer", "drums") }
             Seg { icon: "mic"; text: "Voice or Guitar"; onClicked: Backend.addTrack("audio", "") }
             Seg { objectName: "autoBtn"; text: "A"; tip: "Automation: draw any knob over time"; on: win.autoOn; onClicked: win.autoOn = !win.autoOn }
+            Seg { objectName: "tempoBtn"; text: "Tempo"; tip: "Tempo and time signature: changes along the song"; on: win.tempoOn; onClicked: win.tempoOn = !win.tempoOn }
             Seg { objectName: "stackBtn"; visible: win.picked.length >= 2; icon: "layers"; text: "Stack " + win.picked.length; tip: "These tracks play into one stack with its own effects and fader"
                 onClicked: { Backend.makeStack(win.picked); win.picked = [] } }
             IslandGap {}
@@ -210,15 +214,64 @@ GlassWindow {
                 Rectangle { anchors.right: parent.right; width: 8; height: parent.height; color: "#C9962A"; radius: 3
                     MouseArea { anchors.fill: parent; anchors.margins: -3; cursorShape: Qt.SizeHorCursor
                         onPositionChanged: function (m) { var b = Math.max(win.song.cycle.start + 1, Math.round((mapToItem(ruler, m.x, 0).x + lanes.contentX) / win.ppb)); Backend.setSong("cycle", Object.assign({}, win.song.cycle, { end: b })) } } } }
-            Repeater { model: Math.max(0, Math.ceil((ruler.width + lanes.contentX) / (win.ppb * win.bpb)) + 1)
-                Item { required property int index; x: index * win.bpb * win.ppb - lanes.contentX; height: ruler.height
+            Repeater { model: { Backend.song; return Backend.bars(lanes.contentX / win.ppb, (lanes.contentX + ruler.width) / win.ppb + 1) }
+                Item { required property var modelData; x: modelData[0] * win.ppb - lanes.contentX; height: ruler.height
                     Rectangle { y: 14; width: 1; height: 16; color: Theme.t.text_secondary; opacity: 0.6 }
-                    Label { x: 4; y: 14; text: index + 1; font.pixelSize: 10; secondary: true; visible: win.ppb * win.bpb > 26 || index % 4 === 0 } } }
+                    Label { x: 4; y: 14; text: modelData[1] + (modelData[2] ? "  " + modelData[2] : ""); font.pixelSize: 10; secondary: !modelData[2]; color: modelData[2] ? win.hot : Theme.t.text
+                        visible: !!modelData[2] || win.ppb * win.bpb > 26 || (modelData[1] - 1) % 4 === 0 } } }
             MouseArea { anchors.fill: parent; z: -1; onPressed: function (m) { Backend.seek(Math.max(0, (m.x + lanes.contentX) / win.ppb)) }
                 onPositionChanged: function (m) { Backend.seek(Math.max(0, (m.x + lanes.contentX) / win.ppb)) } } }
 
         // the track headers
-        Flickable { id: heads; x: 0; y: 98; width: win.headW; height: parent.height - y - 8; contentHeight: lanesCol.height; contentY: lanes.contentY; interactive: false; clip: true
+        // ---- the Tempo lane: the tempo along the song (a jump, or a glide into a change) and where the signature changes
+        Item { id: tempoLane; objectName: "tempoLane"; visible: win.tempoOn; x: 0; y: 98; width: parent.width - 8; height: 50
+            Rectangle { x: 8; width: win.headW - 14; height: parent.height; radius: 12; color: Theme.t.dark ? "#10FFFFFF" : "#08000000"
+                Label { x: 12; y: 8; text: "Tempo"; font.pixelSize: 12; font.weight: Font.DemiBold }
+                Label { x: 12; y: 26; width: parent.width - 20; elide: Text.ElideRight; font.pixelSize: 10; secondary: true
+                    text: (Backend.song.tempoChanges || []).length ? (Backend.song.tempoChanges.length + " change" + (Backend.song.tempoChanges.length > 1 ? "s" : "") + " · double-click to add") : "Double-click the line to change it" } }
+            Item { id: tlArea; x: win.headW; width: parent.width - win.headW; height: parent.height; clip: true
+                readonly property real lo: { var c = Backend.song.tempoChanges || [], m = win.song.tempo || 120; for (var i = 0; i < c.length; i++) m = Math.min(m, c[i].bpm); return Math.max(20, m - 15) }
+                readonly property real hi: { var c = Backend.song.tempoChanges || [], m = win.song.tempo || 120; for (var i = 0; i < c.length; i++) m = Math.max(m, c[i].bpm); return m + 15 }
+                function yOf(bpm) { return 6 + (1 - (bpm - lo) / Math.max(1, hi - lo)) * (height - 12) }
+                Rectangle { anchors.fill: parent; radius: 10; color: Theme.t.dark ? "#08FFFFFF" : "#05000000" }
+                Canvas { id: tcurve; anchors.fill: parent
+                    // (the song read first: the line is drawn again whenever the song changes)
+                    property var pts: { Backend.song; return Backend.tempoCurve(lanes.contentX / win.ppb, (lanes.contentX + width) / win.ppb + 1, 96) }
+                    onPtsChanged: requestPaint(); onWidthChanged: requestPaint()
+                    onPaint: { var c = getContext("2d"); c.reset(); if (!pts.length) return; c.lineWidth = 2; c.strokeStyle = win.hot; c.beginPath()
+                        for (var i = 0; i < pts.length; i++) { var x = pts[i][0] * win.ppb - lanes.contentX, y = tlArea.yOf(pts[i][1]); if (i === 0) c.moveTo(x, y); else c.lineTo(x, y) }
+                        c.stroke() } }
+                MouseArea { anchors.fill: parent; onDoubleClicked: function (m) { win.tempoSel = Backend.addTempoChange((m.x + lanes.contentX) / win.ppb) } onClicked: win.tempoSel = -1 }
+                // the changes: drag along and up and down; pick one to change it
+                Repeater { model: Backend.song.tempoChanges || []
+                    Rectangle { id: tc; required property var modelData; required property int index; objectName: "tempoChange" + index
+                        x: modelData.beat * win.ppb - lanes.contentX - 6; y: tlArea.yOf(modelData.bpm) - 6; width: 12; height: 12; radius: 6
+                        color: win.tempoSel === index ? "#FFFFFF" : win.hot; border.width: 2; border.color: win.hot
+                        Label { x: 14; y: -3; text: Math.round(tc.modelData.bpm) + (tc.modelData.glide ? " ↗" : ""); font.pixelSize: 10; font.weight: Font.DemiBold }
+                        MouseArea { anchors.fill: parent; anchors.margins: -5; cursorShape: Qt.SizeAllCursor; preventStealing: true; property point p0; property real b0; property real t0
+                            onPressed: function (m) { win.tempoSel = tc.index; p0 = mapToItem(tlArea, m.x, m.y); b0 = tc.modelData.beat; t0 = tc.modelData.bpm }
+                            onPositionChanged: function (m) { var p = mapToItem(tlArea, m.x, m.y)
+                                if (Math.abs(p.y - p0.y) > Math.abs(p.x - p0.x)) Backend.setTempoChange(tc.index, "bpm", Math.round(t0 + (p0.y - p.y) / 2))
+                                else Backend.setTempoChange(tc.index, "beat", Math.max(1, b0 + (p.x - p0.x) / win.ppb)) } } } }
+                // signature changes, at their bars
+                Repeater { model: Backend.song.sigChanges || []
+                    Rectangle { required property var modelData; x: modelData.beat * win.ppb - lanes.contentX; y: parent.height - 16; width: sigL.width + 10; height: 14; radius: 5
+                        color: Qt.rgba(win.hot.r, win.hot.g, win.hot.b, 0.25)
+                        Label { id: sigL; x: 5; anchors.verticalCenter: parent.verticalCenter; text: modelData.sig.join("/"); font.pixelSize: 9; font.weight: Font.Bold }
+                        MouseArea { anchors.fill: parent; onDoubleClicked: Backend.removeSignatureAt(parent.modelData.beat) } } } }
+            // the picked change: its tempo, a glide into it, or gone
+            Rectangle { objectName: "tempoEditor"; visible: win.tempoSel >= 0 && win.tempoSel < (Backend.song.tempoChanges || []).length; z: 3
+                readonly property var c: visible ? Backend.song.tempoChanges[win.tempoSel] : ({ beat: 0, bpm: 120 })
+                x: Math.min(parent.width - width - 4, win.headW + c.beat * win.ppb - lanes.contentX + 12); y: 2; width: tedRow.width + 16; height: 46; radius: 12
+                color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
+                Row { id: tedRow; x: 8; anchors.verticalCenter: parent.verticalCenter; spacing: 4; height: 30
+                    Seg { text: "−"; onClicked: Backend.setTempoChange(win.tempoSel, "bpm", parent.parent.c.bpm - 1) }
+                    Label { anchors.verticalCenter: parent.verticalCenter; width: 62; horizontalAlignment: Text.AlignHCenter; text: Math.round(parent.parent.c.bpm) + " BPM"; font.pixelSize: 12; font.weight: Font.DemiBold }
+                    Seg { text: "+"; onClicked: Backend.setTempoChange(win.tempoSel, "bpm", parent.parent.c.bpm + 1) }
+                    Seg { objectName: "glideBtn"; text: "Glide"; on: !!parent.parent.c.glide; tip: "Slide here from the tempo before, instead of jumping"; onClicked: Backend.setTempoChange(win.tempoSel, "glide", !parent.parent.c.glide) }
+                    Seg { icon: "trash"; danger: true; tip: "Remove"; onClicked: { Backend.removeTempoChange(win.tempoSel); win.tempoSel = -1 } } } } }
+
+        Flickable { id: heads; x: 0; y: win.tracksTop; width: win.headW; height: parent.height - y - 8; contentHeight: lanesCol.height; contentY: lanes.contentY; interactive: false; clip: true
             Column { width: parent.width; spacing: 4
                 Repeater { model: win.shown
                     Rectangle { id: head; required property var modelData; required property int index; objectName: "head_" + modelData.id
@@ -264,13 +317,13 @@ GlassWindow {
                             Glyph { anchors { right: parent.right; rightMargin: 6; verticalCenter: parent.verticalCenter } name: "down"; size: 10 } } } } } }
 
         // the lanes
-        Flickable { id: lanes; objectName: "lanes"; x: win.headW; y: 98; width: parent.width - win.headW - 8; height: parent.height - y - 8; clip: true
+        Flickable { id: lanes; objectName: "lanes"; x: win.headW; y: win.tracksTop; width: parent.width - win.headW - 8; height: parent.height - y - 8; clip: true
             contentWidth: Math.max(width, (Math.max(Backend.length, 32) + 16) * win.ppb); contentHeight: lanesCol.height + 30; boundsBehavior: Flickable.StopAtBounds
             WheelHandler { acceptedModifiers: Qt.ControlModifier; onWheel: function (e) { win.ppb = Math.max(8, Math.min(100, win.ppb * (e.angleDelta.y > 0 ? 1.15 : 1 / 1.15))) } }
             MouseArea { width: lanes.contentWidth; height: Math.max(lanes.height, lanesCol.height); onClicked: function (m) { Backend.selectRegion(""); Backend.seek(m.x / win.ppb) } }
             // bar lines
-            Repeater { model: Math.max(0, Math.ceil(lanes.contentWidth / (win.ppb * win.bpb)))
-                Rectangle { required property int index; x: index * win.bpb * win.ppb; width: 1; height: Math.max(lanes.height, lanesCol.height); color: Theme.t.text; opacity: 0.06 } }
+            Repeater { model: { Backend.song; return Backend.bars(0, lanes.contentWidth / win.ppb) }
+                Rectangle { required property var modelData; x: modelData[0] * win.ppb; width: 1; height: Math.max(lanes.height, lanesCol.height); color: Theme.t.text; opacity: 0.06 } }
             Column { id: lanesCol; width: lanes.contentWidth; spacing: 4
                 Repeater { model: win.shown
                     Item { id: lane; required property var modelData; required property int index; width: lanes.contentWidth; height: win.laneH
