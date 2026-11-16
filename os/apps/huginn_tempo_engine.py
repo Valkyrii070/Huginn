@@ -18,6 +18,8 @@
                     (a track ducking under another, the kick pushing the bass down)
     sampler         any sound as an instrument across the keys (its pitch heard), and sounds of your own on drum pads
     MIDI effects    an arpeggiator and chord trigger in front of an instrument
+    plugins         LV2 effects and instruments installed on the computer (huginn_tempo_lv2): an effect like any other
+                    on a track, a stack or the master; an instrument drawn a region at a time, with its own tail
     files           WAV, FLAC, MP3, Ogg and AAC out (and stems); Standard MIDI Files in and out
 """
 import hashlib
@@ -32,6 +34,11 @@ from pathlib import Path
 
 import numpy as np
 from scipy.signal import lfilter
+
+try:
+    import huginn_tempo_lv2 as lv2
+except Exception:                                   # noqa: BLE001  (no plugins: Tempo's own sounds still play)
+    lv2 = None
 
 SR = 48000
 BLOCK = 1024
@@ -431,7 +438,25 @@ def drum_sound(kit: str, pitch: int, tune: float = 0.0, length: float = 1.0, pun
     return y
 
 
+_PLUGIN_NOTES = {}
+
+
+def plugin_note(inst: dict, pitch: int, vel: int, dur: float) -> np.ndarray:
+    """A plugin instrument's note, stereo; kept, as the keyboard asks for the same notes again and again."""
+    key = json.dumps([inst.get("uri"), inst.get("params"), int(pitch), int(vel) // 8, round(dur, 2)], sort_keys=True)
+    a = _PLUGIN_NOTES.get(key)
+    if a is None:
+        a = lv2.render_notes(inst.get("uri", ""), inst.get("params") or {}, [[0.0, dur, int(pitch), int(vel)]], dur, tail=2.5) \
+            if lv2 is not None else np.zeros((int(dur * SR), 2), np.float32)
+        if len(_PLUGIN_NOTES) > 256:
+            _PLUGIN_NOTES.clear()
+        _PLUGIN_NOTES[key] = a
+    return a
+
+
 def instrument_note(inst: dict, pitch: int, vel: int, dur: float, base: Path = None) -> np.ndarray:
+    if inst.get("id") == "plugin":
+        return plugin_note(inst, pitch, vel, dur)
     s = settings(inst)
     if s.get("engine") == "kit":
         pad = (s.get("pads") or {}).get(str(pitch))
@@ -611,7 +636,10 @@ def region_key(region: dict, inst: dict, tempo: float, extra=None) -> str:
 
 
 def render_midi_region(region: dict, inst: dict, tempo: float, base: Path = None, mfx: dict = None, key: int = 0, mode: str = "major") -> np.ndarray:
-    """A MIDI region as mono audio, from its start to its last note's tail. Cached until anything in it changes."""
+    """A MIDI region as mono audio, from its start to its last note's tail (stereo from a plugin instrument). Cached
+    until anything in it changes."""
+    if inst.get("id") == "plugin":
+        return _plugin_region(region, inst, tempo, mfx, key, mode)
     use_fx = bool(mfx) and region.get("kind") != "drummer" and settings(inst).get("engine") != "kit"
     cache = region_key(region, inst, tempo, [mfx, key, mode, str(base)] if use_fx or settings(inst).get("engine") in ("sampler", "kit") else None)
     if cache in _REGIONS:
@@ -634,6 +662,31 @@ def render_midi_region(region: dict, inst: dict, tempo: float, base: Path = None
     out = np.zeros(end, np.float32)
     for at, sound in pieces:
         out[at:at + len(sound)] += sound
+    if len(_REGIONS) > 400:
+        _REGIONS.clear()
+    _REGIONS[cache] = out
+    return out
+
+
+def _plugin_region(region: dict, inst: dict, tempo: float, mfx: dict, key: int, mode: str) -> np.ndarray:
+    """A region through a plugin instrument: every note in one pass as MIDI (so it plays its own voices, glides and
+    tails), stereo."""
+    cache = region_key(region, inst, tempo, [mfx, key, mode, "plugin"])
+    if cache in _REGIONS:
+        return _REGIONS[cache]
+    length = float(region.get("length", 4))
+    notes = region.get("notes") or []
+    if mfx and region.get("kind") != "drummer":
+        notes = apply_midi_fx(notes, mfx, length, key, mode)
+    evs = []
+    for nt in notes:
+        t = float(nt["t"])
+        if 0 <= t < length:
+            d = min(float(nt["d"]), length - t)
+            evs.append([beats_to_s(t, tempo), beats_to_s(max(0.01, d), tempo), int(nt["p"]), int(nt.get("v", 100))])
+    secs = beats_to_s(length, tempo)
+    out = lv2.render_notes(inst.get("uri", ""), inst.get("params") or {}, evs, secs, tail=4.0) if lv2 is not None and evs \
+        else np.zeros((max(1, int(secs * SR)), 2), np.float32)
     if len(_REGIONS) > 400:
         _REGIONS.clear()
     _REGIONS[cache] = out
@@ -981,6 +1034,8 @@ PARAM_NAMES = {"low": "Low", "mid": "Middle", "high": "High", "cut": "Low cut", 
 
 def make_effect(fx: dict, tempo: float):
     kind = fx.get("kind")
+    if kind == "plugin":
+        return lv2.Effect(fx.get("uri", ""), fx.get("params") or {}) if lv2 is not None else None
     if kind not in EFFECTS:
         return None
     params = dict(EFFECTS[kind][2])
@@ -1152,7 +1207,7 @@ class Mixer:
             keys = {k.split(".", 2)[2]: v for k, v in auto.items() if k.startswith(f"fx.{i}.") and v}
             if not keys:
                 continue
-            p = dict(EFFECTS[f["kind"]][2])
+            p = dict(fx.defaults) if f["kind"] == "plugin" else dict(EFFECTS[f["kind"]][2])
             p.update(f.get("params") or {})
             for k, pts in keys.items():
                 pts = sorted(pts)

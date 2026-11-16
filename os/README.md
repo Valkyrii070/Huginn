@@ -586,6 +586,34 @@ Four apps are being taken, round by round, to the level of the professional tool
 - *MIDI effects*: an arpeggiator (up, down, up and down, as played, random; 1/8 to 1/32 and triplets; up to four octaves) and a chord trigger (fixed shapes, or the chords of the song's key, live too).
 - Songs made in Studio move to Music/Tempo on first start.
 
+**Tempo, pro pass two** (`apps/huginn_tempo_lv2.py`, new; `apps/huginn_tempo_engine.py`, `apps/huginn_tempo.py`, `apps/qml/Tempo.qml`)
+- *Plugins*: the LV2 effects and instruments Linux's audio world shares, hosted through lilv. In the image: LSP's
+  studio effects, Calf's (and its synth and organ), x42's, Dragonfly's reverbs, AVL's sampled drum kits and setBfree's
+  tonewheel organ, about 240 effects and 8 instruments in all; anything else installed turns up too.
+  - Found by a scan in a process of its own, as other studios do: each plugin is started and played a moment, and
+    one that crashes, gives back no numbers (ZamEQ2: all NaN), or as an instrument makes no sound is left out
+    without taking Tempo down. Also left out: meters and scopes (nothing to see without their own windows), plugins
+    that need a file before they sound (samplers, impulse reverbs), and those whose sound engine brings in Qt or GTK
+    (synthv1 and padthv1 load Qt there, which aborted the process). The list is kept until something is installed or
+    removed.
+  - The host gives what plugins ask for: URIDs, options (sample rate, block sizes), bounded blocks and a worker,
+    whose jobs are done between blocks. Mono plugins run twice (left and right); extra inputs hear silence.
+  - Effects go on any track, stack or the master like Tempo's own, with their first controls on the card and all
+    of them, with the plugin's presets, in a panel (switches, named values, sliders on a log scale where the plugin
+    says). Their knobs can be drawn over time. A plugin gone from the computer is passed through and says so.
+  - Instruments are in the library under Plugins (kits open in the drum grid). A region is drawn in one pass as
+    MIDI, after a moment of silence for kits to load their sounds, with the instrument's own tail; the keyboard's
+    notes are kept per pitch and strength. Their first knobs are the Smart Controls.
+  - lilv's Python side wants `liblilv-0.so` (only in the development package) and frees its objects in no order at
+    exit (the process crashed on the way out): it's given the library itself, and its clean-ups are skipped at exit.
+    Its scale points are read through the C calls (its wrapper frees them before they can be read). LV2's own
+    descriptions of kinds of plugin are only in `lv2-dev` (1 MB), so that's in the image too.
+  - Tested (10 checks): a plugin synth plays its region in stereo and a preset changes it; a sampled kit's first
+    kick is heard; a reverb plugin adds a tail; drawing the x42 EQ's gain over time makes the second half 28.5 dB
+    louder; a missing plugin passes the sound through; three plugins take 1.4 ms of a 21 ms block. On screen: the
+    browser (search, kinds), adding Dragonfly Hall, the card and every control, a knob saved to the song, Calf
+    Monosynth from the library with its knobs as Smart Controls and its 21 presets.
+
 ## From power-on to the desktop
 
 Every screen between pressing the power button and the desktop is now Huginn's own, and they flow into each other.

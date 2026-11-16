@@ -243,6 +243,7 @@ class Player:
 class Tempo(QObject):
     changed = Signal()
     clockChanged = Signal()
+    pluginsChanged = Signal()
     said = Signal(str, bool)
     _midi_in = Signal(str, int, int)
     _back = Signal(object)
@@ -270,6 +271,10 @@ class Tempo(QObject):
         self._back.connect(lambda fn: fn())
         self._midi_threads = []
         self._mic = None
+        self._plugins, self._plugin_state = [], "finding" if se.lv2 is not None and se.lv2.available() else "none"
+        self._plugin_controls = {}
+        if self._plugin_state == "finding":
+            threading.Thread(target=self._find_plugins, daemon=True).start()
         if demo:
             self._demo_song()
         else:
@@ -436,7 +441,7 @@ class Tempo(QObject):
         if inst.get("engine") == "sampler":
             name = f"Sampler · {inst.get('sound') or 'drop a sound'}"
         return {**{k: v for k, v in t.items() if k not in ("automation",)}, "regions": regions, "instName": name if t["kind"] != "stack" else f"{len(members)} tracks",
-                "family": inst.get("family", ""), "automation": t.get("automation") or {}, "colour": t.get("colour") or COLOURS.get(t["kind"], "#4FA3FF"),
+                "family": self._plugin_family(t.get("instrument") or {}) or inst.get("family", ""), "automation": t.get("automation") or {}, "colour": t.get("colour") or COLOURS.get(t["kind"], "#4FA3FF"),
                 "output": t.get("output", ""), "members": members, "summary": summary, "open": t.get("open", True), "lane": t.get("lane", "volume"),
                 "midiFx": t.get("midiFx") or {}, "outputName": (self._t(t.get("output", "")) or {}).get("name", ""),
                 "hidden": bool(t.get("output") and not (self._t(t["output"]) or {}).get("open", True))}
@@ -535,6 +540,11 @@ class Tempo(QObject):
         t = self._t(tid)
         if not t:
             return []
+        inst = t.get("instrument") or {}
+        if inst.get("id") == "plugin":                        # a plugin instrument: its first dozen knobs
+            params = inst.get("params") or {}
+            return [{"key": "param:" + c["symbol"], "name": c["name"], "low": c["min"], "high": c["max"], "value": float(params.get(c["symbol"], c["default"]))}
+                    for c in self.pluginControls(inst.get("uri", "")) if not c["toggle"] and not c["choices"]][:12]
         s = se.settings(t.get("instrument") or {})
         out = []
         for key, name, lo, hi in se.SMART.get(s.get("engine", "sub"), []):
@@ -669,6 +679,9 @@ class Tempo(QObject):
         t = self._t(tid)
         if not t:
             return
+        if key.startswith("param:"):                         # a plugin instrument's knob
+            self.setPluginParam(tid, -1, key[6:], value)
+            return
         self._before(("smart", tid, key))
         t.setdefault("instrument", {"id": "grand"})[key] = round(float(value), 4)
         self._keep()
@@ -722,10 +735,159 @@ class Tempo(QObject):
         t = self._t(tid) if tid != "master" else (self._p or {}).get("master", {})
         out = []
         for f in (t or {}).get("effects", []):
+            if f["kind"] == "plugin":
+                params = {c["symbol"]: c["default"] for c in self.pluginControls(f.get("uri", ""))}
+                params.update(f.get("params") or {})
+                info = self._plugin_info(f.get("uri", ""))
+                out.append({"kind": "plugin", "name": f.get("name") or info.get("name", "Plugin"), "on": f.get("on", True), "params": params,
+                            "uri": f.get("uri", ""), "category": info.get("category", ""), "author": info.get("author", ""),
+                            "missing": self._plugin_state == "ready" and not info})
+                continue
             params = dict(se.EFFECTS.get(f["kind"], ("", None, {}))[2])
             params.update(f.get("params") or {})
             out.append({"kind": f["kind"], "name": se.EFFECTS.get(f["kind"], ("?",))[0], "on": f.get("on", True), "params": params})
         return out
+
+    # ---------------------------------------------------------------- plugins (LV2: huginn_tempo_lv2)
+    def _find_plugins(self) -> None:
+        """(A thread.) What's installed, from the list kept between starts or a fresh scan when something changed."""
+        try:
+            found = se.lv2.catalogue()
+            se.lv2.HOST.loaded()                               # read once now, so the first plugin played doesn't wait
+        except Exception:                                     # noqa: BLE001
+            found = []
+
+        def done():
+            self._plugins, self._plugin_state = found, "ready"
+            self.pluginsChanged.emit()
+            self.changed.emit()
+        self._back.emit(done)
+
+    plugins = Property("QVariantList", lambda self: self._plugins, notify=pluginsChanged)
+    pluginState = Property(str, lambda self: self._plugin_state, notify=pluginsChanged)
+
+    @Property("QVariantList", notify=pluginsChanged)
+    def pluginInstruments(self):
+        return [{"id": "plugin:" + d["uri"], "uri": d["uri"], "name": d["name"], "family": "Plugins", "kit": "drum" in d["name"].lower() or "percussion" in d["name"].lower()}
+                for d in self._plugins if d["kind"] == "instrument"]
+
+    @staticmethod
+    def _plugin_family(inst: dict) -> str:
+        """A plugin instrument's family: a kit's is Drums (written in the drum grid, General MIDI's drum notes), else Plugins."""
+        if inst.get("id") != "plugin":
+            return ""
+        name = (inst.get("name") or "").lower()
+        return "Drums" if "drum" in name or "percussion" in name else "Plugins"
+
+    @Slot(str, int, result="QVariantMap")
+    def pluginValues(self, tid: str, index: int) -> dict:
+        """Where a plugin's knobs are now: an effect's (its place) or the instrument's (-1), defaults filled in."""
+        t = self._t(tid) if tid != "master" else (self._p or {}).get("master", {})
+        if not t:
+            return {}
+        target = t.get("instrument") if index < 0 else ((t.get("effects") or [])[index] if 0 <= index < len(t.get("effects") or []) else None)
+        if not target:
+            return {}
+        out = {c["symbol"]: c["default"] for c in self.pluginControls(target.get("uri", ""))}
+        out.update(target.get("params") or {})
+        return out
+
+    def _plugin_info(self, uri: str) -> dict:
+        return next((d for d in self._plugins if d["uri"] == uri), {})
+
+    @Slot(str, result="QVariantList")
+    def pluginControls(self, uri: str) -> list:
+        if not uri or se.lv2 is None or self._plugin_state != "ready":
+            return []
+        if uri not in self._plugin_controls:
+            try:
+                self._plugin_controls[uri] = se.lv2.controls(uri)
+            except Exception:                                 # noqa: BLE001
+                self._plugin_controls[uri] = []
+        return self._plugin_controls[uri]
+
+    @Slot(str, result="QVariantList")
+    def pluginPresets(self, uri: str) -> list:
+        if not uri or se.lv2 is None or self._plugin_state != "ready":
+            return []
+        try:
+            return [d["name"] for d in se.lv2.presets(uri)]
+        except Exception:                                     # noqa: BLE001
+            return []
+
+    @Slot(str, str)
+    def addPlugin(self, tid: str, uri: str) -> None:
+        """A plugin effect at the end of a track's (or a stack's, or the master's) effects."""
+        t = self._t(tid) if tid != "master" else self._p.setdefault("master", {})
+        info = self._plugin_info(uri)
+        if t is None or not info or info["kind"] != "effect":
+            return
+        self._before()
+        t.setdefault("effects", []).append({"kind": "plugin", "uri": uri, "name": info["name"], "params": {}, "on": True})
+        self._keep()
+
+    @Slot(str, str)
+    def usePluginInstrument(self, tid: str, uri: str) -> None:
+        t = self._t(tid)
+        info = self._plugin_info(uri)
+        if not t or not info or info["kind"] != "instrument":
+            return
+        self._before()
+        old = (t.get("instrument") or {}).get("name") or se.INSTRUMENTS.get((t.get("instrument") or {}).get("id", ""), {}).get("name", "")
+        t["instrument"] = {"id": "plugin", "uri": uri, "name": info["name"], "params": {}}
+        if t["kind"] == "audio":
+            t["kind"] = "instrument"
+        if not t.get("name") or t["name"] == old or t["name"] in [v["name"] for v in se.INSTRUMENTS.values()]:
+            t["name"] = info["name"]
+        self._keep()
+
+    @Slot(str, int, str, "QVariant")
+    def setPluginParam(self, tid: str, index: int, symbol: str, value) -> None:
+        """A plugin's knob: an effect's (its place in the list) or the instrument's (-1)."""
+        value = value.toVariant() if hasattr(value, "toVariant") else value
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return
+        if index >= 0:
+            t = self._t(tid) if tid != "master" else (self._p or {}).get("master", {})
+            fx = (t or {}).get("effects", [])
+            if 0 <= index < len(fx):
+                fx[index].pop("preset", None)                  # turned by hand: no longer the preset as it came
+            self.setEffect(tid, index, symbol, value)
+            return
+        t = self._t(tid)
+        if not t or (t.get("instrument") or {}).get("id") != "plugin":
+            return
+        self._before(("plugin", tid, symbol))
+        t["instrument"].setdefault("params", {})[symbol] = value
+        t["instrument"].pop("preset", None)
+        self._keep()
+
+    @Slot(str, int, result=str)
+    def pluginPreset(self, tid: str, index: int) -> str:
+        """The preset a plugin is set to, as long as no knob has been turned since."""
+        t = self._t(tid) if tid != "master" else (self._p or {}).get("master", {})
+        if not t:
+            return ""
+        target = t.get("instrument") if index < 0 else ((t.get("effects") or [])[index] if 0 <= index < len(t.get("effects") or []) else None)
+        return (target or {}).get("preset", "")
+
+    @Slot(str, int, str)
+    def applyPluginPreset(self, tid: str, index: int, name: str) -> None:
+        t = self._t(tid) if tid != "master" else (self._p or {}).get("master", {})
+        if not t:
+            return
+        target = t.get("instrument") if index < 0 else (t.get("effects") or [None] * (index + 1))[index]
+        if not target or (index < 0 and target.get("id") != "plugin") or (index >= 0 and target.get("kind") != "plugin"):
+            return
+        preset = next((d for d in se.lv2.presets(target.get("uri", "")) if d["name"] == name), None)
+        if preset is None:
+            return
+        self._before()
+        target["params"] = dict(preset["values"])
+        target["preset"] = name
+        self._keep()
 
     def _param_range(self, t: dict, param: str):
         """[low, high, name, unit, value now] for a knob that can be drawn over time, or None."""
@@ -737,6 +899,11 @@ class Tempo(QObject):
         if len(bits) == 3 and bits[0] == "fx" and bits[1].isdigit():
             fx = t.get("effects", [])
             i = int(bits[1])
+            if 0 <= i < len(fx) and fx[i]["kind"] == "plugin":
+                c = next((c for c in self.pluginControls(fx[i].get("uri", "")) if c["symbol"] == bits[2]), None)
+                if c:
+                    return [c["min"], c["max"], f"{fx[i].get('name', 'Plugin')} · {c['name']}", "", float((fx[i].get("params") or {}).get(bits[2], c["default"]))]
+                return None
             if 0 <= i < len(fx):
                 rng = se.PARAM_RANGES.get(fx[i]["kind"], {}).get(bits[2])
                 if rng:
@@ -753,10 +920,16 @@ class Tempo(QObject):
             return []
         params = ["volume", "pan", "reverb", "echo"]
         for i, f in enumerate(t.get("effects", [])):
-            params += [f"fx.{i}.{k}" for k in se.PARAM_RANGES.get(f["kind"], {})]
+            if f["kind"] == "plugin":                         # a plugin's knobs (not its switches or lists), the first 48
+                params += [f"fx.{i}.{c['symbol']}" for c in self.pluginControls(f.get("uri", "")) if not c["toggle"] and not c["choices"]][:48]
+            else:
+                params += [f"fx.{i}.{k}" for k in se.PARAM_RANGES.get(f["kind"], {})]
         out = []
         for prm in params:
-            lo, hi, name, unit, value = self._param_range(t, prm)
+            rng = self._param_range(t, prm)
+            if rng is None:
+                continue
+            lo, hi, name, unit, value = rng
             out.append({"param": prm, "name": name, "low": lo, "high": hi, "unit": unit, "value": value, "drawn": bool((t.get("automation") or {}).get(prm))})
         return out
 
@@ -1597,9 +1770,10 @@ class Tempo(QObject):
             ps = [n["p"] for n in se.apply_midi_fx([{"t": 0, "d": 1, "p": pitch, "v": vel}], {"chord": chord}, 1, int(self._p.get("key", 0)), self._p.get("mode", "major"))]
             parts = [se.instrument_note(t.get("instrument") or {"id": "grand"}, q, vel, 6.0, self._folder) for q in ps]
             n = max(len(x) for x in parts)
-            a = np.zeros(n, np.float32)
+            stereo = any(x.ndim == 2 for x in parts)          # a plugin plays in stereo
+            a = np.zeros((n, 2) if stereo else n, np.float32)
             for x in parts:
-                a[:len(x)] += x * 0.7
+                a[:len(x)] += (x if x.ndim == 2 or not stereo else x[:, None]) * 0.7
         else:
             a = se.instrument_note(t.get("instrument") or {"id": "grand"}, pitch, vel, 6.0, self._folder)
         g = 10 ** (float(t.get("volume", 0)) / 20)

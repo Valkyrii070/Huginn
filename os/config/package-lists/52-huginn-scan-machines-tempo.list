@@ -19,3 +19,15 @@ swtpm-tools
 python3-scipy
 fluidsynth
 fluid-soundfont-gm
+# Tempo's plugins (LV2, hosted through lilv: apps/huginn_tempo_lv2.py): LSP's studio effects, Calf's (and its
+# synth and organ), x42's, Dragonfly's reverbs, AVL's sampled drum kits and setBfree's tonewheel organ.
+# (ZAM's are left out: 165 MB for effects these already cover.)
+python3-lilv
+# LV2's own descriptions (what a reverb, an instrument, an analyser is): Ubuntu has them only in lv2-dev (1 MB).
+lv2-dev
+lsp-plugins-lv2
+calf-plugins
+x42-plugins
+dragonfly-reverb-lv2
+avldrums.lv2
+setbfree

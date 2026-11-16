@@ -21,6 +21,9 @@ GlassWindow {
     property string selSection: ""
     property var laneMenu: null                   // the knob menu for an automation lane: { tid, x, y }
     property bool duckMenu: false
+    property string pluginBrowser: ""             // "effect" while the plugin browser is open
+    property string pluginCat: "All"
+    property var pluginPanel: null                // a plugin's every control and its presets: { tid, index (-1: the instrument), uri, name }
     readonly property var shown: Backend.tracks.filter(function (t) { return !t.hidden })
     readonly property int laneH: rowH + (autoOn ? 30 : 0)
     function rowOf(y) { return win.shown[Math.max(0, Math.min(win.shown.length - 1, Math.floor(y / (win.laneH + 4))))] }
@@ -33,6 +36,29 @@ GlassWindow {
         Repeater { model: chips.items
             Seg { required property var modelData; anchors.verticalCenter: undefined; text: modelData[1]; on: chips.current === String(modelData[0]); onClicked: chips.chosen(String(modelData[0])) } } }
     component Heading: Label { font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true }
+    // one of a plugin's controls: a switch, a list of named values, or a slider (on a log scale where the plugin asks)
+    component PluginKnob: Column {
+        id: pk
+        property var c: ({})
+        property real value: 0
+        signal picked(real v)
+        spacing: 2
+        readonly property bool listed: !!(c.choices && c.choices.length)
+        function frac(v) { if (c.log) return Math.log(Math.max(c.min, v) / c.min) / Math.log(c.max / c.min); return (v - c.min) / Math.max(1e-9, c.max - c.min) }
+        function unfrac(f) { var v = c.log ? c.min * Math.pow(c.max / c.min, f) : c.min + f * (c.max - c.min); return c.integer ? Math.round(v) : v }
+        function shown(v) {
+            if (listed) { for (var i = 0; i < c.choices.length; i++) if (Math.abs(c.choices[i][0] - v) < 1e-4) return c.choices[i][1]; return String(Math.round(v)) }
+            return c.integer ? String(Math.round(v)) : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2) }
+        function step(d) { var ch = c.choices, k = 0; for (var i = 0; i < ch.length; i++) if (Math.abs(ch[i][0] - value) < 1e-4) k = i; k = Math.max(0, Math.min(ch.length - 1, k + d)); picked(ch[k][0]) }
+        Row { visible: !!pk.c.toggle; spacing: 8; height: 24
+            Toggle { anchors.verticalCenter: parent.verticalCenter; on: pk.value > 0.5; onToggled: function (v) { pk.picked(v ? 1 : 0) } }
+            Label { anchors.verticalCenter: parent.verticalCenter; width: pk.width - 52; elide: Text.ElideRight; text: pk.c.name || ""; font.pixelSize: 11 } }
+        Label { visible: !pk.c.toggle; width: pk.width; elide: Text.ElideRight; text: (pk.c.name || "") + (pk.listed ? "" : "  " + pk.shown(pk.value)); font.pixelSize: 10; secondary: true }
+        Row { visible: !pk.c.toggle && pk.listed; spacing: 4; height: 24
+            Seg { text: "‹"; onClicked: pk.step(-1) }
+            Label { anchors.verticalCenter: parent.verticalCenter; width: pk.width - 72; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter; text: pk.listed ? pk.shown(pk.value) : ""; font.pixelSize: 11 }
+            Seg { text: "›"; onClicked: pk.step(1) } }
+        Meter { visible: !pk.c.toggle && !pk.listed; width: pk.width; interactive: true; value: Math.max(0, Math.min(1, pk.frac(pk.value))); onMoved: function (v) { pk.picked(pk.unfrac(v)) } } }
     readonly property var song: Backend.song
     readonly property int bpb: song.sig ? song.sig[0] : 4
     readonly property var selTrack: { var t = Backend.tracks; for (var i = 0; i < t.length; i++) if (t[i].id === Backend.selectedTrack) return t[i]; return null }
@@ -533,6 +559,8 @@ GlassWindow {
                     Label { width: parent.width; elide: Text.ElideRight; text: win.selTrack ? win.selTrack.instName : ""; font.pixelSize: 15; font.weight: Font.DemiBold }
                     Label { text: win.selTrack ? win.selTrack.family : ""; secondary: true; font.pixelSize: 11 }
                     Btn { text: "Change Instrument…"; onClicked: win.drawer = "library" }
+                    Btn { objectName: "instPluginBtn"; visible: !!(win.selTrack && win.selTrack.instrument && win.selTrack.instrument.id === "plugin"); text: "Controls & Presets…"
+                        onClicked: win.pluginPanel = { tid: win.selTrack.id, index: -1, uri: win.selTrack.instrument.uri, name: win.selTrack.instrument.name } }
                     // the sampler: its root note and how it plays
                     Row { visible: parent.sampler; spacing: 4; height: 28
                         Label { anchors.verticalCenter: parent.verticalCenter; text: "Its note"; font.pixelSize: 11; secondary: true }
@@ -604,14 +632,24 @@ GlassWindow {
                 Rectangle { width: 1; height: parent.height - 10; color: Theme.t.islandLine; visible: !!win.selTrack }
                 // the effects, in order
                 Repeater { model: smartPane.fx
-                    Rectangle { id: fxCard; required property var modelData; required property int index; width: 178; height: smartPane.height - 6; radius: 12
+                    Rectangle { id: fxCard; required property var modelData; required property int index; width: modelData.kind === "plugin" ? 232 : 178; height: smartPane.height - 6; radius: 12
                         color: Theme.t.dark ? "#12FFFFFF" : "#08000000"; border.width: 1; border.color: modelData.on ? Qt.rgba(win.hot.r, win.hot.g, win.hot.b, 0.6) : Theme.t.islandLine
                         Row { x: 10; y: 8; spacing: 6
                             Toggle { on: fxCard.modelData.on; onToggled: function (v) { Backend.setEffect(win.selTrack.id, fxCard.index, "on", v) } }
-                            Label { text: fxCard.modelData.name; font.weight: Font.DemiBold; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter } }
+                            Label { text: fxCard.modelData.name; font.weight: Font.DemiBold; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
+                                width: fxCard.width - 86; elide: Text.ElideRight } }
+                        Label { visible: fxCard.modelData.kind === "plugin"; x: 10; y: 32; width: parent.width - 20; elide: Text.ElideRight; font.pixelSize: 10; secondary: true
+                            text: fxCard.modelData.missing ? "Not on this computer: passed through" : [fxCard.modelData.category, fxCard.modelData.author].filter(function (x) { return !!x }).join(" · ") }
                         Pressable { anchors { right: parent.right; rightMargin: 6 } y: 8; width: 22; height: 22; radius: 6; onClicked: Backend.removeEffect(win.selTrack.id, fxCard.index)
                             Glyph { anchors.centerIn: parent; name: "x"; size: 10 } }
-                        Column { x: 10; y: 42; width: parent.width - 20; spacing: 3; opacity: fxCard.modelData.on ? 1 : 0.5
+                        Column { x: 10; y: fxCard.modelData.kind === "plugin" ? 52 : 42; width: parent.width - 20; spacing: 3; opacity: fxCard.modelData.on ? 1 : 0.5
+                            // a plugin: its first controls here, all of them (and its presets) a click away
+                            Repeater { model: fxCard.modelData.kind === "plugin" && !fxCard.modelData.missing
+                                              ? Backend.pluginControls(fxCard.modelData.uri).slice(0, Math.max(1, Math.floor((fxCard.height - 110) / 42))) : []
+                                PluginKnob { required property var modelData; width: parent.width; c: modelData; value: fxCard.modelData.params[modelData.symbol]
+                                    onPicked: function (v) { Backend.setPluginParam(win.selTrack.id, fxCard.index, modelData.symbol, v) } } }
+                            Seg { objectName: "pluginMore"; visible: fxCard.modelData.kind === "plugin" && !fxCard.modelData.missing; anchors.verticalCenter: undefined; text: "All Controls & Presets…"
+                                onClicked: win.pluginPanel = { tid: win.selTrack.id, index: fxCard.index, uri: fxCard.modelData.uri, name: fxCard.modelData.name } }
                             Repeater { model: ({ eq: [["low", "Low", -12, 12], ["mid", "Middle", -12, 12], ["high", "High", -12, 12]], comp: [["threshold", "Threshold", -48, 0], ["ratio", "Ratio", 1, 12], ["makeup", "Make-up", 0, 18]],
                                                  drive: [["amount", "Amount", 0, 1], ["tone", "Tone", 0, 1]], chorus: [["rate", "Speed", 0.1, 3], ["depth", "Depth", 0, 1], ["mix", "Mix", 0, 1]],
                                                  delay: [["feedback", "Repeats", 0, 0.9], ["mix", "Mix", 0, 1]], filter: [["cutoff", "Cutoff", 100, 12000], ["res", "Resonance", 0.5, 8]] })[fxCard.modelData.kind] || []
@@ -630,6 +668,9 @@ GlassWindow {
                                         onClicked: Backend.setEffect(win.selTrack.id, fxCard.index, "time", modelData[0]) } } } } } }
                 Column { visible: !!win.selTrack; width: 120; spacing: 4
                     Label { text: "ADD AN EFFECT"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true }
+                    Seg { objectName: "addPlugin"; visible: Backend.pluginState !== "none"; anchors.verticalCenter: undefined; on: true
+                        text: Backend.pluginState === "finding" ? "Finding plugins…" : "+ Plugin…"
+                        tip: "Effects installed on this computer (LV2)"; onClicked: if (Backend.pluginState === "ready") win.pluginBrowser = "effect" }
                     Repeater { model: Backend.effectKinds
                         Seg { required property var modelData; anchors.verticalCenter: undefined; text: "+ " + modelData.name; onClicked: Backend.addEffect(win.selTrack.id, modelData.id) } } } } }
 
@@ -724,12 +765,12 @@ GlassWindow {
                 text: "<b>Sampler</b>: drop any sound here and play it across the keys, in tune." }
             DropArea { id: libDrop; anchors.fill: parent; keys: ["text/uri-list"]; onDropped: function (d) { if (d.hasUrls) { Backend.makeSampler(win.selTrack ? win.selTrack.id : "", d.urls[0]); d.accept() } } } }
         ListView { id: instList; visible: win.drawer === "library"; x: 10; y: 124; width: parent.width - 20; height: parent.height - 134; clip: true; spacing: 2
-            model: Backend.instruments; section.property: "family"
+            model: Backend.instruments.concat(Backend.pluginInstruments); section.property: "family"
             section.delegate: Label { required property string section; text: section.toUpperCase(); font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true; topPadding: 10; leftPadding: 6 }
             delegate: Pressable { required property var modelData; width: instList.width; height: 36; radius: 9
-                readonly property bool on: win.selTrack && win.selTrack.instrument && win.selTrack.instrument.id === modelData.id
+                readonly property bool on: !!(win.selTrack && win.selTrack.instrument && (modelData.uri ? win.selTrack.instrument.uri === modelData.uri : win.selTrack.instrument.id === modelData.id))
                 color: on ? Qt.rgba(win.hot.r, win.hot.g, win.hot.b, 0.2) : hovered ? Theme.t.hover : "transparent"
-                onClicked: if (win.selTrack) Backend.setInstrument(win.selTrack.id, modelData.id)
+                onClicked: if (win.selTrack) { if (modelData.uri) Backend.usePluginInstrument(win.selTrack.id, modelData.uri); else Backend.setInstrument(win.selTrack.id, modelData.id) }
                 Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: modelData.kit ? "disc" : "music"; size: 14 }
                 Label { x: 34; anchors.verticalCenter: parent.verticalCenter; text: modelData.name; font.pixelSize: 12 } } } }
 
@@ -744,6 +785,65 @@ GlassWindow {
                 onClicked: { Backend.setTrack(win.laneMenu.tid, "lane", modelData.param); win.laneMenu = null }
                 Label { x: 8; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 30; elide: Text.ElideRight; text: modelData.name; font.pixelSize: 11 }
                 Rectangle { visible: modelData.drawn; anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter } width: 6; height: 6; radius: 3; color: win.hot } } } }
+
+    // ---- plugins: the browser (effects installed on the computer) and a plugin's every control with its presets
+    Item { anchors.fill: parent; z: 36; visible: win.pluginBrowser !== ""
+        Rectangle { anchors.fill: parent; radius: win.r; color: "#55000000"; MouseArea { anchors.fill: parent; onClicked: win.pluginBrowser = "" } }
+        Rectangle { id: browser; objectName: "pluginBrowser"; anchors.centerIn: parent; width: Math.min(parent.width - 80, 640); height: Math.min(parent.height - 80, 560); radius: 18
+            color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
+            MouseArea { anchors.fill: parent }
+            readonly property var all: Backend.plugins.filter(function (d) { return d.kind === "effect" })
+            readonly property var cats: { var n = {}; all.forEach(function (d) { n[d.category] = (n[d.category] || 0) + 1 })
+                return Object.keys(n).sort(function (a, b) { return n[b] - n[a] }).slice(0, 12) }
+            readonly property var shown: { var q = pq.text.toLowerCase()
+                return all.filter(function (d) { return (win.pluginCat === "All" || d.category === win.pluginCat) && (!q || (d.name + " " + d.author + " " + d.category).toLowerCase().indexOf(q) >= 0) }) }
+            Label { x: 22; y: 18; text: "Add a plugin"; font.pixelSize: 17; font.weight: Font.DemiBold }
+            Label { x: 22; y: 42; text: browser.all.length + " effects on this computer"; font.pixelSize: 11; secondary: true }
+            Pressable { anchors { right: parent.right; rightMargin: 14 } y: 14; width: 28; height: 28; radius: 8; onClicked: win.pluginBrowser = ""
+                Glyph { anchors.centerIn: parent; name: "x"; size: 12 } }
+            TextBox { id: pq; objectName: "pluginSearch"; x: 22; y: 68; width: parent.width - 44; placeholder: "Search by name, maker or kind (reverb, compressor, EQ…)" }
+            Chips { x: 22; y: 108; width: parent.width - 44; items: [["All", "All"]].concat(browser.cats.map(function (c) { return [c, c] })); current: win.pluginCat
+                onChosen: function (id) { win.pluginCat = id } }
+            ListView { id: plist; objectName: "pluginList"; x: 14; y: 180; width: parent.width - 28; height: parent.height - 194; clip: true; spacing: 2; model: browser.shown
+                delegate: Pressable { required property var modelData; width: plist.width; height: 40; radius: 9; color: hovered ? Theme.t.hover : "transparent"
+                    onClicked: { Backend.addPlugin(win.selTrack ? win.selTrack.id : "master", modelData.uri); win.pluginBrowser = "" }
+                    Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: "sliders"; size: 14 }
+                    Column { x: 34; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 44
+                        Label { width: parent.width; elide: Text.ElideRight; text: modelData.name; font.pixelSize: 12; font.weight: Font.DemiBold }
+                        Label { width: parent.width; elide: Text.ElideRight; text: [modelData.category, modelData.author].filter(function (x) { return !!x }).join(" · "); font.pixelSize: 10; secondary: true } } }
+                Label { anchors.centerIn: parent; visible: plist.count === 0; text: "Nothing by that name"; secondary: true } } } }
+    Item { anchors.fill: parent; z: 37; visible: win.pluginPanel !== null
+        Rectangle { anchors.fill: parent; radius: win.r; color: "#55000000"; MouseArea { anchors.fill: parent; onClicked: win.pluginPanel = null } }
+        Rectangle { id: panel; objectName: "pluginPanel"; anchors.centerIn: parent; width: Math.min(parent.width - 60, 860); height: Math.min(parent.height - 60, 620); radius: 18
+            color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
+            MouseArea { anchors.fill: parent }
+            readonly property var pp: win.pluginPanel || ({})
+            readonly property var ctrls: win.pluginPanel ? Backend.pluginControls(pp.uri) : []
+            readonly property var presets: win.pluginPanel ? Backend.pluginPresets(pp.uri) : []
+            property var vals: ({})
+            property string preset: ""
+            function refresh() { vals = win.pluginPanel ? Backend.pluginValues(pp.tid, pp.index) : ({}); preset = win.pluginPanel ? Backend.pluginPreset(pp.tid, pp.index) : "" }
+            onPpChanged: refresh()
+            Connections { target: Backend; function onChanged() { if (win.pluginPanel) panel.refresh() } }
+            Label { x: 22; y: 18; width: parent.width - 80; elide: Text.ElideRight; text: panel.pp.name || ""; font.pixelSize: 17; font.weight: Font.DemiBold }
+            Label { x: 22; y: 42; text: panel.ctrls.length + " controls" + (panel.presets.length ? " · " + panel.presets.length + " presets" : ""); font.pixelSize: 11; secondary: true }
+            Pressable { anchors { right: parent.right; rightMargin: 14 } y: 14; width: 28; height: 28; radius: 8; onClicked: win.pluginPanel = null
+                Glyph { anchors.centerIn: parent; name: "x"; size: 12 } }
+            // presets down the side
+            ListView { id: presetList; objectName: "presetList"; visible: panel.presets.length > 0; x: 14; y: 70; width: 190; height: parent.height - 84; clip: true; spacing: 2
+                model: panel.presets
+                header: Heading { text: "PRESETS"; leftPadding: 8; bottomPadding: 6 }
+                delegate: Pressable { required property var modelData; width: presetList.width; height: 30; radius: 8
+                    color: panel.preset === modelData ? Qt.rgba(win.hot.r, win.hot.g, win.hot.b, 0.22) : hovered ? Theme.t.hover : "transparent"
+                    onClicked: Backend.applyPluginPreset(panel.pp.tid, panel.pp.index, modelData)
+                    Label { x: 8; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 16; elide: Text.ElideRight; text: modelData; font.pixelSize: 11 } } }
+            TextBox { id: cq; objectName: "controlSearch"; x: presetList.visible ? 218 : 22; y: 70; width: parent.width - x - 22; placeholder: "Find a control" }
+            GridView { id: cgrid; objectName: "controlGrid"; x: cq.x; y: 112; width: parent.width - x - 14; height: parent.height - 126; clip: true
+                cellWidth: Math.floor(width / Math.max(1, Math.floor(width / 200))); cellHeight: 54
+                model: { var q = cq.text.toLowerCase(); return panel.ctrls.filter(function (c) { return !q || c.name.toLowerCase().indexOf(q) >= 0 }) }
+                delegate: Item { required property var modelData; width: cgrid.cellWidth; height: cgrid.cellHeight
+                    PluginKnob { width: parent.width - 16; c: parent.modelData; value: panel.vals[parent.modelData.symbol] !== undefined ? panel.vals[parent.modelData.symbol] : parent.modelData.default
+                        onPicked: function (v) { Backend.setPluginParam(panel.pp.tid, panel.pp.index, parent.modelData.symbol, v) } } } } } }
 
     Toast { id: toast; z: 50; anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 30 } }
 
