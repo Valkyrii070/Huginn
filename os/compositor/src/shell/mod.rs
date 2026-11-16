@@ -21,7 +21,7 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_output, wl_surface::WlSurface},
         },
     },
-    utils::{IsAlive, Logical, Point, Rectangle, Size},
+    utils::{IsAlive, Logical, Point, Rectangle},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -445,16 +445,15 @@ fn place_new_window(
 }
 
 pub fn fixup_positions(space: &mut Space<WindowElement>, pointer_location: Point<f64, Logical>) {
-    // fixup outputs
-    let mut offset = Point::<i32, Logical>::from((0, 0));
-    for output in space.outputs().cloned().collect::<Vec<_>>().into_iter() {
-        let size = space
-            .output_geometry(&output)
-            .map(|geo| geo.size)
-            .unwrap_or_else(|| Size::from((0, 0)));
-        space.map_output(&output, offset);
+    // fixup outputs: each where it was put (Settings › Displays), moved so that none is above or left of 0,0
+    let outputs: Vec<_> = space.outputs().cloned().collect();
+    let x0 = outputs.iter().map(|o| o.current_location().x).min().unwrap_or(0);
+    let y0 = outputs.iter().map(|o| o.current_location().y).min().unwrap_or(0);
+    for output in outputs {
+        let loc = output.current_location() - Point::from((x0, y0));
+        output.change_current_state(None, None, None, Some(loc));
+        space.map_output(&output, loc);
         layer_map_for_output(&output).arrange();
-        offset.x += size.w;
     }
 
     // fixup windows

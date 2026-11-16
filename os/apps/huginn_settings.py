@@ -4,7 +4,7 @@ Each page talks to the tool the system already uses for that job, so a change ma
 tool would make, and a change made elsewhere shows up here:
 
     Wi-Fi & Network      NetworkManager (nmcli)              Bluetooth          BlueZ (bluetoothctl)
-    Displays             KWin through kscreen-doctor          Night light        KWin's own setting (kwinrc)
+    Displays             kscreen-doctor, or Huginn's compositor   Night light        kwinrc (KWin, or huginn_sessiond)
     Sound                PipeWire through pactl               Battery & Power    UPower, power-profiles-daemon, Huginn's session daemon
     Keyboard & Mouse     KWin's input devices (D-Bus), kcminputrc, kxkbrc
     Date & Time          systemd's timedated (timedatectl)    Language           plasma-localerc (your account)
@@ -382,6 +382,18 @@ def best_mode(modes: list, w: int, h: int, hz: float = None) -> str:
     return max(fit, key=lambda m: m["hz"])["id"]
 
 
+def own_compositor(method: str, args: tuple = (), sig: str = ""):
+    """Ask Huginn's own compositor (org.huginn.Compositor): its answer, or None when it isn't the one running."""
+    try:
+        from gi.repository import Gio, GLib
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        res = bus.call_sync("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", method,
+                            GLib.Variant(sig, args) if sig else None, None, 0, 6000, None)
+        return res.unpack()[0] if res and res.n_children() else ""
+    except Exception:                                      # noqa: BLE001  (KWin's session, or no bus)
+        return None
+
+
 def load_displays() -> dict:
     kwinrc = CONFIG / "kwinrc"
     night = {"on": kconfig_read(kwinrc, ["NightColor"], "Active", "false") == "true",
@@ -389,8 +401,10 @@ def load_displays() -> dict:
              "temp": int(kconfig_read(kwinrc, ["NightColor"], "NightTemperature", "4500") or 4500),
              "from": _hhmm(kconfig_read(kwinrc, ["NightColor"], "EveningBeginFixed", "2000")),
              "to": _hhmm(kconfig_read(kwinrc, ["NightColor"], "MorningBeginFixed", "0600"))}
-    screens = []
-    if HAVE("kscreen-doctor"):
+    screens, own = [], own_compositor("Displays")     # Huginn's own compositor lists them as kscreen-doctor does
+    if own:
+        screens = parse_screens(own)
+    elif HAVE("kscreen-doctor"):
         _, out, _ = RUN(["kscreen-doctor", "-j"])
         screens = parse_screens(out)
     brightness = -1
@@ -401,7 +415,7 @@ def load_displays() -> dict:
                 brightness = int(out.split(",")[3].rstrip("%"))
             except ValueError:
                 pass
-    return {"available": HAVE("kscreen-doctor") is not None, "screens": screens, "night": night, "brightness": brightness}
+    return {"available": bool(own) or HAVE("kscreen-doctor") is not None, "screens": screens, "night": night, "brightness": brightness}
 
 
 def _hhmm(text: str) -> str:
@@ -1414,6 +1428,13 @@ class SystemSettings(QObject):
         return next((s for s in self._state.get("displays", {}).get("screens", []) if s["name"] == name), {})
 
     def _kscreen(self, *changes, what="The display") -> str:
+        if own_compositor("Displays"):                  # Huginn's own compositor: the same changes over the bus
+            for change in changes:
+                _, name, rest = change.split(".", 2)
+                why = own_compositor("ConfigureDisplay", (name, rest), "(ss)")
+                if why:
+                    raise Failed(why)
+            return ""
         must(["kscreen-doctor", *changes], None, 30, what)
         return ""
 

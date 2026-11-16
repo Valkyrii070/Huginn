@@ -11,6 +11,7 @@
 pub mod capture;
 pub mod cursor;
 pub mod dbus;
+pub mod displays;
 pub mod drawing;
 pub mod focus;
 pub mod huginn;

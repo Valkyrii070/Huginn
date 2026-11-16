@@ -646,6 +646,49 @@ class Session(QObject):
         self._battery = QTimer(self, interval=60000, timeout=self.check_battery)
         self._battery.start()
         QTimer.singleShot(3000, self.check_battery)
+        # night light on Huginn's own compositor (KWin keeps its own): every minute, and when Settings changes it
+        self._night_sent = None
+        self._night = QTimer(self, interval=60000, timeout=self.night_light)
+        self._night.start()
+        self._night_watch = QFileSystemWatcher([str(Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"))], self)
+        self._night_watch.directoryChanged.connect(lambda *_: QTimer.singleShot(300, self.night_light))
+        QTimer.singleShot(2500, self.night_light)
+
+    def night_light(self) -> None:
+        """Settings › Displays' night light ([NightColor] in kwinrc, which KWin reads too), as a colour temperature for
+        Huginn's compositor: warm from the evening time to the morning one (\"Automatic\" has no location here, so
+        20:00 to 06:00), easing in and out over half an hour; 6500 K is off."""
+        if not getattr(self, "_compositor", False) or not self.sb:
+            return
+        import configparser
+        rc = configparser.ConfigParser(strict=False, interpolation=None)
+        rc.optionxform = str
+        try:
+            rc.read(Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "kwinrc", encoding="utf-8")
+        except (configparser.Error, OSError):
+            pass
+        night = rc["NightColor"] if rc.has_section("NightColor") else {}
+        kelvin = 6500
+        if night.get("Active", "false") == "true":
+            warm = int(night.get("NightTemperature", "4500") or 4500)
+            mode = night.get("Mode", "Automatic")
+            if mode == "Constant":
+                kelvin = warm
+            else:
+                times = (night.get("EveningBeginFixed", "2000"), night.get("MorningBeginFixed", "0600")) if mode == "Times" else ("2000", "0600")
+                eve, morn = (int(t[:2]) * 60 + int(t[2:4]) for t in (re.sub(r"\D", "", x).zfill(4) for x in times))
+                now = time.localtime()
+                m = now.tm_hour * 60 + now.tm_min
+                after_eve = (m - eve) % 1440            # minutes since the evening began
+                to_morn = (morn - m) % 1440             # minutes until morning
+                night_len = (morn - eve) % 1440
+                if after_eve < night_len:               # it's night
+                    k = min(1.0, after_eve / 30, to_morn / 30)
+                    kelvin = round(6500 - (6500 - warm) * k)
+        if kelvin != self._night_sent:
+            self._night_sent = kelvin
+            self.sb.call("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", "NightLight",
+                         GLib.Variant("(u)", (kelvin,)), timeout=1000)
 
     # ---------------------------------------------------------------- settings
     @Slot()

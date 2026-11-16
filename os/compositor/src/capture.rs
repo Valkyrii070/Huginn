@@ -88,7 +88,7 @@ where
     let Pending { frames, shots } = std::mem::take(&mut *pending(output).borrow_mut());
     let mut with: Option<Shot> = None;
     let mut without: Option<Shot> = None;
-    let mut take = |renderer: &mut R, cursor_too: bool| -> Option<Shot> {
+    let take = |renderer: &mut R, cursor_too: bool| -> Option<Shot> {
         let from = if cursor_too { 0 } else { cursor.min(elements.len()) };
         match draw(renderer, output, &elements[from..], clear) {
             Ok(shot) => Some(shot),

@@ -1079,6 +1079,13 @@ over when the side island would reach them (`GlassWindow.middleX`).
   ext-image-copy-capture, and xdg-desktop-portal-wlr turns that into a PipeWire stream. The own-compositor session
   says `XDG_CURRENT_DESKTOP=Huginn-Own:Huginn:KDE`, so the portal reads `huginn-own-portals.conf`, which sends
   screen sharing there. It shares the first screen; a picker for several screens is still to come.
+- **Settings › Displays on Huginn's own compositor**: resolution, refresh rate, size of things (scale), rotation and
+  where each screen sits. The compositor lists its screens on the bus in kscreen-doctor's JSON and takes the same
+  changes (`displays.rs`), so Settings speaks to it as it does to KWin. Each screen's settings are kept in
+  `~/.config/huginn/displays.json` by make, model and serial number, and come back when it's plugged in again.
+  Turning a screen off and choosing the main screen are still to come there.
+- **Night light** there too: the session daemon reads Settings' night light (kwinrc's [NightColor], as KWin does)
+  and sets every screen's gamma through the compositor, easing in and out over half an hour.
 - Icons: Huginn OS's and the browser's ravens in the same smoked glass as the apps, and Calendar's tile shows
   today's date.
 

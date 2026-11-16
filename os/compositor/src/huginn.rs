@@ -183,6 +183,13 @@ impl<B: Backend + 'static> HuginnState<B> {
             Request::OverviewDo(action) => self.overview_do(&action),
             Request::SpaceDo(action) => self.space_do(&action),
             Request::DockLayout(json) => self.dock_layout(&json),
+            Request::Displays(tx) => {
+                let _ = tx.send(self.displays_json());
+            }
+            Request::ConfigureDisplay(name, change, tx) => {
+                let _ = tx.send(self.configure_display(&name, &change));
+            }
+            Request::NightLight(kelvin) => self.backend_data.set_warmth(crate::displays::warmth(kelvin)),
             Request::Capture(tx) => {
                 let outputs: Vec<_> = self.space.outputs().cloned().collect();
                 if outputs.is_empty() {

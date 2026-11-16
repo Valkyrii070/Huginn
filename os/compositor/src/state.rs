@@ -1267,4 +1267,10 @@ pub trait Backend {
     fn update_led_state(&mut self, led_state: LedState);
     /// Screens off (true) or on again.
     fn set_blank(&mut self, _off: bool) {}
+    /// A screen's resolution and refresh rate (displays.rs).
+    fn set_mode(&mut self, _output: &Output, _mode: smithay::output::Mode) -> Result<(), String> {
+        Err("This screen's resolution can't be changed here.".into())
+    }
+    /// Night light: how much red, green and blue every screen shows (1.0 each: off).
+    fn set_warmth(&mut self, _rgb: [f64; 3]) {}
 }

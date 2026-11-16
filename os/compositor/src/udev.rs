@@ -138,6 +138,9 @@ impl crate::look::Look for UdevRenderer<'_> {
     }
 }
 
+/// The DRM modes a screen offers, to set one by the Wayland mode Settings picked.
+struct DrmModes(Vec<smithay::reexports::drm::control::Mode>);
+
 #[derive(Debug, PartialEq)]
 struct UdevOutputId {
     device_id: DrmNode,
@@ -228,6 +231,46 @@ impl Backend for UdevData {
     fn update_led_state(&mut self, led_state: LedState) {
         for keyboard in self.keyboards.iter_mut() {
             keyboard.led_update(led_state.into());
+        }
+    }
+
+    fn set_mode(&mut self, output: &Output, mode: WlMode) -> Result<(), String> {
+        let id = output.user_data().get::<UdevOutputId>().ok_or("That isn't a screen.")?;
+        let drm_mode = output
+            .user_data()
+            .get::<DrmModes>()
+            .and_then(|m| m.0.iter().find(|d| WlMode::from(**d) == mode).copied())
+            .ok_or("That screen can't show that resolution.")?;
+        let device = self.backends.get_mut(&id.device_id).ok_or("The screen went away.")?;
+        let render_node = device.render_node.unwrap_or(self.primary_gpu);
+        let mut renderer = self.gpus.single_renderer(&render_node).map_err(|e| e.to_string())?;
+        let surface = device.surfaces.get_mut(&id.crtc).ok_or("The screen went away.")?;
+        surface
+            .drm_output
+            .use_mode::<_, OutputRenderElements<UdevRenderer<'_>, WindowRenderElement<UdevRenderer<'_>>>>(
+                drm_mode,
+                &mut renderer,
+                &DrmOutputRenderElements::default(),
+            )
+            .map_err(|e| format!("The screen didn't take that mode ({e})."))
+    }
+
+    fn set_warmth(&mut self, rgb: [f64; 3]) {
+        for device in self.backends.values() {
+            let drm = device.drm_output_manager.device();
+            for crtc in device.surfaces.keys() {
+                let Ok(info) = drm.get_crtc(*crtc) else { continue };
+                let n = info.gamma_length() as usize;
+                if n < 2 {
+                    continue;
+                }
+                let ramp = |k: f64| -> Vec<u16> {
+                    (0..n).map(|i| (i as f64 / (n - 1) as f64 * k * 65535.0).round() as u16).collect()
+                };
+                if let Err(err) = drm.set_gamma(*crtc, &ramp(rgb[0]), &ramp(rgb[1]), &ramp(rgb[2])) {
+                    warn!("Night light: the screen's gamma couldn't be set: {err}");
+                }
+            }
         }
     }
 }
@@ -984,8 +1027,7 @@ impl HuginnState<UdevData> {
                 .position(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
                 .unwrap_or(0);
 
-            let drm_mode = connector.modes()[mode_id];
-            let wl_mode = WlMode::from(drm_mode);
+            let mut drm_mode = connector.modes()[mode_id];
 
             let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
             let output = Output::new(
@@ -998,6 +1040,19 @@ impl HuginnState<UdevData> {
                     serial_number,
                 },
             );
+            // every mode the screen offers (Settings › Displays), and the one it was last set to, if any
+            for m in connector.modes() {
+                output.add_mode(WlMode::from(*m));
+            }
+            if let Some(want) = crate::displays::saved_mode(&output) {
+                if let Some(m) = crate::displays::pick(&output.modes(), want) {
+                    if let Some(d) = connector.modes().iter().find(|d| WlMode::from(**d) == m) {
+                        drm_mode = *d;
+                    }
+                }
+            }
+            output.user_data().insert_if_missing(|| DrmModes(connector.modes().to_vec()));
+            let wl_mode = WlMode::from(drm_mode);
             let global = output.create_global::<HuginnState<UdevData>>(&self.display_handle);
 
             let x = self
@@ -1078,6 +1133,7 @@ impl HuginnState<UdevData> {
                 )
             });
 
+            let restore = output.clone();
             let surface = SurfaceData {
                 dh: self.display_handle.clone(),
                 device_id: node,
@@ -1098,6 +1154,8 @@ impl HuginnState<UdevData> {
             };
 
             device.surfaces.insert(crtc, surface);
+            // its saved rotation, size of things and place (displays.rs)
+            self.restore_display(&restore);
 
             // kick-off rendering
             self.handle.insert_idle(move |state| {

@@ -45,6 +45,12 @@ pub enum Request {
     DockLayout(String),
     /// Pictures of every screen (capture.rs): JSON, [{"path", "w", "h", "x", "y", "lw", "lh"}]
     Capture(mpsc::Sender<String>),
+    /// The screens, as kscreen-doctor -j lists them (displays.rs)
+    Displays(mpsc::Sender<String>),
+    /// One change to one screen ("mode.1920x1080@60000", "scale.1.25"…): "" when done, else why not
+    ConfigureDisplay(String, String, mpsc::Sender<String>),
+    /// Night light: the colour temperature, in kelvin (6500: off)
+    NightLight(u32),
 }
 
 /// What the compositor tells others over the bus.
@@ -155,6 +161,31 @@ impl Compositor {
             return String::new();
         }
         rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default()
+    }
+
+    /// The screens, in kscreen-doctor's JSON (`kscreen-doctor -j`), for Settings › Displays.
+    fn displays(&self) -> String {
+        let (tx, rx) = mpsc::channel();
+        if self.to_loop.send(Request::Displays(tx)).is_err() {
+            return String::new();
+        }
+        rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default()
+    }
+
+    /// One change to one screen, as kscreen-doctor's "output.NAME.CHANGE" without "output.NAME.": "" when done,
+    /// else why not, in words for the person.
+    fn configure_display(&self, name: &str, change: &str) -> String {
+        let (tx, rx) = mpsc::channel();
+        if self.to_loop.send(Request::ConfigureDisplay(name.into(), change.into(), tx)).is_err() {
+            return "The compositor didn't answer.".into();
+        }
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| "The compositor didn't answer.".into())
+    }
+
+    /// Night light: every screen's colour temperature, in kelvin (6500 or more: off). The session daemon sets it
+    /// from Settings' schedule.
+    fn night_light(&self, kelvin: u32) {
+        let _ = self.to_loop.send(Request::NightLight(kelvin));
     }
 
     /// The windows, as JSON: {"current": space, "spaces": [names], "windows": [{"id", "app", "title", "minimised",
