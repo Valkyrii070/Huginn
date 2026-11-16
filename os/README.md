@@ -573,7 +573,7 @@ Four apps are being taken, round by round, to the level of the professional tool
 | Easel | Photoshop, Illustrator | 3 |
 | Code | Xcode, VS Code | 3 |
 | Clips | Final Cut Pro, Premiere, DaVinci Resolve | 3 |
-| Tempo (first called Studio) | Logic Pro, Ableton Live | 1 |
+| Tempo (first called Studio) | Logic Pro, Ableton Live | 2 |
 
 **Tempo, pro pass one** (`apps/huginn_tempo_engine.py`, `apps/huginn_tempo.py`, `apps/qml/Tempo.qml`)
 - *Sections*: Intro, Verse, Chorus markers over the bars. Copy a section after itself, move it, or delete it with its music, and the song closes up; automation goes with it.
@@ -664,6 +664,18 @@ Four apps are being taken, round by round, to the level of the professional tool
     found, to a few cents and where they are, in 0.09 s for 4 s; at 100 % they come out at 60.00, 62.01, 64.00,
     65.00, 67.00, at 50 % half way; one dragged to B3 comes out at 59.00 and the rest as sung; between notes,
     untouched. On screen: finding them, the blobs on the key's lines at 100 %.
+
+- *Mastering assistant* (beside the Mixer): it listens to the whole song and sets the master to it, in one of three
+  characters (Clean, Warm with a soft tape-like curve, Punchy with a slower, firmer compressor) and for where it's
+  going (streaming −14 LUFS, loud −9, podcast −16). Loudness is measured as streaming services do (ITU BS.1770:
+  K-weighted, gated); four bands are moved toward a balanced mix's (at most 4 dB), a nearly mono mix opened a little
+  and a very wide one narrowed, a glue compressor set just under the loud parts, the gain found by running the
+  whole chain and putting it right, and a limiter looking 5 ms ahead keeps every peak under −1 dB. It can be
+  switched off to hear the difference; a new character or loudness is worked out again from the same listening.
+  - Tested (10 checks): a 1 kHz sine at −20 dBFS on both sides reads −20.00 LUFS and on one side −23.01, as the
+    standard says; a dull mix at −23.9 LUFS comes out at −14.0 for streaming, −9.1 loud and −16.0 for a podcast,
+    peaks never past −1.00 dB, its balance nearer the reference (21.1 dB off before, 13.5 after); 1.5 ms a block.
+    On screen: mastering the test song, −18.2 → −14.3 LUFS, what it set.
 
 ## From power-on to the desktop
 

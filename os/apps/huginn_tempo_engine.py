@@ -25,6 +25,9 @@
                     sends stay live), until anything it depends on changes; bouncing puts the same on an audio track
     pitch           a recording's sung notes found (YIN every 10 ms, then split into notes) and put in tune: to the
                     song's key by an amount, or each where it's dragged; each note shifted on its own and crossfaded
+    mastering       the mix listened to (loudness as streaming services measure it, ITU BS.1770; its balance of lows
+                    and highs; its width) and the master set to it: EQ, a gentle glue compressor, width, gain to the
+                    loudness asked for and a limiter that looks ahead, in one of three characters
     plugins         LV2 effects and instruments installed on the computer (huginn_tempo_lv2): an effect like any other
                     on a track, a stack or the master; an instrument drawn a region at a time, with its own tail
     files           WAV, FLAC, MP3, Ogg and AAC out (and stems); Standard MIDI Files in and out
@@ -1427,6 +1430,138 @@ PARAM_NAMES = {"low": "Low", "mid": "Middle", "high": "High", "cut": "Low cut", 
                "amount": "Amount", "tone": "Tone", "mix": "Mix", "rate": "Rate", "depth": "Depth", "feedback": "Feedback", "cutoff": "Cutoff", "res": "Resonance"}
 
 
+# ---- mastering
+# K-weighting at 48 kHz (ITU-R BS.1770): a shelf for the head, then a high-pass
+K_SHELF = (np.array([1.53512485958697, -2.69169618940638, 1.19839281085285]), np.array([1.0, -1.69065929318241, 0.73248077421585]))
+K_HP = (np.array([1.0, -2.0, 1.0]), np.array([1.0, -1.99004745483398, 0.99007225036621]))
+MASTER_BANDS = [("lowshelf", 110.0, 0.7, "Lows"), ("peak", 450.0, 0.8, "Low mids"), ("peak", 3200.0, 0.9, "Presence"), ("highshelf", 10000.0, 0.7, "Air")]
+# a balanced modern mix, each band's level against the whole (dB): falling about 4.5 dB an octave
+BALANCE = [0.0, -3.5, -12.5, -19.0]
+CHARACTERS = {"clean": {"ratio": 1.6, "attack": 0.03, "drive": 0.0}, "warm": {"ratio": 1.8, "attack": 0.03, "drive": 0.35},
+              "punchy": {"ratio": 2.4, "attack": 0.045, "drive": 0.1}}
+TARGETS = {"streaming": -14.0, "loud": -9.0, "podcast": -16.0}
+
+
+def loudness(x: np.ndarray) -> float:
+    """Integrated loudness in LUFS (ITU-R BS.1770: K-weighted, 400 ms blocks overlapping by three quarters, gated at
+    -70 LUFS and 10 LU under the ungated loudness)."""
+    if x.ndim == 1:
+        x = x[:, None]
+    y = lfilter(*K_HP, lfilter(*K_SHELF, x.astype(np.float64), axis=0), axis=0)
+    blk, hop = int(0.4 * SR), int(0.1 * SR)
+    if len(y) < blk:
+        return -70.0
+    sq = np.cumsum(np.concatenate([np.zeros((1, y.shape[1])), y ** 2]), axis=0)
+    starts = np.arange(0, len(y) - blk + 1, hop)
+    z = ((sq[starts + blk] - sq[starts]) / blk).sum(axis=1)
+    lk = -0.691 + 10 * np.log10(np.maximum(z, 1e-12))
+    z = z[lk > -70]
+    if not len(z):
+        return -70.0
+    rel = -0.691 + 10 * np.log10(z.mean()) - 10
+    z = z[(-0.691 + 10 * np.log10(np.maximum(z, 1e-12))) > rel]
+    return float(-0.691 + 10 * np.log10(z.mean())) if len(z) else -70.0
+
+
+def band_levels(x: np.ndarray) -> list:
+    """Each mastering band's level against the whole mix, in dB (from the averaged spectrum)."""
+    mono = (x.mean(axis=1) if x.ndim == 2 else x).astype(np.float64)
+    if len(mono) < 8192:
+        return [0.0] * len(MASTER_BANDS)
+    N = 8192
+    frames = mono[:len(mono) // N * N].reshape(-1, N)
+    loud = frames[np.argsort((frames ** 2).mean(axis=1))[len(frames) // 4:]] if len(frames) > 3 else frames   # the quiet quarter left out
+    spec = (np.abs(np.fft.rfft(loud * np.hanning(N), axis=1)) ** 2).mean(axis=0)
+    f = np.fft.rfftfreq(N, 1 / SR)
+    edges = [(30, 160), (250, 800), (2000, 5000), (8000, 16000)]
+    total = spec[(f >= 30) & (f <= 16000)].sum()
+    return [10 * math.log10(max(spec[(f >= a) & (f < b)].sum(), 1e-20) / max(total, 1e-20)) for a, b in edges]
+
+
+class Mastering:
+    """The master as the assistant set it: EQ, glue compression, width, gain, a little warmth if asked, and a limiter
+    looking 5 ms ahead so nothing passes the ceiling."""
+
+    def __init__(self, m: dict):
+        self.on = bool(m.get("on"))
+        self.eq = [biquad(kind, f, q, float(g)) for (kind, f, q, _n), g in zip(MASTER_BANDS, m.get("eq") or [0, 0, 0, 0])]
+        self.zi = [None] * len(self.eq)
+        ch = CHARACTERS.get(m.get("character", "clean"), CHARACTERS["clean"])
+        self.comp = Compressor({"threshold": float(m.get("threshold", -18)), "ratio": ch["ratio"], "attack": ch["attack"], "release": 0.25})
+        self.width = float(m.get("width", 1.0))
+        self.gain = 10 ** (float(m.get("gain", 0)) / 20)
+        self.drive = ch["drive"]
+        self.ceiling = 10 ** (float(m.get("ceiling", -1.0)) / 20)
+        self.look = int(0.005 * SR)
+        self.buf = np.zeros((self.look, 2), np.float32)
+        self.g = 1.0
+
+    def run(self, x: np.ndarray) -> np.ndarray:
+        if not self.on or not len(x):
+            return x
+        y = x.astype(np.float64)
+        for i, (b, a) in enumerate(self.eq):
+            if self.zi[i] is None:
+                self.zi[i] = np.zeros((2, 2))
+            y, self.zi[i] = lfilter(b, a, y, axis=0, zi=self.zi[i])
+        y = self.comp.run(y.astype(np.float32))
+        if abs(self.width - 1) > 1e-3:
+            mid, side = (y[:, 0] + y[:, 1]) / 2, (y[:, 0] - y[:, 1]) / 2 * self.width
+            y = np.stack([mid + side, mid - side], axis=1)
+        y = y * self.gain
+        if self.drive > 0:                            # warmth: a soft tape-like curve, its level kept
+            d = 1 + 3 * self.drive
+            y = np.tanh(y * d) / np.tanh(d)
+        return self._limit(y.astype(np.float32))
+
+    def _limit(self, y: np.ndarray) -> np.ndarray:
+        """Look ahead 5 ms: the gain comes down before a peak arrives (worked out every 16 samples), and lets go over
+        80 ms. The sound comes out 5 ms late."""
+        z = np.concatenate([self.buf, y])
+        n = len(y)
+        peak = np.abs(z).max(axis=1)
+        need = np.minimum(1.0, self.ceiling / np.maximum(peak, 1e-9))
+        step = 16
+        pts = np.arange(0, n + step, step)
+        g = np.empty(len(pts))
+        rel = 1 - math.exp(-step / (0.08 * SR))
+        cur = self.g
+        for k, i in enumerate(pts):                    # the lowest gain needed in the next 5 ms
+            lo = float(need[min(i, len(need) - 1):min(i + self.look + step, len(need))].min()) if i < len(need) else 1.0
+            cur = lo if lo < cur else cur + (min(1.0, lo) - cur) * rel
+            g[k] = cur
+        self.g = cur
+        gain = np.interp(np.arange(n), pts, g)
+        out = z[:n] * gain[:, None]
+        self.buf = z[n:]
+        return np.clip(out, -self.ceiling, self.ceiling).astype(np.float32)
+
+
+def assist_master(mix: np.ndarray, character: str = "clean", target: str = "streaming") -> dict:
+    """What the mastering assistant sets for a mix: each band toward a balanced mix (at most 4 dB either way), the
+    width brought toward healthy (a mix nearly mono opened a little, a very wide one narrowed), the compressor's
+    threshold just under the mix's loud parts, and the gain that gets the loudness asked for (checked by running it
+    through, then put right)."""
+    levels = band_levels(mix)
+    eq = [round(max(-4.0, min(4.0, (want - got) * 0.6)), 1) for want, got in zip(BALANCE, levels)]
+    mid, side = (mix[:, 0] + mix[:, 1]) / 2, (mix[:, 0] - mix[:, 1]) / 2
+    ratio = float(np.sqrt((side ** 2).mean() / max((mid ** 2).mean(), 1e-12)))
+    width = 1.15 if ratio < 0.08 else 0.9 if ratio > 0.6 else 1.0
+    loud_rms = 20 * math.log10(max(float(np.percentile(np.sqrt((mix.astype(np.float64) ** 2).mean(axis=1)[:len(mix) // 256 * 256].reshape(-1, 256).mean(axis=1)), 90)), 1e-6))
+    m = {"on": True, "character": character, "target": target, "eq": eq, "width": width, "threshold": round(loud_rms - 4, 1), "ceiling": -1.0, "gain": 0.0,
+         "before": round(loudness(mix), 1)}
+    want = TARGETS.get(target, -14.0)
+    for _ in range(3):                                # gain, measured through the whole chain, put right
+        out = Mastering(m).run(mix)
+        got = loudness(out)
+        if got <= -69:
+            break
+        m["gain"] = round(max(-12.0, min(24.0, m["gain"] + (want - got))), 2)
+    m["after"] = round(loudness(Mastering(m).run(mix)), 1)
+    m["bands"] = [round(v, 1) for v in levels]
+    return m
+
+
 def make_effect(fx: dict, tempo: float):
     kind = fx.get("kind")
     if kind == "plugin":
@@ -1520,6 +1655,7 @@ class Mixer:
         self.reverb = Reverb(float(m.get("room", 1.8)), float(m.get("damp", 0.5)))
         self.echo = Delay({"time": float(m.get("echoTime", 0.75)), "feedback": float(m.get("echoFeedback", 0.4)), "mix": 1.0, "pingpong": True}, self.tempo)
         self.master_fx = [(i, f, make_effect(f, self.tempo)) for i, f in enumerate(m.get("effects", [])) if f.get("on", True)]
+        self.mastering = Mastering(m.get("mastering") or {})
         self.lim_gain = 1.0
 
     def seek(self, sample: int) -> None:
@@ -1701,6 +1837,11 @@ class Mixer:
             if fx is not None:
                 mix = fx.run(mix)
         mix *= db(float((self.p.get("master") or {}).get("volume", 0)))
+        if self.mastering.on:                          # the assistant's master, its own limiter last
+            mix = self.mastering.run(mix)
+            self.levels["master"] = float(np.abs(mix).max()) if mix.size else 0.0
+            self.pos += n
+            return mix
         # a limiter that never lets the peak past -0.3 dBFS, easing back over a quarter second
         peak = float(np.abs(mix).max()) if mix.size else 0.0
         target = min(1.0, 0.966 / peak) if peak > 0 else 1.0

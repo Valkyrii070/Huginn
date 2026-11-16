@@ -1894,6 +1894,71 @@ class Tempo(QObject):
             n["t"] = round(n["t"] + (q - n["t"]) * max(0.0, min(1.0, strength)), 4)
         self._keep()
 
+    # ---------------------------------------------------------------- mastering
+    @Slot(str, str)
+    def masterSong(self, character: str, target: str) -> None:
+        """The mastering assistant: listen to the whole mix (in the background) and set the master to it."""
+        if self._p is None or "master" in self._busy:
+            return
+        snap = json.loads(json.dumps(self._p))
+        snap.setdefault("master", {}).pop("mastering", None)      # it listens to the mix as it is, unmastered
+        self._busy.add("master")
+        self.changed.emit()
+        self.said.emit("Listening to your song…", False)
+
+        def work():
+            try:
+                mix = se.render_song(snap, self._folder, tail=1.0)
+                m = se.assist_master(mix, character, target) if len(mix) > se.SR else None
+            except Exception:                                 # noqa: BLE001
+                mix, m = None, None
+
+            def done():
+                self._busy.discard("master")
+                if m is None:
+                    self.said.emit("There's not enough song to master yet.", True)
+                else:
+                    self._master_mix = mix
+                    self._before()
+                    self._p.setdefault("master", {})["mastering"] = m
+                    self._keep()
+                    self.said.emit(f"Mastered: {m['before']} → {m['after']} LUFS.", False)
+                self.changed.emit()
+            self._back.emit(done)
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(str, "QVariant")
+    def setMastering(self, key: str, value) -> None:
+        """On or off (to hear the difference); a new character or loudness is worked out again from the same mix."""
+        m = ((self._p or {}).get("master") or {}).get("mastering")
+        if not m:
+            return
+        value = value.toVariant() if hasattr(value, "toVariant") else value
+        if key == "on":
+            self._before()
+            m["on"] = bool(value)
+            self._keep()
+        elif key in ("character", "target"):
+            if getattr(self, "_master_mix", None) is None:
+                self.masterSong(value if key == "character" else m.get("character", "clean"), value if key == "target" else m.get("target", "streaming"))
+                return
+            fresh = se.assist_master(self._master_mix, value if key == "character" else m.get("character", "clean"),
+                                     value if key == "target" else m.get("target", "streaming"))
+            fresh["on"] = m.get("on", True)
+            self._before()
+            self._p["master"]["mastering"] = fresh
+            self._keep()
+
+    @Slot()
+    def removeMastering(self) -> None:
+        if ((self._p or {}).get("master") or {}).get("mastering"):
+            self._before()
+            self._p["master"].pop("mastering")
+            self._keep()
+
+    masterBands = Property("QVariantList", lambda self: [b[3] for b in se.MASTER_BANDS], constant=True)
+    mastering = Property(bool, lambda self: "master" in self._busy, notify=changed)
+
     # ---------------------------------------------------------------- pitch correction
     @Slot(str)
     def analyzePitch(self, rid: str) -> None:

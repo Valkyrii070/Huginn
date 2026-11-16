@@ -24,6 +24,8 @@ GlassWindow {
     property bool tempoOn: (Backend.song.tempoChanges || []).length > 0 || (Backend.song.sigChanges || []).length > 0   // the Tempo lane
     property int tempoSel: -1                     // the tempo change picked in it
     property string ccKind: "velocity"            // the piano roll's lane: velocity | sustain | bend | mod
+    property string masterChar: "clean"           // the mastering assistant's choices before it has listened
+    property string masterTarget: "streaming"
     readonly property int tracksTop: 98 + (tempoOn ? 54 : 0)
     property string pluginBrowser: ""             // "effect" while the plugin browser is open
     property string pluginCat: "All"
@@ -835,7 +837,39 @@ GlassWindow {
                         Seg { required property var modelData; anchors.verticalCenter: undefined; text: "+ " + modelData.name; onClicked: Backend.addEffect(win.selTrack.id, modelData.id) } } } } }
 
         // ---- the mixer
-        ListView { id: mixer; objectName: "mixerStrips"; visible: win.benchKind === "mixer"; x: 12; y: 46; width: parent.width - 24; height: parent.height - 56; orientation: ListView.Horizontal; spacing: 6; clip: true
+        // the mastering assistant, beside the mixer: it listens to the song and sets the master to it
+        Rectangle { id: masterPane; objectName: "masterPane"; visible: win.benchKind === "mixer"; anchors { right: parent.right; rightMargin: 12 } y: 46; width: 290; height: parent.height - 56; radius: 12
+            color: Theme.t.dark ? "#10FFFFFF" : "#08000000"; border.width: 1; border.color: Theme.t.islandLine
+            readonly property var m: (win.song.master || {}).mastering || null
+            Flickable { anchors.fill: parent; anchors.margins: 1; clip: true; contentHeight: masterCol.height + 20; boundsBehavior: Flickable.StopAtBounds
+            Column { id: masterCol; x: 11; y: 9; width: masterPane.width - 24; spacing: 6
+                Row { spacing: 8; height: 22
+                    Toggle { visible: !!masterPane.m; anchors.verticalCenter: parent.verticalCenter; on: !!masterPane.m && masterPane.m.on; onToggled: function (v) { Backend.setMastering("on", v) } }
+                    Heading { anchors.verticalCenter: parent.verticalCenter; text: "MASTERING" } }
+                Label { visible: !masterPane.m; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 10; secondary: true
+                    text: "Listens to your whole song and sets the master to it: its balance, its width, and as loud as the place it's going wants, never past −1 dB." }
+                Chips { width: parent.width; items: [["clean", "Clean"], ["warm", "Warm"], ["punchy", "Punchy"]]; current: masterPane.m ? masterPane.m.character : win.masterChar
+                    onChosen: function (id) { if (masterPane.m) Backend.setMastering("character", id); else win.masterChar = id } }
+                Chips { width: parent.width; items: [["streaming", "Streaming −14"], ["loud", "Loud −9"], ["podcast", "Podcast −16"]]; current: masterPane.m ? masterPane.m.target : win.masterTarget
+                    onChosen: function (id) { if (masterPane.m) Backend.setMastering("target", id); else win.masterTarget = id } }
+                Btn { objectName: "masterBtn"; visible: !masterPane.m; text: Backend.mastering ? "Listening…" : "Master My Song"; onClicked: if (!Backend.mastering) Backend.masterSong(win.masterChar, win.masterTarget) }
+                Label { visible: !!masterPane.m; font.pixelSize: 12; font.weight: Font.DemiBold
+                    text: masterPane.m ? masterPane.m.before + "  →  " + masterPane.m.after + " LUFS" : "" }
+                // what it set: each band, the width
+                Repeater { model: masterPane.m ? Backend.masterBands : []
+                    Row { required property string modelData; required property int index; spacing: 6; height: 14
+                        Label { anchors.verticalCenter: parent.verticalCenter; width: 70; text: modelData; font.pixelSize: 10; secondary: true }
+                        Item { anchors.verticalCenter: parent.verticalCenter; width: 120; height: 6
+                            Rectangle { anchors.centerIn: parent; width: 1; height: 10; color: Theme.t.text; opacity: 0.3 }
+                            Rectangle { readonly property real g: masterPane.m.eq[index]; height: 6; radius: 3; color: win.hot
+                                width: Math.abs(g) / 4 * 60; x: g >= 0 ? 60 : 60 - width } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: (masterPane.m.eq[index] > 0 ? "+" : "") + masterPane.m.eq[index].toFixed(1) + " dB"; font.pixelSize: 10 } } }
+                Label { visible: !!masterPane.m; font.pixelSize: 10; secondary: true
+                    text: masterPane.m ? "Width " + Math.round(masterPane.m.width * 100) + " %  ·  gain " + (masterPane.m.gain > 0 ? "+" : "") + masterPane.m.gain.toFixed(1) + " dB" : "" }
+                Row { visible: !!masterPane.m; spacing: 4; height: 30
+                    Seg { text: Backend.mastering ? "Listening…" : "Listen Again"; tip: "After changing the song"; onClicked: if (!Backend.mastering) Backend.masterSong(masterPane.m.character, masterPane.m.target) }
+                    Seg { icon: "trash"; danger: true; tip: "Take it off"; onClicked: Backend.removeMastering() } } } } }
+        ListView { id: mixer; objectName: "mixerStrips"; visible: win.benchKind === "mixer"; x: 12; y: 46; width: parent.width - 24 - masterPane.width - 10; height: parent.height - 56; orientation: ListView.Horizontal; spacing: 6; clip: true
             boundsBehavior: Flickable.StopAtBounds
             readonly property var list: Backend.tracks
             model: list.length + 1
