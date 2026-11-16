@@ -1238,3 +1238,164 @@ impl<R: Look> RenderElement<R> for ZoomElement {
         None
     }
 }
+
+// ------------------------------------------------------------------------------------------------------ HDR
+/// HDR on a screen (displays.rs): what's been drawn (sRGB, as every app draws) is turned into the screen's HDR
+/// signal: BT.2020 colours, PQ brightness, SDR white at `sdr` nits. Over everything, in the damaged parts only (the
+/// rest of the framebuffer is converted already).
+const HDR_FRAG: &str = r#"#version 100
+precision highp float;
+uniform sampler2D tex;
+uniform float sdr;
+varying vec2 uv;
+vec3 linear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 pq(vec3 l) {
+    vec3 p = pow(max(l, vec3(0.0)), vec3(0.1593017578125));
+    return pow((0.8359375 + 18.8515625 * p) / (1.0 + 18.6875 * p), vec3(78.84375));
+}
+void main() {
+    vec3 c = linear(texture2D(tex, uv).rgb);
+    mat3 to2020 = mat3(0.6274, 0.0691, 0.0164, 0.3293, 0.9195, 0.0880, 0.0433, 0.0114, 0.8956);
+    gl_FragColor = vec4(pq(to2020 * c * sdr / 10000.0), 1.0);
+}
+"#;
+
+type HdrShared = RefCell<Option<Option<(u32, i32, i32, i32)>>>;
+
+/// (program, tex, sdr, pos)
+fn hdr_program(frame: &mut GlesFrame<'_, '_>) -> Option<(u32, i32, i32, i32)> {
+    let ud = frame.egl_context().user_data();
+    ud.insert_if_missing(|| HdrShared::new(None));
+    if let Some(done) = *ud.get::<HdrShared>().unwrap().borrow() {
+        return done;
+    }
+    let made = frame
+        .with_context(|gl| unsafe {
+            link(gl, HDR_FRAG).map(|(p, tex, _, _, pos)| (p, tex, gl.GetUniformLocation(p, c"sdr".as_ptr()), pos))
+        })
+        .ok()
+        .flatten();
+    if made.is_none() {
+        warn!("no HDR shader on this GPU: HDR stays off");
+    }
+    *frame.egl_context().user_data().get::<HdrShared>().unwrap().borrow_mut() = Some(made);
+    made
+}
+
+#[derive(Debug)]
+pub struct HdrElement {
+    id: Id,
+    whole: Rectangle<i32, Physical>,
+    sdr: f32,
+}
+
+impl HdrElement {
+    /// `id`: the screen's own, kept from frame to frame (only what changed is converted)
+    pub fn new(id: Id, whole: Rectangle<i32, Physical>, sdr: f64) -> Self {
+        Self { id, whole, sdr: sdr as f32 }
+    }
+}
+
+impl Element for HdrElement {
+    fn id(&self) -> &Id {
+        &self.id
+    }
+    fn current_commit(&self) -> CommitCounter {
+        CommitCounter::default()
+    }
+    fn src(&self) -> Rectangle<f64, BufferCoords> {
+        Rectangle::from_size((self.whole.size.w as f64, self.whole.size.h as f64).into())
+    }
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.whole
+    }
+    fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        OpaqueRegions::default()
+    }
+    fn kind(&self) -> Kind {
+        Kind::Unspecified
+    }
+}
+
+impl<R: Look> RenderElement<R> for HdrElement {
+    fn draw(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        _src: Rectangle<f64, BufferCoords>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        _opaque_regions: &[Rectangle<i32, Physical>],
+        _cache: Option<&UserDataMap>,
+    ) -> Result<(), R::Error> {
+        let gles = R::gles_frame(frame);
+        if damage.is_empty() || !gles.capabilities().contains(&Capability::Blit) {
+            return Ok(());
+        }
+        let Some(p) = hdr_program(gles) else { return Ok(()) };
+        let Some(to) = to_gl(gles, self.whole.to_f64()) else { return Ok(()) };
+        let rects: Vec<[f32; 4]> = damage
+            .iter()
+            .filter_map(|d| to_gl(gles, Rectangle::new(d.loc + dst.loc, d.size).to_f64()))
+            .collect();
+        let instancing = gles.capabilities().contains(&Capability::Instancing);
+        let sdr = self.sdr;
+        gles.with_context(|gl| unsafe {
+            let (tx, ty, tw, th) = (to[0] as i32, to[1] as i32, to[2] as i32, to[3] as i32);
+            let mut fbo = 0;
+            gl.GetIntegerv(ffi::FRAMEBUFFER_BINDING, &mut fbo);
+            let mut vp = [0i32; 4];
+            gl.GetIntegerv(ffi::VIEWPORT, vp.as_mut_ptr());
+            let mut prog = 0;
+            gl.GetIntegerv(ffi::CURRENT_PROGRAM, &mut prog);
+            let mut abuf = 0;
+            gl.GetIntegerv(ffi::ARRAY_BUFFER_BINDING, &mut abuf);
+            let blend = gl.IsEnabled(ffi::BLEND) == ffi::TRUE;
+            let scissor = gl.IsEnabled(ffi::SCISSOR_TEST) == ffi::TRUE;
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            // what's there now, copied (a framebuffer can't be read while drawn to)
+            let copy = level(gl, tw.max(1), th.max(1));
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, fbo as u32);
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, copy.fbo);
+            gl.BlitFramebuffer(tx, ty, tx + tw, ty + th, 0, 0, tw, th, ffi::COLOR_BUFFER_BIT, ffi::NEAREST);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo as u32);
+            gl.Viewport(tx, ty, tw, th);
+            gl.Disable(ffi::BLEND);
+            gl.Enable(ffi::SCISSOR_TEST);
+            gl.UseProgram(p.0);
+            gl.BindTexture(ffi::TEXTURE_2D, copy.tex);
+            gl.Uniform1i(p.1, 0);
+            gl.Uniform1f(p.2, sdr);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            let pos = p.3 as u32;
+            gl.EnableVertexAttribArray(pos);
+            if instancing {
+                gl.VertexAttribDivisor(pos, 0);
+            }
+            gl.VertexAttribPointer(pos, 2, ffi::FLOAT, ffi::FALSE, 0, QUAD.as_ptr() as *const _);
+            for r in &rects {
+                gl.Scissor(r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32 + 1, r[3].ceil() as i32 + 1);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+            gl.DisableVertexAttribArray(pos);
+            gl.DeleteFramebuffers(1, &copy.fbo);
+            gl.DeleteTextures(1, &copy.tex);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+            gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
+            gl.UseProgram(prog as u32);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, abuf as u32);
+            if blend {
+                gl.Enable(ffi::BLEND);
+                gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+            }
+            if !scissor {
+                gl.Disable(ffi::SCISSOR_TEST);
+            }
+        })
+        .map_err(R::gles_error)
+    }
+
+    fn underlying_storage(&self, _renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
+        None
+    }
+}

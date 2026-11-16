@@ -366,6 +366,9 @@ def parse_screens(text: str) -> list:
                     "primary": int(o.get("priority", 0) or 0) == 1 or bool(o.get("primary")), "scale": float(o.get("scale", 1) or 1),
                     "rotation": rot, "x": int(pos.get("x", 0)), "y": int(pos.get("y", 0)), "w": cur["w"], "h": cur["h"], "hz": cur["hz"],
                     "modeId": cur["id"], "resolution": f"{cur['w']}x{cur['h']}",
+                    # HDR: KWin's kscreen-doctor says so in its capabilities (8: high dynamic range), Huginn's in hdrCapable
+                    "hdrCapable": bool(o.get("hdrCapable")) or bool(int(o.get("capabilities", 0) or 0) & 8),
+                    "hdr": bool(o.get("hdr")), "sdr": int(o.get("sdr-brightness", 203) or 203),
                     "resolutions": [{"id": f"{w}x{h}", "label": f"{w} × {h}"} for w, h in sizes],
                     "rates": [{"id": str(r), "label": f"{r:g} Hz"} for r in rates], "modes": modes,
                     "label": "Built-in screen" if name.startswith(("eDP", "LVDS", "DSI")) else name.replace("-", " ")})
@@ -1467,6 +1470,16 @@ class SystemSettings(QObject):
     def setRotation(self, name: str, rotation: str) -> None:
         self._act("displays", lambda: self._kscreen(f"output.{name}.rotation.{rotation}", what="Turning the picture"),
                   demo_change=lambda s: [x.update(rotation=rotation) for x in s["screens"] if x["name"] == name])
+
+    @Slot(str, bool)
+    def setHdr(self, name: str, on: bool) -> None:
+        self._act("displays", lambda: self._kscreen(f"output.{name}.hdr.{'enable' if on else 'disable'}", what="Turning HDR " + ("on" if on else "off")),
+                  demo_change=lambda s: [x.update(hdr=on) for x in s["screens"] if x["name"] == name])
+
+    @Slot(str, int)
+    def setSdr(self, name: str, nits: int) -> None:
+        self._act("displays", lambda: self._kscreen(f"output.{name}.sdr-brightness.{max(80, min(500, nits))}", what="Changing SDR brightness"),
+                  demo_change=lambda s: [x.update(sdr=nits) for x in s["screens"] if x["name"] == name])
 
     @Slot(str, bool)
     def setScreenOn(self, name: str, on: bool) -> None:

@@ -794,6 +794,7 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
         let output_capture_source_state = OutputCaptureSourceState::new::<Self>(&dh);
         let image_copy_capture_state = ImageCopyCaptureState::new::<Self>(&dh);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
+        crate::tearing::init::<BackendData>(&dh);
         let toplevel_capture_source_state = ToplevelCaptureSourceState::new::<Self>(&dh);
 
         // init input
@@ -1316,6 +1317,14 @@ pub trait Backend {
     }
     /// Night light: how much red, green and blue every screen shows (1.0 each: off).
     fn set_warmth(&mut self, _rgb: [f64; 3]) {}
+    /// HDR on a screen (displays.rs): the connection set to BT.2020 and PQ, with HDR metadata, 10 bits a colour.
+    fn set_hdr(&mut self, _output: &Output, _on: bool) -> Result<(), String> {
+        Err("HDR needs a real screen.".into())
+    }
+    /// Whether the screen's connection can carry HDR (the driver offers HDR metadata and a colour space for it).
+    fn hdr_capable(&self, _output: &Output) -> bool {
+        false
+    }
     /// A colour filter over every screen (access.rs).
     fn set_filter(&mut self, _filter: &crate::access::Filter) {}
     /// Mice and touchpads, as Settings lists them (input.rs).

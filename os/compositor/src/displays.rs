@@ -50,6 +50,22 @@ pub fn key(output: &Output) -> String {
     }
 }
 
+/// HDR on a screen: SDR white's brightness in nits while it's on (look.rs: HdrElement), and the element's id.
+pub struct Hdr {
+    pub sdr: std::cell::Cell<Option<f64>>,
+    pub id: smithay::backend::renderer::element::Id,
+}
+
+pub fn hdr_of(output: &Output) -> &Hdr {
+    output.user_data().insert_if_missing(|| Hdr { sdr: std::cell::Cell::new(None), id: smithay::backend::renderer::element::Id::new() });
+    output.user_data().get::<Hdr>().unwrap()
+}
+
+/// SDR white in nits while HDR is on, else None.
+pub fn hdr_sdr(output: &Output) -> Option<f64> {
+    hdr_of(output).sdr.get()
+}
+
 /// The main screen (the top bar and dock's), by its connector name, if one was chosen.
 pub fn main_name() -> Option<String> {
     load().get("_main").and_then(|v| v.as_str()).map(String::from)
@@ -84,6 +100,7 @@ fn remember(output: &Output) {
     all[key(output)] = json!({
         "w": mode.map(|m| m.size.w), "h": mode.map(|m| m.size.h), "mhz": mode.map(|m| m.refresh),
         "scale": output.current_scale().fractional_scale(), "rotation": rot, "x": loc.x, "y": loc.y,
+        "hdr": hdr_sdr(output).is_some(), "sdr": hdr_sdr(output).unwrap_or(203.0),
     });
     save(&all);
 }
@@ -173,6 +190,12 @@ impl<B: Backend + 'static> HuginnState<B> {
             self.space.map_output(output, loc);
         }
         self.xwayland_rescale();
+        if s.get("hdr").and_then(|v| v.as_bool()) == Some(true) && self.backend_data.hdr_capable(output) {
+            let sdr = s.get("sdr").and_then(|v| v.as_f64()).unwrap_or(203.0).clamp(80.0, 500.0);
+            if self.backend_data.set_hdr(output, true).is_ok() {
+                hdr_of(output).sdr.set(Some(sdr));
+            }
+        }
     }
 
     /// The screens, as `kscreen-doctor -j` lists them (those turned off too).
@@ -203,6 +226,8 @@ impl<B: Backend + 'static> HuginnState<B> {
                     "scale": o.current_scale().fractional_scale(),
                     "rotation": ROTATIONS.iter().find(|r| r.0 == o.current_transform()).map_or(1, |r| r.1),
                     "pos": {"x": loc.x, "y": loc.y},
+                    "hdr": hdr_sdr(o).is_some(), "sdr-brightness": hdr_sdr(o).unwrap_or(203.0).round() as i64,
+                    "hdrCapable": self.backend_data.hdr_capable(o),
                 })
             })
             .collect();
@@ -262,6 +287,32 @@ impl<B: Backend + 'static> HuginnState<B> {
                 save(&all);
                 return String::new();
             }
+            // HDR (kscreen-doctor's "hdr.enable", "hdr.disable", "sdr-brightness.N")
+            "hdr" => {
+                let on = value == "enable";
+                if on && !self.backend_data.hdr_capable(&output) {
+                    return "This screen (or its connection) can't show HDR.".into();
+                }
+                if let Err(why) = self.backend_data.set_hdr(&output, on) {
+                    return why;
+                }
+                let sdr = saved(&output).and_then(|s| s.get("sdr").and_then(|v| v.as_f64())).unwrap_or(203.0);
+                hdr_of(&output).sdr.set(on.then_some(sdr));
+                self.backend_data.reset_buffers(&output);
+            }
+            "sdr-brightness" => match value.parse::<f64>() {
+                Ok(nits) if (80.0..=500.0).contains(&nits) => {
+                    if hdr_sdr(&output).is_some() {
+                        hdr_of(&output).sdr.set(Some(nits));
+                    }
+                    let mut all = load();
+                    all[key(&output)]["sdr"] = json!(nits);
+                    save(&all);
+                    self.backend_data.reset_buffers(&output);
+                    return String::new();
+                }
+                _ => return "That isn't a brightness for SDR white.".into(),
+            },
             "disable" => {
                 if self.space.outputs().count() <= 1 {
                     return "That's the only screen that's on, so it stays on.".into();

@@ -844,6 +844,9 @@ impl<B: Backend + 'static> HuginnState<B> {
                 self.xwayland_rescale();
             }
         }
+        if let Some(t) = v.get("tearing").and_then(|x| x.as_bool()) {
+            crate::tearing::ALLOWED.store(t, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(s) = v.get("vrr").and_then(|x| x.as_str()) {
             crate::look::NO_VRR.store(s == "off", std::sync::atomic::Ordering::Relaxed);
         }

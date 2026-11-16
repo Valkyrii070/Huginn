@@ -67,6 +67,7 @@ smithay::backend::renderer::element::render_elements! {
     Frosted=Frosted<WaylandSurfaceRenderElement<R>>,
     Zoom=crate::look::ZoomElement,
     Ghost=RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
+    Hdr=crate::look::HdrElement,
 }
 
 impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
@@ -83,6 +84,7 @@ impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
             Self::Frosted(arg0) => f.debug_tuple("Frosted").field(arg0).finish(),
             Self::Zoom(arg0) => f.debug_tuple("Zoom").field(arg0).finish(),
             Self::Ghost(arg0) => f.debug_tuple("Ghost").field(arg0).finish(),
+            Self::Hdr(arg0) => f.debug_tuple("Hdr").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }
@@ -405,7 +407,12 @@ where
     R: Look,
     R::TextureId: Clone + Send + 'static,
 {
-    let (elements, clear_color) =
+    let (mut elements, clear_color) =
         output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);
+    // HUGINN_DEBUG_HDR (in a window): the HDR conversion drawn as on an HDR screen, to see that it runs
+    if std::env::var_os("HUGINN_DEBUG_HDR").is_some() {
+        let size = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
+        elements.insert(0, OutputRenderElements::Hdr(crate::look::HdrElement::new(crate::displays::hdr_of(output).id.clone(), Rectangle::from_size(size), 203.0)));
+    }
     damage_tracker.render_output(renderer, framebuffer, age, &elements, clear_color)
 }

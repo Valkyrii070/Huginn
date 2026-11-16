@@ -1127,8 +1127,15 @@ over when the side island would reach them (`GlassWindow.middleX`).
   turned off.
 - **Screen sharing that doesn't drop**: xdg-desktop-portal-wlr 0.9.0 is built from `third_party/` (MIT) in place of
   Ubuntu's 0.8.1, whose frames could outlive their buffers when a viewer restarted the stream.
-- Not there yet, and why: tearing for games (Smithay can't flip asynchronously yet) and HDR (no colour pipeline
-  yet) wait on Smithay.
+- **Tearing for games** (Settings › Desktop & Dock, "Let games tear"): a game that asks for it (wp-tearing-control,
+  as with V-Sync off) gets page flips that don't wait for the refresh while it fills the screen. Smithay is vendored
+  in `third_party/smithay` with that one patch (`AtomicDrmSurface::set_tearing`: an async atomic flip first, a
+  normal one when the driver refuses).
+- **HDR** (Settings › Displays, on screens whose connection offers it): the connection is set to BT.2020 and PQ
+  with HDR metadata and 10 bits a colour, and everything drawn (sRGB, as every app draws) is turned into the HDR
+  signal by a last pass (`look.rs`: HdrElement), with SDR white at a brightness of your choosing. Apps can't send
+  HDR pictures of their own yet (that needs the colour-management protocol); `HUGINN_DEBUG_HDR=1` shows the pass in
+  a window.
 
 ## Huginn, the browser
 

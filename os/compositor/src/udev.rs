@@ -273,6 +273,62 @@ impl Backend for UdevData {
         self.colour();
     }
 
+    fn hdr_capable(&self, output: &Output) -> bool {
+        self.connector_props(output).is_some_and(|(_, props)| {
+            props.iter().any(|(n, _)| n == "HDR_OUTPUT_METADATA") && props.iter().any(|(n, _)| n == "Colorspace")
+        })
+    }
+
+    fn set_hdr(&mut self, output: &Output, on: bool) -> Result<(), String> {
+        use smithay::reexports::drm::control::{Device as _, property};
+        let (conn, props) = self.connector_props(output).ok_or("That screen isn't connected.")?;
+        let id = output.user_data().get::<UdevOutputId>().ok_or("That isn't a screen.")?;
+        let device = self.backends.get(&id.device_id).ok_or("The screen went away.")?;
+        let drm = device.drm_output_manager.device();
+        let find = |name: &str| props.iter().find(|(n, _)| n == name).map(|(_, h)| *h);
+        // the colour space: BT.2020 for HDR, the driver's default otherwise
+        let colorspace = find("Colorspace").ok_or("This connection has no colour space to set.")?;
+        let info = drm.get_property(colorspace).map_err(|e| e.to_string())?;
+        let want = if on { "BT2020_RGB" } else { "Default" };
+        let value = match info.value_type() {
+            property::ValueType::Enum(e) => e.values().1.iter().find(|v| v.name().to_str() == Ok(want)).map(|v| v.value()),
+            _ => None,
+        }
+        .ok_or("This connection can't carry BT.2020 colours.")?;
+        // HDR metadata (hdr_output_metadata): PQ, BT.2020 primaries, D65, 1000 nits peak (what most HDR screens take)
+        let blob = if on {
+            let mut m = [0u8; 32];
+            let put = |m: &mut [u8; 32], at: usize, v: u16| m[at..at + 2].copy_from_slice(&v.to_le_bytes());
+            // u32 metadata_type = 0 (static, type 1); then the infoframe: eotf 2 (SMPTE ST 2084), type 0
+            m[4] = 2;
+            m[5] = 0;
+            for (i, (x, y)) in [(35400u16, 14600u16), (8500, 39850), (6550, 2300)].iter().enumerate() {
+                put(&mut m, 6 + i * 4, *x);
+                put(&mut m, 8 + i * 4, *y);
+            }
+            put(&mut m, 18, 15635); // white point x, y (0.00002 units)
+            put(&mut m, 20, 16450);
+            put(&mut m, 22, 1000); // max mastering luminance, nits
+            put(&mut m, 24, 50); // min, 0.0001 nits
+            put(&mut m, 26, 1000); // max content light level
+            put(&mut m, 28, 400); // max frame-average light level
+            match drm.create_property_blob(&m).map_err(|e| e.to_string())? {
+                property::Value::Blob(b) => b,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        if let Some(bpc) = find("max bpc") {
+            let _ = drm.set_property(conn, bpc, if on { 10 } else { 8 });
+        }
+        drm.set_property(conn, colorspace, value).map_err(|e| format!("The screen didn't take the colour space ({e})."))?;
+        if let Some(meta) = find("HDR_OUTPUT_METADATA") {
+            drm.set_property(conn, meta, blob).map_err(|e| format!("The screen didn't take HDR ({e})."))?;
+        }
+        Ok(())
+    }
+
     fn set_filter(&mut self, filter: &crate::access::Filter) {
         self.filter = filter.clone();
         self.colour();
@@ -280,13 +336,34 @@ impl Backend for UdevData {
 }
 
 impl UdevData {
+    /// A screen's connector and its properties by name.
+    fn connector_props(
+        &self,
+        output: &Output,
+    ) -> Option<(connector::Handle, Vec<(String, smithay::reexports::drm::control::property::Handle)>)> {
+        use smithay::reexports::drm::control::Device as _;
+        let id = output.user_data().get::<UdevOutputId>()?;
+        let device = self.backends.get(&id.device_id)?;
+        let surface = device.surfaces.get(&id.crtc)?;
+        let conn = surface.drm_output.with_compositor(|c| c.surface().current_connectors().into_iter().next())?;
+        let drm = device.drm_output_manager.device();
+        let props = drm.get_properties(conn).ok()?;
+        let named = props
+            .into_iter()
+            .filter_map(|(h, _)| Some((drm.get_property(h).ok()?.name().to_str().ok()?.to_string(), h)))
+            .collect();
+        Some((conn, named))
+    }
+
     /// Every screen's gamma (night light's warmth, turned over for inverted colours) and colour matrix (colour
     /// filters), where the hardware has them.
     fn colour(&mut self) {
         use smithay::reexports::drm::control::Device as _;
         for device in self.backends.values() {
             let drm = device.drm_output_manager.device();
-            for crtc in device.surfaces.keys() {
+            for (crtc, surf) in device.surfaces.iter() {
+                // an HDR screen's signal is PQ: night light and inverted colours would bend it out of shape
+                let hdr = crate::displays::hdr_sdr(&surf.output).is_some();
                 if let Ok(info) = drm.get_crtc(*crtc) {
                     let n = info.gamma_length() as usize;
                     if n >= 2 {
@@ -294,8 +371,8 @@ impl UdevData {
                             (0..n)
                                 .map(|i| {
                                     let v = i as f64 / (n - 1) as f64;
-                                    let v = if self.filter.invert { 1.0 - v } else { v };
-                                    (v * k * 65535.0).round() as u16
+                                    let v = if self.filter.invert && !hdr { 1.0 - v } else { v };
+                                    (v * if hdr { 1.0 } else { k } * 65535.0).round() as u16
                                 })
                                 .collect()
                         };
@@ -1844,12 +1921,36 @@ fn render_surface<'a>(
         surface.vrr_on = want_vrr && ok;
     }
 
+    // a game that asked to tear (tearing.rs), filling the screen: flips that don't wait for the refresh
+    let tear = lock.is_none()
+        && output
+            .user_data()
+            .get::<crate::shell::FullscreenSurface>()
+            .and_then(|f| f.get())
+            .and_then(|w| w.wl_surface().map(|s| crate::tearing::wants(&s)))
+            .unwrap_or(false);
+    surface.drm_output.with_compositor(|c| c.surface().set_tearing(tear));
     // zoom draws from what's in the framebuffer, so nothing may go straight to the screen
     let frame_mode = if surface.disable_direct_scanout || view.zoom > 1.0 {
         FrameFlags::empty()
     } else {
         FrameFlags::DEFAULT
     };
+    // HDR (displays.rs): what's drawn turned into the HDR signal, over everything; screen pictures don't get it
+    let hdr = crate::displays::hdr_sdr(output);
+    let mut elements = elements;
+    if let Some(sdr) = hdr {
+        let size = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
+        elements.insert(
+            0,
+            OutputRenderElements::Hdr(crate::look::HdrElement::new(
+                crate::displays::hdr_of(output).id.clone(),
+                smithay::utils::Rectangle::from_size(size),
+                sdr,
+            )),
+        );
+    }
+    let frame_mode = if hdr.is_some() { FrameFlags::empty() } else { frame_mode };
     let (rendered, states) = surface
         .drm_output
         .render_frame(renderer, &elements, clear_color, frame_mode)
@@ -1872,7 +1973,8 @@ fn render_surface<'a>(
 
     update_primary_scanout_output(space, output, dnd_icon, cursor_status, &states);
     let now = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
-    crate::capture::serve(renderer, output, &elements, cursor_n, clear_color, now.into());
+    let shown = if hdr.is_some() { &elements[1..] } else { &elements[..] };
+    crate::capture::serve(renderer, output, shown, cursor_n, clear_color, now.into());
     crate::capture::serve_windows(renderer, space, output);
 
     if rendered {

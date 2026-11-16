@@ -56,6 +56,10 @@ Column {
             SetChoice { each: 62; options: pg.scales.map(function (s) { return [String(s[0]), s[1]] }); value: pg.cur ? String(pg.cur.scale) : "1"; onPicked: function (v) { Backend.setScale(pg.cur.name, Number(v)) } } }
         SetRow { visible: pg.cur && pg.cur.rates.length > 1; title: "Refresh rate"; sub: "Higher is smoother"
             SetChoice { each: 74; options: pg.cur ? pg.cur.rates.slice(0, 4).map(function (r) { return [r.id, r.label] }) : []; value: pg.cur ? String(pg.cur.hz) : ""; onPicked: function (v) { Backend.setRate(pg.cur.name, v) } } }
+        SetRow { visible: pg.cur && pg.cur.hdrCapable; title: "HDR"; sub: "Brighter highlights and deeper colours on an HDR screen. Everything else is shown as before."
+            Toggle { on: pg.cur ? pg.cur.hdr : false; onToggled: function (v) { Backend.setHdr(pg.cur.name, v) } } }
+        SetRow { visible: pg.cur && pg.cur.hdrCapable && pg.cur.hdr; title: "Brightness of everyday things"; sub: "How bright windows and text are while HDR is on"
+            SetChoice { each: 80; options: [["160", "Dim"], ["203", "Normal"], ["280", "Bright"], ["400", "Brighter"]]; value: pg.cur ? String(pg.cur.sdr) : "203"; onPicked: function (v) { Backend.setSdr(pg.cur.name, Number(v)) } } }
         SetRow { title: "Turn"; sub: "For a screen on its side"
             SetChoice { each: 70; options: [["normal", "None"], ["left", "Left"], ["right", "Right"], ["inverted", "Upside"]]; value: pg.cur ? pg.cur.rotation : "normal"; onPicked: function (v) { Backend.setRotation(pg.cur.name, v) } } } }
     SetCard { title: "Older apps"

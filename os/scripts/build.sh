@@ -223,6 +223,9 @@ build_compositor() {
             where=host
         fi
         rsync -a --delete "$src/" "$CHROOT/tmp/hc/src/"
+        # Smithay, vendored with Huginn's patch (Cargo.toml: path = "../third_party/smithay")
+        mkdir -p "$CHROOT/tmp/hc/third_party"
+        rsync -a --delete "$ROOT/third_party/smithay/" "$CHROOT/tmp/hc/third_party/smithay/"
         mount --bind "$crates" "$CHROOT/tmp/hc/crates"
         mount --bind "$target" "$CHROOT/tmp/hc/target"
         local offline="--offline"

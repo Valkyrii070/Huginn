@@ -15,6 +15,7 @@ pub mod dbus;
 pub mod displays;
 pub mod input;
 pub mod places;
+pub mod tearing;
 pub mod drawing;
 pub mod focus;
 pub mod huginn;

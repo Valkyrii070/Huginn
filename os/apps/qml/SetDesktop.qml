@@ -162,6 +162,7 @@ Column {
         SetRow { title: "Reopen apps when you sign in"; sub: "The apps you had open come back after signing out or restarting."; Toggle { on: Settings.reopenApps; onToggled: pg.sw("reopenApps") } }
         SetRow { title: "Adaptive sync for games and videos"; sub: "Smoother motion on screens that support FreeSync or G-Sync, while something fills the screen."
             SetChoice { each: 90; options: [["auto", "On"], ["off", "Off"]]; value: Settings.adaptiveSync; onPicked: function (v) { Settings.set("adaptiveSync", v) } } }
+        SetRow { title: "Let games tear"; sub: "A game with V-Sync off shows each frame at once, for the lowest delay (where the graphics card can)."; Toggle { on: Settings.allowTearing; onToggled: pg.sw("allowTearing") } }
     }
     // ---------------------------------------------------------------- the Overview and spaces
     SetCard { title: "Overview & spaces"

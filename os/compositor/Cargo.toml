@@ -23,15 +23,14 @@ zbus = { version = "5", default-features = false, features = ["blocking-api", "a
 ab_glyph = "0.2"
 
 # Smithay's main branch, pinned (its last release, 0.7.0, is from June 2025)
+# Smithay at fd8e3f50, vendored with Huginn OS's patch for tearing page flips (third_party/smithay)
 [dependencies.smithay]
-git = "https://github.com/Smithay/smithay.git"
-rev = "fd8e3f50f9556aa6c0485989d1d49ff2c5eefae1"
+path = "../third_party/smithay"
 default-features = false
 features = ["desktop", "wayland_frontend"]
 
 [dependencies.smithay-drm-extras]
-git = "https://github.com/Smithay/smithay.git"
-rev = "fd8e3f50f9556aa6c0485989d1d49ff2c5eefae1"
+path = "../third_party/smithay/smithay-drm-extras"
 optional = true
 
 [dependencies.x11rb]
