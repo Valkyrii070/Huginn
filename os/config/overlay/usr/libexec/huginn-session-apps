@@ -13,11 +13,9 @@ python3 /usr/share/huginn-apps/huginn_polkit.py &
 # button, the battery), the volume, brightness and media keys with their level, Wi‑Fi passwords and Bluetooth pairing.
 python3 /usr/share/huginn-apps/huginn_sessiond.py &
 # Started from the installation drive: the installer opens (it can be closed to try Huginn OS, and is in the dock).
-# Otherwise the tour shows itself once, at the first login.
+# The Welcome tour is the shell's: it shows itself once, at the first sign-in (after the installer, on the drive).
 if [ -f /cdrom/casper/filesystem.squashfs ] && [ -x /usr/libexec/huginn-install-engine ]; then
     (sleep 2; python3 /usr/share/huginn-apps/huginn_app.py installer) &
-else
-    (sleep 3; python3 /usr/share/huginn-apps/huginn_app.py welcome --first-run) &
 fi
 # Mail keeps an eye on the inbox without a window (it leaves at once if there is no account or you turned that off).
 (sleep 6; python3 /usr/share/huginn-apps/huginn_app.py mail --background) &

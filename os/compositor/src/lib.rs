@@ -21,5 +21,6 @@ pub mod state;
 pub mod udev;
 #[cfg(feature = "winit")]
 pub mod winit;
+pub mod wm;
 
 pub use state::{ClientState, HuginnState};

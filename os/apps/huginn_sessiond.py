@@ -162,6 +162,7 @@ NOTIFY_XML = """<node><interface name="org.freedesktop.Notifications">
   <method name="GetServerInformation"><arg type="s" direction="out"/><arg type="s" direction="out"/><arg type="s" direction="out"/><arg type="s" direction="out"/></method>
   <signal name="NotificationClosed"><arg type="u"/><arg type="u"/></signal>
   <signal name="ActionInvoked"><arg type="u"/><arg type="s"/></signal>
+  <signal name="NotificationReplied"><arg type="u"/><arg type="s"/></signal>
   <signal name="ActivationToken"><arg type="u"/><arg type="s"/></signal>
 </interface></node>"""
 
@@ -273,6 +274,28 @@ def image_data(v, cache: Path, key: str) -> str:
         return ""
 
 
+QUIET_FLAG = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "huginn-busy-screen"
+
+
+def busy_screen() -> bool:
+    """The shell says something has the whole screen (a film or a game) or the screen is being shared."""
+    try:
+        return QUIET_FLAG.read_text(encoding="utf-8").strip() != ""
+    except OSError:
+        return False
+
+
+def _app_colours() -> dict:
+    try:
+        from huginn_shell import app_colours
+        return app_colours()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+APP_COLOURS = _app_colours()
+
+
 class Notifications(QObject):
     changed = Signal()
 
@@ -327,7 +350,7 @@ class Notifications(QObject):
 
     def _call(self, method, args, inv, sender, iface):
         if method == "GetCapabilities":
-            return GLib.Variant("(as)", (["body", "actions", "icon-static", "persistence", "body-hyperlinks"],))
+            return GLib.Variant("(as)", (["body", "actions", "icon-static", "persistence", "body-hyperlinks", "inline-reply", "x-kde-urls"],))
         if method == "GetServerInformation":
             return GLib.Variant("(ssss)", ("Huginn", "Huginn OS", "0.1", "1.2"))
         if method == "CloseNotification":
@@ -352,9 +375,14 @@ class Notifications(QObject):
                     break
             if not img:
                 img = icon_url(str(hints.get("image-path") or hints.get("image_path") or ""), self._cache)
+        key = entry.lower().replace(".desktop", "")
+        colours = APP_COLOURS.get(key[7:] if key.startswith("huginn-") else key) or APP_COLOURS.get((app or "").lower()) or []
+        category = str(hints.get("category", "")) if hints else ""
         item = {"id": nid, "app": app or "", "icon": img or icon_url(icon, self._cache) or icon_url(entry, self._cache),
+                "colour": colours[0] if colours else "", "colourLight": colours[1] if len(colours) > 1 else "",
+                "reply": "inline-reply" in actions[0::2], "replyHint": str(hints.get("x-kde-reply-placeholder-text", "")) if hints else "",
                 "summary": summary or app or "", "body": strip_markup(body), "urgency": urgency, "time": time.strftime("%H:%M"),
-                "actions": [{"key": actions[i], "label": actions[i + 1] or "Open"} for i in range(0, len(actions) - 1, 2) if actions[i] != "default"],
+                "actions": [{"key": actions[i], "label": actions[i + 1] or "Open"} for i in range(0, len(actions) - 1, 2) if actions[i] not in ("default", "inline-reply")],
                 "hasDefault": "default" in actions[0::2], "resident": bool(hints.get("resident")) if hints else False,
                 "sender": sender}
         self._remember(item)
@@ -362,11 +390,16 @@ class Notifications(QObject):
             return nid
         if (self.quiet() and urgency < 2) or mine.get("banner") is False:
             return nid                                        # kept in the history, not shown
+        if busy_screen() and urgency < 2 and category not in ("call", "call.incoming", "x-huginn.alarm", "alarm"):
+            return nid                                        # a film or game full screen, or the screen shared: it waits in the Control Centre
         self._shown = [n for n in self._shown if n["id"] != nid]
         self._shown.insert(0, item)
-        if len(self._shown) > 4:                              # four at most; the oldest steps aside
-            for old in self._shown[4:]:
-                self._expire(old["id"])
+        apps = []                                             # three apps' piles at most on screen; the oldest steps aside
+        for n in self._shown:
+            if n["app"] not in apps:
+                apps.append(n["app"])
+        for old in [n for n in self._shown if n["app"] in apps[3:]] + [n for n in self._shown if n["app"] in apps[:3]][12:]:
+            self._expire(old["id"])
         wait = 0 if urgency >= 2 else (timeout if timeout > 0 else 6500)
         self._arm(nid, wait)
         self.changed.emit()
@@ -419,6 +452,18 @@ class Notifications(QObject):
     @Slot(int)
     def dismiss(self, nid: int) -> None:
         self.close(nid, 2)
+
+    @Slot(int, str)
+    def reply(self, nid: int, text: str) -> None:
+        """A reply typed in the banner (apps that offer one: org.freedesktop.Notifications.NotificationReplied)."""
+        if self.bus and text.strip():
+            self.bus.signal("/org/freedesktop/Notifications", "org.freedesktop.Notifications", "NotificationReplied", GLib.Variant("(us)", (nid, text)))
+        self.close(nid, 2)
+
+    @Slot(str)
+    def dismissApp(self, app: str) -> None:
+        for n in [n for n in self._shown if n["app"] == app]:
+            self.close(n["id"], 2)
 
     @Slot(int, bool)
     def hold(self, nid: int, held: bool) -> None:

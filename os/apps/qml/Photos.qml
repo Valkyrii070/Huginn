@@ -7,6 +7,15 @@ GlassWindow {
     title: "Photos"; glow: "right"
     property string month: ""
     property int viewing: Backend.first
+    // a picture grows out of its tile, and goes back into it (GrowFrom; Settings › Desktop & Dock › Motion)
+    property var lastPic: null
+    property var growRect: null
+    onPicChanged: {
+        if (pic) { lastPic = pic; if (!viewer.shown && viewer.pending === null) { viewer.pending = growRect || "whole"; growWait.restart() } }   // grows once it has loaded
+        else if (viewer.shown) viewer.close()
+        growRect = null
+    }
+    Timer { id: growWait; interval: 300; onTriggered: viewer.go() }
     property bool showInfo: false
     property real zoom: 1
     property string notice: ""
@@ -14,7 +23,7 @@ GlassWindow {
     property string mode: startPage === "albums" || startPage === "favourites" ? startPage : "moments"                       // moments (by month), albums (folders in Pictures) or favourites
     property string album: ""                             // the album that is open, in albums mode
     readonly property bool choosing: mode === "albums" && album === ""     // looking at the albums themselves
-    readonly property bool railShown: !pic && !Backend.editing && Backend.items.length > 0 && (mode === "moments" || (mode === "albums" && album !== ""))
+    readonly property bool railShown: (!pic || viewer.p < 1) && !Backend.editing && Backend.items.length > 0 && (mode === "moments" || (mode === "albums" && album !== ""))
     readonly property var shown: Backend.items.filter(function (p) {
         return mode === "favourites" ? p.fav : mode === "albums" ? p.album === album : (!month || p.day === month) })
     readonly property var pic: viewing >= 0 && viewing < shown.length ? shown[viewing] : null
@@ -88,21 +97,27 @@ GlassWindow {
             Rectangle { x: 0; y: 108; width: 56; height: 56; radius: 10; color: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.22) } Rectangle { x: 64; y: 108; width: 56; height: 56; radius: 10; color: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.4) } }
         Label { text: "No pictures yet"; font.pixelSize: 17; font.weight: Font.DemiBold; anchors.horizontalCenter: parent.horizontalCenter }
         Label { text: "Pictures you put in " + Backend.folder + " appear here."; secondary: true; anchors.horizontalCenter: parent.horizontalCenter } }
-    Flickable { visible: !win.pic && !win.choosing && Backend.items.length > 0; x: 0; y: 62; width: parent.width - (win.railShown ? 200 : 14); height: parent.height - 64; contentHeight: wall.height + 90; clip: true
+    Flickable { visible: (!win.pic || viewer.p < 1) && !win.choosing && Backend.items.length > 0; x: 0; y: 62; width: parent.width - (win.railShown ? 200 : 14); height: parent.height - 64; contentHeight: wall.height + 90; clip: true
         Flow { id: wall; x: 14; y: 2; width: parent.width - 14; spacing: 6
             readonly property real cell: (width - 6 * (Math.max(2, Math.floor(width / 190)) - 1)) / Math.max(2, Math.floor(width / 190))
-            Repeater { model: win.pic ? [] : win.shown
+            Repeater { model: win.pic && viewer.p >= 1 ? [] : win.shown
                 Rectangle { required property var modelData; required property int index; width: wall.cell; height: wall.cell * 0.75; radius: 10; color: Theme.t.group
                     // Cut to rounded corners by the app itself (image://roundthumb), so it needs no shader.
                     Image { anchors.fill: parent; source: "image://roundthumb/" + encodeURIComponent(modelData.path) + "?" + Backend.stamp; asynchronous: true; cache: false }
                     Rectangle { visible: modelData.fav; x: 8; y: 8; width: 24; height: 24; radius: 12; color: "#B3000000"; Glyph { anchors.centerIn: parent; name: "star"; size: 13; ink: "#FFFFFF" } }
                     Rectangle { visible: !!modelData.edited; x: parent.width - 32; y: 8; width: 24; height: 24; radius: 12; color: "#B3000000"; Glyph { anchors.centerIn: parent; name: "sliders"; size: 13; ink: "#FFFFFF" } }
                     Rectangle { anchors.fill: parent; radius: 10; color: "transparent"; border.width: hit.containsMouse ? 2 : 0; border.color: Theme.t.accent }
-                    MouseArea { id: hit; anchors.fill: parent; hoverEnabled: true; onClicked: win.viewing = index } } } } }
-    Item { visible: !!win.pic && !Backend.editing; anchors { fill: parent; topMargin: 58 } clip: true
+                    MouseArea { id: hit; anchors.fill: parent; hoverEnabled: true
+                        onClicked: { var r = parent.mapToItem(viewer.parent, 0, 0); win.growRect = Qt.rect(r.x, r.y, parent.width, parent.height); win.viewing = index } } } } } }
+    GrowFrom { id: viewer; visible: shown && !Backend.editing; anchors { fill: parent; topMargin: 58 }
+        readonly property var pic: win.pic || win.lastPic
+        property var pending: null
+        function go() { if (pending === null) return; var r = pending === "whole" ? null : pending; pending = null; growWait.stop(); if (win.pic) openAt(r) }
+        Component.onCompleted: if (win.pic) { shown = true; opened = true; p = 1 }
         Image { id: big; anchors.centerIn: parent; width: (parent.width - (win.showInfo ? 300 : 40)) ; height: parent.height - 40; x: 20; scale: win.zoom
-            source: win.pic ? win.pic.url : ""; fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false; anchors.horizontalCenterOffset: win.showInfo ? -130 : 0
-            property int stamp: Backend.stamp; onStampChanged: { var u = source; source = ""; source = u } }
+            source: viewer.pic ? viewer.pic.url : ""; fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false; anchors.horizontalCenterOffset: win.showInfo ? -130 : 0
+            property int stamp: Backend.stamp; onStampChanged: { var u = source; source = ""; source = u }
+            onStatusChanged: if (status === Image.Ready || status === Image.Error) viewer.go() }
         MouseArea { anchors.fill: parent; onWheel: function (w) { win.zoom = Math.max(1, Math.min(6, win.zoom * (w.angleDelta.y > 0 ? 1.15 : 0.87))) } onDoubleClicked: win.zoom = win.zoom > 1 ? 1 : 2 }
         Repeater { model: [[-1, "back"], [1, "forward"]]
             Pressable { required property var modelData; visible: win.viewing + modelData[0] >= 0 && win.viewing + modelData[0] < win.shown.length
@@ -112,7 +127,7 @@ GlassWindow {
         Rectangle { visible: win.showInfo; anchors { right: parent.right; rightMargin: 12 } y: 4; width: 250; height: parent.height - 18; radius: 12; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine
             Column { x: 16; y: 16; width: parent.width - 32; spacing: 10
                 Label { text: "Details"; font.pixelSize: 15; font.weight: Font.DemiBold }
-                Repeater { model: win.pic && win.showInfo ? Backend.info(win.pic.path).filter(function (r) { return r.value !== "" }) : []
+                Repeater { model: viewer.pic && win.showInfo ? Backend.info(viewer.pic.path).filter(function (r) { return r.value !== "" }) : []
                     Column { required property var modelData; width: parent.width; Label { text: modelData.name; secondary: true; font.pixelSize: 11 } Label { width: parent.width; text: modelData.value; wrapMode: Text.WrapAnywhere } } } } }
         Label { anchors { bottom: parent.bottom; bottomMargin: 10; horizontalCenter: parent.horizontalCenter } text: win.notice || ((win.viewing + 1) + " of " + win.shown.length + (win.zoom > 1 ? "  ·  " + Math.round(win.zoom * 100) + "%" : "")); color: win.notice ? Theme.t.danger : Theme.t.text_secondary; font.pixelSize: 12 }
     }

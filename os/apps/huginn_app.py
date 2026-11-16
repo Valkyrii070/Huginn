@@ -5121,6 +5121,15 @@ def main() -> int:
     args = ap.parse_args()
 
     title, qml = APPS[args.app]
+    if args.app == "welcome" and not (args.demo or args.shot or args.first_run):
+        # The tour runs on the desktop itself, in the shell: ask it to (a session without Huginn's shell gets the window)
+        try:
+            from gi.repository import Gio, GLib
+            Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Tour", None, None,
+                                                                Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+            return 0
+        except Exception:  # noqa: BLE001 — no shell: the window below
+            pass
     welcomed = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "huginn-shell" / "welcomed"
     if args.app == "welcome" and args.first_run:
         if welcomed.exists():
@@ -5327,10 +5336,18 @@ def main() -> int:
         updates = huginn_updates.Updates(args.demo, settings)
         ctx.setContextProperty("Updates", updates)
         if args.app == "settings":
+            import huginn_deskprefs
+            deskprefs = huginn_deskprefs.DeskPrefs()
+            ctx.setContextProperty("DeskPrefs", deskprefs)
             import huginn_accounts
             accounts = huginn_accounts.Accounts(args.demo)
             ctx.setContextProperty("Accounts", accounts)
         updates.said.connect(lambda msg, bad: backend.said.emit(msg, bad) if hasattr(backend, "said") else None)
+    menu = None
+    if not (args.shot or args.demo):                     # the top bar's one menu asks the app for its menus
+        from huginn_menu import AppMenu
+        menu = AppMenu(args.app, title, engine, backend)
+    ctx.setContextProperty("AppMenu", menu)              # also: the fill button's layouts (AppMenu.snap)
     engine.load(QUrl.fromLocalFile(str(HERE / "qml" / qml)))
     if not engine.rootObjects():
         return 1

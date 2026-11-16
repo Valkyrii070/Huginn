@@ -32,7 +32,7 @@ MAX_FILES = 150000
 # The words people use for each Settings page, beside its own title and description.
 SETTINGS_WORDS = {
     "appearance": "dark light mode theme realm wallpaper background colour color accent transparency",
-    "bar": "dock top bar menu clock date battery percentage hide", "notifications": "do not disturb quiet alerts banners",
+    "desktop": "dock top bar menu clock date battery percentage hide today stacks downloads snap overview spaces workspaces motion", "notifications": "do not disturb quiet alerts banners",
     "network": "wifi wi-fi wireless ethernet internet vpn hotspot proxy", "bluetooth": "headphones earbuds pair speaker mouse",
     "accounts": "google microsoft nextcloud imap sign in online", "displays": "screen monitor resolution scale night light brightness refresh hz",
     "sound": "volume speakers microphone mic audio output input", "power": "battery sleep suspend energy lid",

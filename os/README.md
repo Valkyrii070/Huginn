@@ -967,6 +967,63 @@ What round 1 does:
   kept trying to draw while on another console. Still open: in that VM (where the shell took minutes to start) the
   bar, dock and widgets stayed hidden until the mouse moved or a key was pressed; not seen nested, even under load.
 
+## The desktop, round 2 (2026-11-15): the dock, Today, menus, the Overview, the tour
+
+Everything chosen on the design canvas (the dock, Downloads, Today, app menus, the Overview, notifications, motion,
+Settings and the welcome tour) is built, and Huginn's compositor got its second round (snapping, spaces, the
+Overview, windows folding into the dock). The KWin session does what KWin allows (its scripts in
+`config/overlay/usr/share/kwin-wayland/scripts/huginnactive`); the preview session does all of it.
+
+- **The dock** (`shell/qml/Dock.qml`, `AppWindows.qml`): a bar under an app for each window (up to three), the Ring
+  (a light in the app's colour round its tile while it starts), clicking the app in front hides it (a ring spreads
+  round its tile) and again brings it back, an app's windows as an island (pointing or clicking), middle-click for a
+  new window, scrolling through them, files dropped on an app. Size, hiding style and the rest: Settings.
+- **Stacks** (`shell/huginn_stacks.py`, `StackIsland.qml`, `FileArt.qml`): Downloads as a pile at the end of the apps
+  (a badge while something's arriving, a file flying in when it lands), opening as a list or grid; open, show in
+  Files, copy, rename, move to the Bin, drag out. Any folder dropped on the end of the dock becomes a stack
+  (`~/.config/huginn-shell/stacks.json`).
+- **Today** (`shell/huginn_today.py`, `TodayIslands.qml`): the date in the bar or Super+T: the month, weather, what's
+  coming and clocks as islands. Typing adds an event or reminder, read from plain words (`parse()`, with a preview);
+  `~/.config/huginn-shell/today.json` keeps which islands and clocks.
+- **App menus** (`apps/huginn_menu.py`, `AppMenuIsland.qml`): each Huginn app tells the shell its menus over D-Bus
+  (`org.huginn.App.p<pid>`: `Menus`, `Trigger`), and the bar shows them as the One menu: search, About and Settings
+  at the top, the groups opening to the side, Open Recent cascading. Only what the app can actually do is listed.
+  Other apps get a basic menu (hide, close, quit). "A row of menus" puts the groups along the bar instead. Alt on its
+  own opens it (KWin: a modifier-only shortcut in `kwinrc`; the compositor: Alt pressed and let go alone).
+- **The Overview and spaces** (`compositor/src/wm.rs`, `OverviewOverlay.qml`): Super+Tab or three fingers up:
+  the compositor glides the windows apart into a grid (and dims the rest), the shell draws the names and the spaces
+  strip over them. Spaces: add, rename, remove, reorder, drag a window onto one; Super+Ctrl+←/→, Super+1–9,
+  Super+Shift+←/→ (taking the window), three fingers left/right; the space's name shows for a moment.
+- **Snapping** (`wm.rs`, `SnapGlass.qml`, the fill button in `apps/qml/GlassWindow.qml`): drag to an edge or corner
+  (lit glass shows where it'll go), Super+arrows through halves, thirds and two-thirds, Snap Assist offering the other
+  windows for the other half, the fill button's layouts island. Snapped pairs come forward together.
+- **Hiding into the dock**: the window folds into its app's tile with light (drop and ring, line, or comet; the
+  shell tells the compositor where the tiles are, `DockLayout`), and comes back out as a line.
+- **Alt+Tab**: the compositor reports the order and the pick (`Switcher`), the shell draws the island.
+- **Notifications** (`apps/huginn_sessiond.py`, `SessionUi.qml`): bloom from the top right with the app's colour once
+  round the edge, piles per app (three at most on screen), inline replies (`inline-reply`), a ghost when one leaves;
+  they wait while something fills the screen or it's being shared, except calls and alarms.
+- **Motion in apps** (`apps/qml/GrowFrom.qml`, `MotionList.qml`, `Wash.qml`, `Shimmer.qml`, `Pressable.qml`,
+  `Toggle.qml`): opening something grows out of what you clicked (or slides in, if picked in Settings); Photos uses it
+  first. Reduce Motion turns them into short fades.
+- **Settings › Desktop & Dock** (`apps/qml/SetDesktop.qml`, `apps/huginn_deskprefs.py`; was "Top Bar & Dock"): one
+  page with a live preview that plays the choice you point at: dock size, hiding style, clicking hides, stacks, the
+  top bar, Today's islands and clocks, snapping, the Overview's opening (glide, or glide with light), the hot corner,
+  spaces on every screen, and how things open in apps. The shell follows changes as they're made.
+- **The welcome tour** (`shell/huginn_tour.py`, `TourHost.qml`; the Welcome app now only asks the shell to play it):
+  two full-screen pages (hello; light or dark and the realm), then an island walks the real desktop, led by a line of
+  light: the dock, the date and Today, the app's One menu, snapping, the Overview, each with a "Try it" that moves on
+  by itself when done. Once per account at first sign-in; again from Welcome or Help. After an update that brings
+  something new (`/usr/share/huginn-os/version`), a short "What's new" tour shows just that.
+- Tested nested (`--winit`) with the shell, Files, Writer, Photos and the session daemon: the dock (hiding, the
+  windows island, the Ring, size), Downloads, Today (typing to add), the One menu (from Writer's bus, search, Alt
+  alone), the tour (pages, realm changing live, the line of light, Try it moving on), the Overview, spaces, hiding
+  into the dock, Super+arrows, Super+drag with the lit preview, Snap Assist (and it going away with Alt+Tab), the fill
+  button's layouts, Alt+Tab, notifications piling, Photos growing a picture out of its tile, and the Settings page.
+  Not testable here: the KWin paths (no KWin in the test root). Still open: the VM where the bar and dock stayed
+  hidden until the first input (to check with the next ISO), dragging the line between two snapped windows to size
+  both, live thumbnails in the windows island, and pausing a download from the stack.
+
 ## Huginn, the browser
 
 Inside the Huginn repository (this kit is its `os/` folder) the image ships the repository's own browser. A kit used

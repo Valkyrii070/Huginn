@@ -567,6 +567,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             initial_window_location = (pos.x as i32, pos.y as i32).into();
         }
 
+        self.unsnap_for_drag(&window);
         let grab = PointerMoveSurfaceGrab {
             start_data,
             window,

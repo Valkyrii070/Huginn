@@ -3,7 +3,8 @@ use smithay::{
         Color32F, ImportAll, ImportMem, Renderer,
         damage::{Error as OutputDamageTrackerError, OutputDamageTracker, RenderOutputResult},
         element::{
-            AsRenderElements, RenderElement, Wrap,
+            AsRenderElements, Id, Kind, RenderElement, Wrap,
+            solid::SolidColorRenderElement,
             surface::WaylandSurfaceRenderElement,
             utils::{
                 ConstrainAlign, ConstrainScaleBehavior, CropRenderElement, RelocateRenderElement,
@@ -13,11 +14,12 @@ use smithay::{
     },
     desktop::{
         layer_map_for_output,
-        space::{ConstrainBehavior, ConstrainReference, Space, SpaceRenderElements, constrain_space_element},
+        space::{ConstrainBehavior, ConstrainReference, Space, SpaceElement, SpaceRenderElements, constrain_space_element},
     },
     reexports::wayland_server::{Resource, backend::ClientId},
     output::Output,
     utils::{Point, Rectangle, Size},
+    wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
 #[cfg(feature = "debug")]
@@ -58,6 +60,8 @@ smithay::backend::renderer::element::render_elements! {
     Window=Wrap<E>,
     Custom=CustomRenderElements<R>,
     Preview=CropRenderElement<RelocateRenderElement<RescaleRenderElement<WindowRenderElement<R>>>>,
+    Moved=RescaleRenderElement<WindowRenderElement<R>>,
+    Solid=SolidColorRenderElement,
 }
 
 impl<R: Renderer + ImportAll + ImportMem, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
@@ -69,6 +73,8 @@ impl<R: Renderer + ImportAll + ImportMem, E: RenderElement<R> + std::fmt::Debug>
             Self::Window(arg0) => f.debug_tuple("Window").field(arg0).finish(),
             Self::Custom(arg0) => f.debug_tuple("Custom").field(arg0).finish(),
             Self::Preview(arg0) => f.debug_tuple("Preview").field(arg0).finish(),
+            Self::Moved(arg0) => f.debug_tuple("Moved").field(arg0).finish(),
+            Self::Solid(arg0) => f.debug_tuple("Solid").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }
@@ -137,6 +143,80 @@ where
         })
 }
 
+/// While something moves (the Overview, a window hiding into the dock), the scene drawn by hand: the shell's upper
+/// layers, then the windows (the moved ones where they are now), the dim, then the lower layers.
+fn scene_elements<R>(
+    output: &Output,
+    space: &Space<WindowElement>,
+    renderer: &mut R,
+    view: &crate::wm::SceneView,
+) -> Vec<OutputRenderElements<R, WindowRenderElement<R>>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + 'static,
+{
+    let scale = output.current_scale().fractional_scale();
+    let geo = space.output_geometry(output).unwrap_or_default();
+    let map = layer_map_for_output(output);
+    let mut out: Vec<OutputRenderElements<R, WindowRenderElement<R>>> = Vec::new();
+    let layers = |out: &mut Vec<OutputRenderElements<R, WindowRenderElement<R>>>, renderer: &mut R, levels: &[WlrLayer]| {
+        for level in levels {
+            for layer in map.layers_on(*level).rev() {
+                let loc = map.layer_geometry(layer).unwrap_or_default().loc.to_physical_precise_round(scale);
+                out.extend(
+                    AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(layer, renderer, loc, scale.into(), 1.0)
+                        .into_iter()
+                        .map(|e| OutputRenderElements::Custom(CustomRenderElements::Surface(e))),
+                );
+            }
+        }
+    };
+    layers(&mut out, renderer, &[WlrLayer::Overlay, WlrLayer::Top]);
+    // light over the windows turning into it
+    for (r, c) in &view.light {
+        if c[3] <= 0.01 {
+            continue;
+        }
+        let rect = Rectangle::<f64, smithay::utils::Logical>::new(r.loc, r.size).to_physical_precise_round(scale);
+        out.push(OutputRenderElements::Solid(SolidColorRenderElement::new(Id::new(), rect, 0usize, [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]], Kind::Unspecified)));
+    }
+    // the moved windows (in front of the others), then the rest where they are
+    let moved_ids: Vec<&WindowElement> = view.moved.iter().map(|m| &m.0).collect();
+    for (w, r, sx, sy, alpha) in view.moved.iter().rev() {
+        if *alpha <= 0.01 {
+            continue;
+        }
+        let g = w.geometry();
+        let origin: Point<i32, smithay::utils::Physical> = r.loc.to_physical_precise_round(scale);
+        let at = (r.loc - g.loc.to_f64()).to_physical_precise_round(scale);
+        out.extend(
+            AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(w, renderer, at, scale.into(), *alpha)
+                .into_iter()
+                .map(|e| OutputRenderElements::Moved(RescaleRenderElement::from_element(e, origin, smithay::utils::Scale { x: *sx, y: *sy }))),
+        );
+    }
+    for w in space.elements_for_output(output).rev() {
+        if moved_ids.contains(&w) {
+            continue;
+        }
+        let Some(loc) = space.element_location(w) else {
+            continue;
+        };
+        let at = (loc - geo.loc).to_physical_precise_round(scale);
+        out.extend(
+            AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(w, renderer, at, scale.into(), 1.0)
+                .into_iter()
+                .map(|e| OutputRenderElements::Window(Wrap::from(e))),
+        );
+    }
+    if view.dim > 0.0 {
+        let rect = Rectangle::from_size(geo.size).to_physical_precise_round(scale);
+        out.push(OutputRenderElements::Solid(SolidColorRenderElement::new(Id::new(), rect, 0usize, [0.0, 0.0, 0.0, view.dim], Kind::Unspecified)));
+    }
+    layers(&mut out, renderer, &[WlrLayer::Bottom, WlrLayer::Background]);
+    out
+}
+
 /// Locked (Huginn): what's drawn is the lock screen's surfaces on this output, on black. Nothing else.
 pub struct LockView {
     pub client: Option<ClientId>,
@@ -150,6 +230,7 @@ pub fn output_elements<R>(
     renderer: &mut R,
     show_window_preview: bool,
     lock: Option<&LockView>,
+    view: &crate::wm::SceneView,
 ) -> (Vec<OutputRenderElements<R, WindowRenderElement<R>>>, Color32F)
 where
     R: Renderer + ImportAll + ImportMem,
@@ -204,6 +285,10 @@ where
             .map(OutputRenderElements::from)
             .collect::<Vec<_>>();
 
+        if view.active() {
+            output_render_elements.extend(scene_elements(output, space, renderer, view));
+            return (output_render_elements, CLEAR_COLOR);
+        }
         if show_window_preview && space.elements_for_output(output).count() > 0 {
             output_render_elements.extend(space_preview_elements(renderer, space, output));
         }
@@ -232,12 +317,13 @@ pub fn render_output<'a, 'd, R>(
     age: usize,
     show_window_preview: bool,
     lock: Option<&LockView>,
+    view: &crate::wm::SceneView,
 ) -> Result<RenderOutputResult<'d>, OutputDamageTrackerError<R::Error>>
 where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Clone + 'static,
 {
     let (elements, clear_color) =
-        output_elements(output, space, custom_elements, renderer, show_window_preview, lock);
+        output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);
     damage_tracker.render_output(renderer, framebuffer, age, &elements, clear_color)
 }

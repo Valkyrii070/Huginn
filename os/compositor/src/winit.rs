@@ -246,6 +246,7 @@ pub fn run_winit() {
                     .map(|mode| Duration::from_secs_f64(1_000f64 / mode.refresh as f64))
                     .unwrap_or_default();
             state.pre_repaint(&output, frame_target);
+            let view = state.scene_view(&output);
 
             let backend = &mut state.backend_data.backend;
 
@@ -360,6 +361,7 @@ pub fn run_winit() {
                     age,
                     show_window_preview,
                     lock_view.as_ref(),
+                    &view,
                 )
                 .map_err(|err| match err {
                     OutputDamageTrackerError::Rendering(err) => err.into(),

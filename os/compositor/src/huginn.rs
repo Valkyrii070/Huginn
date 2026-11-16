@@ -65,6 +65,14 @@ pub struct Huginn {
     pub session: Vec<String>,
     pub session_started: bool,
     last_active: Option<(String, String, String, bool)>,
+    /// The window list as the shell last heard it.
+    last_windows: String,
+    /// Alt is down and nothing else has been pressed since (on its release: the app's menu).
+    pub alt_alone: bool,
+    /// A three-finger swipe in progress: how far it has gone.
+    pub swipe: Option<(f64, f64)>,
+    /// Spaces, the Overview, snapping, hiding into the dock (wm.rs).
+    pub wm: crate::wm::Wm,
     pub lock: Option<Lock>,
     pub blank: bool,
     /// Surfaces that asked the computer not to go idle (idle-inhibit), while they live.
@@ -90,6 +98,18 @@ pub struct Lock {
 /// Something that marks a new window that still has to be put in its place (once it has a size).
 pub struct NeedsPlacing(pub std::cell::Cell<bool>);
 
+/// Every window's number for the shell (the dock, the Overview): given once, never reused.
+struct WindowId(u64);
+static NEXT_WINDOW_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn window_id(window: &WindowElement) -> u64 {
+    window
+        .0
+        .user_data()
+        .get_or_insert(|| WindowId(NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed)))
+        .0
+}
+
 impl<B: Backend + 'static> HuginnState<B> {
     /// After the compositor's own set-up: the bus, and a timer for what is checked now and then.
     pub fn huginn_start(&mut self) {
@@ -103,6 +123,7 @@ impl<B: Backend + 'static> HuginnState<B> {
             })
             .expect("can't listen to the bus thread");
         self.huginn.out = Some(dbus::start(to_loop, self.huginn.shared.clone()));
+        self.wm_start();
         self.huginn.shared.touched();
         self.handle
             .insert_source(Timer::from_duration(Duration::from_millis(400)), |_, _, state| {
@@ -134,6 +155,7 @@ impl<B: Backend + 'static> HuginnState<B> {
 
     fn tick(&mut self) {
         self.report_active();
+        self.report_windows();
         self.watch_lock();
         self.huginn.inhibitors.retain(|s| s.upgrade().is_ok());
         self.huginn
@@ -157,6 +179,10 @@ impl<B: Backend + 'static> HuginnState<B> {
                 let _ = reply.send(self.activate_app(&ids));
             }
             Request::WindowAction(action) => self.window_action(&action),
+            Request::WindowDo(id, action) => self.window_do(id, &action),
+            Request::OverviewDo(action) => self.overview_do(&action),
+            Request::SpaceDo(action) => self.space_do(&action),
+            Request::DockLayout(json) => self.dock_layout(&json),
         }
     }
 
@@ -244,9 +270,16 @@ impl<B: Backend + 'static> HuginnState<B> {
 
     /// Bring a window forward (out of hiding too) and give it the keyboard.
     pub fn activate_window(&mut self, window: &WindowElement) {
+        self.bring_space_of(window);
         if let Some(i) = self.huginn.minimised.iter().position(|(w, _)| w == window) {
             let (w, loc) = self.huginn.minimised.remove(i);
-            self.space.map_element(w, loc, true);
+            let rect = Rectangle::new(loc + w.geometry().loc, w.geometry().size);
+            self.space.map_element(w.clone(), loc, true);
+            self.animate_hide(&w, rect, true);
+        }
+        // a window snapped beside it comes forward too
+        if let Some(partner) = self.partner_of(window) {
+            self.space.raise_element(&partner, false);
         }
         self.space.raise_element(window, true);
         #[cfg(feature = "xwayland")]
@@ -297,6 +330,7 @@ impl<B: Backend + 'static> HuginnState<B> {
         let Some(loc) = self.space.element_location(window) else {
             return;
         };
+        self.animate_hide(window, Rectangle::new(loc + window.geometry().loc, window.geometry().size), false);
         self.space.unmap_elem(window);
         self.huginn.minimised.push((window.clone(), loc));
         // the keyboard goes to the window that's now in front, if any
@@ -337,21 +371,92 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
     }
 
+    /// The process a window belongs to (the shell asks it for its menus).
+    fn window_pid(&self, w: &WindowElement) -> i32 {
+        #[cfg(feature = "xwayland")]
+        if let Some(x) = w.0.x11_surface() {
+            return x.pid().map(|p| p as i32).unwrap_or(0);
+        }
+        w.0.toplevel()
+            .and_then(|t| t.wl_surface().client())
+            .and_then(|c| c.get_credentials(&self.display_handle).ok())
+            .map(|c| c.pid)
+            .unwrap_or(0)
+    }
+
+    fn window_row(&self, w: &WindowElement, minimised: bool, focused: Option<&WindowElement>, at: Option<Point<i32, Logical>>) -> serde_json::Value {
+        let (title, app) = Self::window_names(w);
+        let pid = self.window_pid(w);
+        let full = w.0.toplevel().is_some_and(|t| t.with_committed_state(|s| s.is_some_and(|s| s.states.contains(xdg_toplevel::State::Fullscreen))));
+        let size = w.geometry().size;
+        let at = at.unwrap_or_default();
+        serde_json::json!({"id": window_id(w).to_string(), "app": app, "title": title, "minimised": minimised,
+                           "active": !minimised && Some(w) == focused, "space": Self::window_space(w).unwrap_or(0), "pid": pid, "full": full, "x": at.x, "y": at.y, "w": size.w, "h": size.h})
+    }
+
+    /// Every window (bottom to top, then the hidden ones) and the spaces, for the shell.
     fn windows_json(&self) -> String {
         let focused = self.focused_window();
         let mut rows: Vec<serde_json::Value> = self
             .space
             .elements()
-            .map(|w| {
-                let (title, app) = Self::window_names(w);
-                serde_json::json!({"app": app, "title": title, "minimised": false, "focused": Some(w) == focused.as_ref()})
-            })
+            .map(|w| self.window_row(w, false, focused.as_ref(), self.space.element_location(w)))
             .collect();
-        rows.extend(self.huginn.minimised.iter().map(|(w, _)| {
-            let (title, app) = Self::window_names(w);
-            serde_json::json!({"app": app, "title": title, "minimised": true, "focused": false})
-        }));
-        serde_json::Value::Array(rows).to_string()
+        rows.extend(self.huginn.minimised.iter().map(|(w, loc)| self.window_row(w, true, None, Some(*loc))));
+        rows.extend(self.huginn.wm.away.iter().map(|(w, loc)| self.window_row(w, false, None, Some(*loc))));
+        serde_json::json!({"current": self.huginn.wm.current, "spaces": self.huginn.wm.spaces, "windows": rows}).to_string()
+    }
+
+    /// The shell's dock and Overview keep their own list of windows; tell them when it changes.
+    fn report_windows(&mut self) {
+        let now = self.windows_json();
+        if now != self.huginn.last_windows {
+            self.huginn.last_windows = now.clone();
+            self.say(Outgoing::Windows(now));
+        }
+    }
+
+    fn window_by_id(&self, id: u64) -> Option<WindowElement> {
+        self.space
+            .elements()
+            .find(|w| window_id(w) == id)
+            .cloned()
+            .or_else(|| self.huginn.minimised.iter().map(|(w, _)| w).find(|w| window_id(w) == id).cloned())
+    }
+
+    /// The shell asks for something done to one window (the dock, the Overview).
+    pub fn window_do(&mut self, id: u64, action: &str) {
+        let Some(window) = self.window_by_id(id) else {
+            return;
+        };
+        let hidden = self.huginn.minimised.iter().any(|(w, _)| *w == window);
+        let in_front = !hidden && self.focused_window().as_ref() == Some(&window);
+        match action {
+            "activate" => self.activate_window(&window),
+            "minimise" | "minimize" if !hidden => self.minimise_window(&window),
+            "toggle" if in_front => self.minimise_window(&window),
+            "toggle" => self.activate_window(&window),
+            "close" => Self::close_window(&window),
+            "maximise" | "maximize" => {
+                self.activate_window(&window);
+                self.window_action("maximise");
+            }
+            other => {
+                if let Some(snap) = other.strip_prefix("snap:").and_then(crate::wm::Snap::parse) {
+                    if hidden {
+                        self.activate_window(&window);
+                    }
+                    self.snap_window(&window, snap, false);
+                } else if let Some(n) = other.strip_prefix("space:").and_then(|n| n.parse::<usize>().ok()) {
+                    self.space_do(&format!("move:{id}:{n}"));
+                }
+            }
+        }
+        self.report_windows();
+    }
+
+    pub fn report_windows_now(&mut self) {
+        self.report_windows();
     }
 
     /// Alt+Tab (forward) and Alt+Shift+Tab: the windows as they were stacked when Alt+Tab began, minimised ones last.
@@ -373,10 +478,12 @@ impl<B: Backend + 'static> HuginnState<B> {
         if window.0.alive() {
             self.activate_window(&window);
         }
+        self.switcher_report();
     }
 
     pub fn switch_end(&mut self) {
         self.huginn.switching = None;
+        self.switcher_report();
     }
 
     /// Super + the left button on a window: move it.
@@ -386,6 +493,7 @@ impl<B: Backend + 'static> HuginnState<B> {
             return false;
         };
         let start_data = PointerGrabStartData { focus: None, button, location };
+        self.unsnap_for_drag(&window);
         let grab = PointerMoveSurfaceGrab { start_data, window: window.clone(), initial_window_location: loc };
         self.activate_window(&window);
         let pointer = self.pointer.clone();
@@ -396,6 +504,7 @@ impl<B: Backend + 'static> HuginnState<B> {
     /// A new window, once it has a size: in the middle of the screen the pointer is on (between the top bar and the
     /// dock), a little lower and to the right if another window is already exactly there.
     pub fn place_window(&mut self, window: &WindowElement) {
+        self.claim_window(window);
         let size = window.geometry().size;
         if size.w <= 0 || size.h <= 0 {
             return;

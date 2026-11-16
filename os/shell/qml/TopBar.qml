@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 
 // Top bar, Googlebook-leaning: no strip, just text and glyphs floating on the wallpaper.
 // Time and date on the left, then the active app (its menus open from the name); status on the right.
@@ -9,23 +10,23 @@ Item {
     signal launcher()
     signal search()                       // the magnifier: Search everything (Super+Space)
     signal windowAction(string action)    // "minimise" or "close": the window in front (the host does it)
+    signal today()                        // the date: Today (the month, the weather, what's coming)
+    property bool todayOpen: false
+    onTodayOpenChanged: if (todayOpen && Theme.t.openMs > 0) dateRing.run()
+    readonly property real dateLeft: leftRow.x + dateButton.x
+    readonly property real dateWidth: dateButton.width
     property bool solid: false
     property string appName: "Huginn"
-    // The app's menu: real things to do with the app in front. (Apps keep their own commands in their islands.)
-    readonly property var menus: appName === "Huginn" || appName === ""
-        ? [{ id: "help", label: "Huginn OS Help" }, { id: "settings", label: "Settings" }]
-        : [{ id: "help", label: appName + " Help" }, { id: "minimise", label: "Minimise" }, { id: "close", label: "Close Window" }]
-    function run(id) {
-        bar.menusOpen = false
-        if (id === "help") Apps.launch("python3 /usr/share/huginn-apps/huginn_app.py help")
-        else if (id === "settings") Status.openSettings("")
-        else bar.windowAction(id)
-    }
-    property bool menusOpen: startMenus
-    // How the menus open from the app name: "dropdown" (default, a list) or "inline" (along the bar).
-    // A user setting: Control centre > Customize, saved by the host.
-    readonly property string menuStyle: Settings.menuStyle
-    readonly property bool dropdownOpen: menusOpen && menuStyle === "dropdown"
+    // The app's name opens its one menu (AppMenuIsland.qml, in a surface of its own); "A row of menus" (Settings ›
+    // Desktop & Dock) puts the app's groups along the bar instead, each opening its own list.
+    signal appMenu(string group)
+    property bool menuOpen: false
+    property string menuGroup: ""
+    readonly property bool rowMenus: Settings.menuStyle === "row" || Settings.menuStyle === "inline"
+    readonly property real nameLeft: leftRow.x + appButton.x
+    readonly property real nameWidth: appButton.width
+    function groupLeft(name) { for (var i = 0; i < groupRep.count; i++) { var g = groupRep.itemAt(i); if (g && g.modelData.name === name) return leftRow.x + g.x } return nameLeft }
+    readonly property var front: { var a = Apps.all; for (var i = 0; i < a.length; i++) if (a[i].name === appName) return a[i]; return null }
     readonly property var battery: Status.battery
     readonly property var net: Status.network
     height: 30
@@ -41,47 +42,61 @@ Item {
             gradient: Gradient { GradientStop { position: 0; color: Theme.t.glowA } GradientStop { position: 1; color: Theme.t.glowB } }
             MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: bar.launcher() }
         }
-        Label {
-            id: clock; font.weight: Font.DemiBold; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
-            Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true
-                onTriggered: { clock.text = Qt.formatTime(new Date(), Settings.clock24 ? "HH:mm" : "h:mm AP"); date.text = Settings.barDate ? Qt.formatDate(new Date(), "ddd, MMM d") : "" } }
-        }
-        Label { id: date; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
-        Rectangle { width: 1; height: 12; color: Theme.t.line; anchors.verticalCenter: parent.verticalCenter; visible: bar.appName !== "" }
-        Pressable {
-            id: appButton
-            visible: bar.appName !== ""; width: app.width + 16; height: 22; radius: Theme.t.radiusControl
-            color: bar.menusOpen || hovered ? Theme.t.hover : "transparent"
-            anchors.verticalCenter: parent.verticalCenter; onClicked: bar.menusOpen = !bar.menusOpen
-            Label { id: app; anchors.centerIn: parent; text: bar.appName; font.weight: Font.DemiBold; font.pixelSize: 12 }
-        }
-        Repeater {
-            model: bar.menusOpen && bar.menuStyle === "inline" ? bar.menus : []
-            Pressable { required property var modelData; width: ml.width + 14; height: 22; radius: Theme.t.radiusControl; anchors.verticalCenter: parent.verticalCenter
-                color: hovered ? Theme.t.hover : "transparent"; onClicked: bar.run(modelData.id)
-                Label { id: ml; anchors.centerIn: parent; text: modelData.label; font.pixelSize: 12 } }
-        }
-    }
-
-    // Dropdown style: the menus as a list under the app name.
-    // (In the session the bar's surface grows while this is open; see Shell.qml.)
-    Glass {
-        visible: bar.menusOpen && bar.menuStyle === "dropdown"
-        popup: true; radius: Theme.t.radiusCard; width: 190; height: list.height + 12
-        x: leftRow.x + appButton.x; y: bar.height + 2
-        Column {
-            id: list; x: 6; y: 6; width: parent.width - 12
-            Repeater {
-                model: bar.menus
-                Pressable {
-                    required property var modelData
-                    required property int index
-                    width: list.width; height: 28; radius: Theme.t.radiusControl
-                    color: hovered ? Theme.t.hover : "transparent"
-                    onClicked: bar.run(modelData.id)
-                    Label { x: 10; anchors.verticalCenter: parent.verticalCenter; text: modelData.label }
+        Pressable {   // the time and date: Today opens from here
+            id: dateButton
+            width: dateRow.width + 14; height: 22; radius: Theme.t.radiusControl
+            color: bar.todayOpen || hovered ? Theme.t.hover : "transparent"
+            anchors.verticalCenter: parent.verticalCenter
+            onClicked: bar.today()
+            Row {
+                id: dateRow; anchors.centerIn: parent; spacing: 8
+                Label {
+                    id: clock; font.weight: Font.DemiBold; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
+                    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true
+                        onTriggered: { clock.text = Qt.formatTime(new Date(), Settings.clock24 ? "HH:mm" : "h:mm AP"); date.text = Settings.barDate ? Qt.formatDate(new Date(), "ddd, MMM d") : "" } }
+                }
+                Label { id: date; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter; visible: text !== "" }
+            }
+            // the Ring: as Today opens, a light in the realm's colours runs once round the date
+            Shape {
+                id: dateRing
+                anchors.centerIn: parent; width: parent.width + 4; height: parent.height + 4; opacity: 0
+                preferredRendererType: Shape.CurveRenderer
+                readonly property real perimeter: 2 * (width + height)
+                property real drawn: 0
+                function run() { ringAnim.restart() }
+                ShapePath {
+                    strokeColor: Theme.t.glowA; strokeWidth: 2; fillColor: "transparent"; capStyle: ShapePath.RoundCap
+                    strokeStyle: ShapePath.DashLine; dashPattern: [dateRing.drawn / 2, dateRing.perimeter / 2]
+                    PathRectangle { x: 1; y: 1; width: dateRing.width - 2; height: dateRing.height - 2; radius: 9 }
+                }
+                SequentialAnimation {
+                    id: ringAnim
+                    ScriptAction { script: { dateRing.opacity = 1; dateRing.drawn = 0 } }
+                    NumberAnimation { target: dateRing; property: "drawn"; to: dateRing.perimeter; duration: 300; easing.type: Easing.OutCubic }
+                    NumberAnimation { target: dateRing; property: "opacity"; to: 0; duration: 260 }
                 }
             }
+        }
+        Rectangle { width: 1; height: 12; color: Theme.t.line; anchors.verticalCenter: parent.verticalCenter; visible: bar.appName !== "" }
+        Pressable {   // the app in front: its icon, its name; its menu opens from here
+            id: appButton
+            visible: bar.appName !== ""; width: appRow.width + 16; height: 22; radius: Theme.t.radiusControl
+            color: (bar.menuOpen && bar.menuGroup === "") || hovered ? Theme.t.hover : "transparent"
+            anchors.verticalCenter: parent.verticalCenter; onClicked: bar.appMenu("")
+            Row {
+                id: appRow; anchors.centerIn: parent; spacing: 5
+                AppIcon { visible: bar.front !== null; size: 14; anchors.verticalCenter: parent.verticalCenter; name: bar.front ? bar.front.name : ""; glyph: bar.front ? bar.front.glyph : ""; image: bar.front ? bar.front.image : ""; own: bar.front ? bar.front.own || "" : ""; web: bar.front ? bar.front.web : false }
+                Label { id: app; text: bar.appName; font.weight: Font.DemiBold; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
+                Glyph { visible: !bar.rowMenus; name: "down"; size: 10; ink: Theme.t.text; opacity: 0.7; anchors.verticalCenter: parent.verticalCenter }
+            }
+        }
+        Repeater {   // a row of menus: the app's groups along the bar
+            id: groupRep
+            model: bar.rowMenus ? (Status.menus.groups || []) : []
+            Pressable { required property var modelData; width: ml.width + 14; height: 22; radius: Theme.t.radiusControl; anchors.verticalCenter: parent.verticalCenter
+                color: (bar.menuOpen && bar.menuGroup === modelData.name) || hovered ? Theme.t.hover : "transparent"; onClicked: bar.appMenu(modelData.name)
+                Label { id: ml; anchors.centerIn: parent; text: modelData.name; font.pixelSize: 12 } }
         }
     }
 
@@ -131,6 +146,10 @@ Item {
                 Glyph { visible: bar.battery.charging; name: "bolt"; size: 11; anchors.verticalCenter: parent.verticalCenter }
             }
             Glyph { visible: Status.dnd; name: "moon"; size: 13; anchors.verticalCenter: parent.verticalCenter }
+            Rectangle {   // notifications are waiting in the Control Centre
+                visible: Status.waiting; width: 7; height: 7; radius: 4; color: Theme.t.accent; anchors.verticalCenter: parent.verticalCenter
+                Rectangle { anchors.centerIn: parent; width: 15; height: 15; radius: 8; color: Theme.t.accent; opacity: 0.25; z: -1 }
+            }
             // The control-centre mark: a rounded outline.
             Rectangle { width: 16; height: 11; radius: 3; color: "transparent"; border.width: 1.5; border.color: Theme.t.text; anchors.verticalCenter: parent.verticalCenter }
         }

@@ -114,10 +114,10 @@ Glass {
                     Row {
                         anchors { fill: parent; margins: 2 }
                         Repeater {
-                            model: [["dropdown", "As a list"], ["inline", "Along the bar"]]
+                            model: [["one", "One menu"], ["row", "A row of menus"]]
                             Rectangle {
                                 required property var modelData
-                                readonly property bool on: Settings.menuStyle === modelData[0]
+                                readonly property bool on: Settings.menuStyle === modelData[0] || (modelData[0] === "one" && Settings.menuStyle === "dropdown") || (modelData[0] === "row" && Settings.menuStyle === "inline")
                                 width: parent.width / 2; height: parent.height; radius: Theme.t.radiusControl
                                 color: on ? (Theme.t.dark ? "#38FFFFFF" : "#FFFFFF") : "transparent"
                                 Label { anchors.centerIn: parent; text: modelData[1]; font.pixelSize: 12; font.weight: parent.on ? Font.DemiBold : Font.Normal }
@@ -138,7 +138,8 @@ Glass {
                 Block { required property var modelData; width: col.width; height: nc.height + 20
                     Column { id: nc; x: 12; y: 10; width: parent.width - 24; spacing: 2
                         Row { width: parent.width; spacing: 6
-                            Label { text: modelData.app; secondary: true; font.pixelSize: 11 }
+                            Label { text: modelData.app; secondary: true; font.pixelSize: 11; font.weight: Font.DemiBold }
+                            Label { visible: modelData.more > 0; text: "+" + modelData.more; secondary: true; font.pixelSize: 11 }
                             Label { text: modelData.ago; secondary: true; font.pixelSize: 11 } }
                         Label { text: modelData.summary; font.weight: Font.DemiBold; font.pixelSize: 12; width: parent.width; elide: Text.ElideRight }
                         Label { visible: modelData.body !== ""; text: modelData.body; secondary: true; font.pixelSize: 12; width: parent.width; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight } } }

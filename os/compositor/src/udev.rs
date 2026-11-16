@@ -1433,6 +1433,7 @@ impl HuginnState<UdevData> {
         };
 
         self.pre_repaint(&output, frame_target);
+        let view = self.scene_view(&output);
 
         let device = if let Some(device) = self.backend_data.backends.get_mut(&node) {
             device
@@ -1525,6 +1526,7 @@ impl HuginnState<UdevData> {
             &mut self.cursor_status,
             self.show_window_preview,
             lock_view.as_ref(),
+            &view,
         );
         let reschedule = match result {
             Ok((has_rendered, states)) => {
@@ -1607,6 +1609,7 @@ fn render_surface<'a>(
     cursor_status: &mut CursorImageStatus,
     show_window_preview: bool,
     lock: Option<&crate::render::LockView>,
+    view: &crate::wm::SceneView,
 ) -> Result<(bool, RenderElementStates), SwapBuffersError> {
     let output_geometry = space.output_geometry(output).unwrap();
     let scale = Scale::from(output.current_scale().fractional_scale());
@@ -1684,7 +1687,7 @@ fn render_surface<'a>(
     }
 
     let (elements, clear_color) =
-        output_elements(output, space, custom_elements, renderer, show_window_preview, lock);
+        output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);
 
     // FreeSync / adaptive sync: on while something fills the screen (a game, a video), off otherwise
     let want_vrr = lock.is_none() && crate::state::HuginnState::<UdevData>::output_has_fullscreen(output);

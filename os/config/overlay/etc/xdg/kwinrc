@@ -14,8 +14,9 @@ dialogparentEnabled=true
 startupfeedbackEnabled=true
 
 [ModifierOnlyShortcuts]
-# The Super (Windows) key on its own opens Huginn's start menu.
+# The Super (Windows) key on its own opens Huginn's start menu; Alt on its own, the app's menu in the top bar.
 Meta=org.huginn.Shell,/org/huginn/Shell,org.huginn.Shell,ToggleLauncher
+Alt=org.huginn.Shell,/org/huginn/Shell,org.huginn.Shell,AppMenu
 
 [Round-Corners]
 # Every window gets the same rounded corners as Huginn's own (the window radius of tokens.json).

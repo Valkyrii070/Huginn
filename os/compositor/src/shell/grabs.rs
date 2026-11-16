@@ -46,6 +46,8 @@ impl<BackendData: Backend> PointerGrab<HuginnState<BackendData>> for PointerMove
 
         data.space
             .map_element(self.window.clone(), new_location.to_i32_round(), true);
+        // at an edge or a corner: the shell shows where it'll snap
+        data.snap_hover(event.location);
     }
 
     fn relative_motion(
@@ -164,7 +166,9 @@ impl<BackendData: Backend> PointerGrab<HuginnState<BackendData>> for PointerMove
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut HuginnState<BackendData>) {}
+    fn unset(&mut self, data: &mut HuginnState<BackendData>) {
+        data.snap_drop(&self.window);
+    }
 }
 
 pub struct TouchMoveSurfaceGrab<BackendData: Backend + 'static> {

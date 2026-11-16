@@ -18,6 +18,7 @@ Row {
     readonly property real pillCentre: pill.x + pill.width / 2
     readonly property bool anyHover: pillArea.containsMouse || hoverCount > 0
     property int hoverCount: 0
+    property int h: 64                    // the dock islands' height (Settings › Desktop & Dock › Size)
     onAnyHoverChanged: hovered(anyHover)
     property real now: Date.now()
     Timer { interval: 250; repeat: true; running: Live.active; onTriggered: isl.now = Date.now() }
@@ -35,7 +36,7 @@ Row {
     }
     Glass {
         id: pill
-        height: 64; radius: 22
+        height: isl.h; radius: 22
         readonly property Item face: isl.onA ? fa : fb
         width: isl.main && isl.main.id ? face.want : 0
         visible: width > 0.5
@@ -83,7 +84,7 @@ Row {
     ListView {
         id: bubbleList
         orientation: ListView.Horizontal; interactive: false; spacing: 12
-        height: 64; width: count > 0 ? count * 64 + (count - 1) * 12 : 0
+        height: isl.h; width: count > 0 ? count * isl.h + (count - 1) * 12 : 0
         visible: width > 0.5
         Behavior on width { NumberAnimation { duration: Theme.t.moveMs; easing.type: Easing.OutCubic } }
         model: bubbleModel
@@ -104,7 +105,7 @@ Row {
         readonly property string kind: L.kindOf(it)
         readonly property bool priv: L.privacy(it)
         readonly property real want: kind ? width + 26 : 0
-        x: 12; height: 64; spacing: 12
+        x: 12; height: isl.h; spacing: 12
         LiveLead { it: face.it; now: isl.now; anchors.verticalCenter: parent.verticalCenter }
         Column {
             anchors.verticalCenter: parent.verticalCenter; spacing: face.kind === "progress" ? 5 : 1
@@ -142,7 +143,7 @@ Row {
         readonly property var it: isl.bubbleData[bid] || ({})
         readonly property string kind: L.kindOf(it)
         readonly property bool ringed: kind === "timer" || kind === "progress" || kind === "event"
-        width: 64; height: 64
+        width: isl.h; height: isl.h
         Glass { anchors.fill: parent; radius: 32 }
         LiveLead { visible: !bub.ringed; anchors.centerIn: parent; it: bub.it; now: isl.now; size: bub.kind === "playing" ? 44 : 44; round: true }
         LiveRing {

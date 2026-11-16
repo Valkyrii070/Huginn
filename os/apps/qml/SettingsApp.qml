@@ -10,7 +10,7 @@ GlassWindow {
     property var sheet: null                     // {kind: "pick" | "ask" | "confirm", title, ...}
     readonly property var pages: [
         { id: "appearance", label: "Appearance", glyph: "palette", a: "#9B8BFF", b: "#5A3FE0", group: "YOU", sub: "Light or dark, and the colour of everything." },
-        { id: "bar", label: "Top Bar & Dock", glyph: "desktop", a: "#6AB4FF", b: "#2563EB", group: "YOU", sub: "What the bar shows and how its menus open." },
+        { id: "desktop", label: "Desktop & Dock", glyph: "desktop", a: "#6AB4FF", b: "#2563EB", group: "YOU", sub: "The dock, the top bar, Today, windows, spaces and motion." },
         { id: "notifications", label: "Notifications", glyph: "bell", a: "#FF7A7A", b: "#D6336C", group: "YOU", sub: "Which apps may tell you things, and quiet hours." },
         { id: "a11y", label: "Accessibility", glyph: "eye", a: "#5EC8FF", b: "#1A73E8", group: "YOU", sub: "Seeing, hearing, typing and moving, made easier." },
         { id: "network", label: "Wi‑Fi & Network", glyph: "wifi", a: "#4DB0FF", b: "#1D63D1", group: "CONNECTIONS", sub: "Wireless and wired networks, VPN and hotspot." },
@@ -28,7 +28,7 @@ GlassWindow {
         { id: "updates", label: "Software Update", glyph: "refresh", a: "#4C8DFF", b: "#1E40AF", group: "SYSTEM", sub: "Keep the system, your apps and Huginn up to date." },
         { id: "about", label: "About", glyph: "info", a: "#A3B1C4", b: "#475569", group: "SYSTEM", sub: "This computer and the version of Huginn OS." }
     ]
-    readonly property var files: ({ appearance: "SetAppearance", bar: "SetBar", notifications: "SetNotifications", network: "SetNetwork", bluetooth: "SetBluetooth",
+    readonly property var files: ({ appearance: "SetAppearance", desktop: "SetDesktop", notifications: "SetNotifications", network: "SetNetwork", bluetooth: "SetBluetooth",
                                     accounts: "SetAccounts", displays: "SetDisplays", sound: "SetSound", power: "SetPower", input: "SetInput", time: "SetTime",
                                     language: "SetLanguage", users: "SetUsers", defaults: "SetDefaults", privacy: "SetPrivacy", updates: "SetUpdates", about: "SetAbout",
                                     a11y: "SetAccessibility" })
@@ -41,7 +41,11 @@ GlassWindow {
         ["a11y", "Slow keys", "typing accidental accessibility"], ["a11y", "Bounce keys", "tremor repeat accessibility"],
         ["a11y", "Mouse keys", "number pad pointer keyboard accessibility"], ["a11y", "Flash the screen", "deaf hearing beep bell alert visual accessibility"],
         ["appearance", "Dark mode", "light theme night"], ["appearance", "Realm", "accent colour color wallpaper tint"],
-        ["bar", "App menus", "top bar menu"], ["bar", "Clock", "24-hour time seconds"], ["bar", "Battery percentage", "top bar"],
+        ["desktop", "App menus", "top bar menu one menu row"], ["desktop", "Clock", "24-hour time seconds top bar"], ["desktop", "Battery percentage", "top bar"],
+        ["desktop", "Dock size", "dock bigger smaller icons"], ["desktop", "Hiding a window", "minimise minimize hide dock drop line comet"],
+        ["desktop", "Stacks", "downloads folder dock stack"], ["desktop", "Today", "date calendar weather clocks world time agenda"],
+        ["desktop", "Snapping windows", "snap layout halves thirds quarters tile fill button gaps"], ["desktop", "Overview", "spaces workspaces virtual desktops hot corner mission control"],
+        ["desktop", "Opening things in apps", "motion animation grow slide"],
         ["notifications", "Do Not Disturb", "quiet silence focus hours"], ["notifications", "App notifications", "banners sounds alerts badges"], ["notifications", "Previews", "lock screen private"],
         ["network", "Wi‑Fi", "wireless internet join password network"], ["network", "Airplane mode", "flight offline radio"], ["network", "VPN", "wireguard openvpn private network"],
         ["network", "Hotspot", "share internet tether"], ["network", "IP address", "mac address dns gateway details"], ["network", "Ethernet", "wired cable lan"],
@@ -81,6 +85,7 @@ GlassWindow {
     function info(id) { for (var i = 0; i < pages.length; i++) if (pages[i].id === id) return pages[i]; return pages[0] }
     function keyOf(name) {
         var n = String(name || "").toLowerCase()
+        if (n === "bar" || n === "dock" || n === "top bar & dock") n = "desktop"   // older links
         for (var i = 0; i < pages.length; i++) if (pages[i].id === n || pages[i].label.toLowerCase() === n) return pages[i].id
         return ""
     }

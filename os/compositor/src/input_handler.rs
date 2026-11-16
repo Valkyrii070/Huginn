@@ -72,6 +72,11 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             }
             KeyAction::Launcher => self.say(crate::dbus::Outgoing::Launcher),
             KeyAction::Search => self.say(crate::dbus::Outgoing::Search),
+            KeyAction::Shell(what) => self.say(crate::dbus::Outgoing::ShellKey(what.into())),
+            KeyAction::Overview => self.overview_toggle(),
+            KeyAction::SpaceStep(delta, take) => self.space_step(delta, take),
+            KeyAction::SpaceGo(n) => self.switch_space(n),
+            KeyAction::Snap(dir) => self.snap_step(dir),
             KeyAction::Lock => self.lock_now(),
             KeyAction::CloseWindow => self.window_action("close"),
             KeyAction::Maximise => self.window_action("maximise"),
@@ -128,13 +133,21 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             .input(self, keycode, state, serial, time, |state_, modifiers, handle| {
                 let keysym = handle.modified_sym();
                 let is_super = matches!(keysym, Keysym::Super_L | Keysym::Super_R);
-                // Super on its own (pressed and let go with nothing else): the start menu
+                let is_alt = matches!(keysym, Keysym::Alt_L);
+                // Super on its own (pressed and let go with nothing else): the start menu; Alt on its own: the app's menu
                 if let KeyState::Pressed = state {
                     state_.huginn.super_alone = is_super;
+                    state_.huginn.alt_alone = is_alt && !modifiers.ctrl && !modifiers.logo && !modifiers.shift;
                 } else if is_super {
                     let alone = std::mem::take(&mut state_.huginn.super_alone);
                     if alone && !inhibited {
                         return FilterResult::Intercept(KeyAction::Launcher);
+                    }
+                } else if is_alt {
+                    let alone = std::mem::take(&mut state_.huginn.alt_alone);
+                    if alone && !inhibited && state_.huginn.switching.is_none() {
+                        state_.switch_end();
+                        return FilterResult::Intercept(KeyAction::Shell("menu"));
                     }
                 }
                 // Alt let go: Alt+Tab is over
@@ -216,6 +229,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
 
         if wl_pointer::ButtonState::Pressed == state {
             self.huginn.super_alone = false;
+            self.huginn.alt_alone = false;
             if self.is_locked() {
                 let focus = self.lock_surface();
                 self.seat.get_keyboard().unwrap().set_focus(self, focus, serial);
@@ -241,6 +255,10 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     }
 
     fn on_gesture_swipe_begin<B: InputBackend>(&mut self, evt: B::GestureSwipeBeginEvent) {
+        if evt.fingers() == 3 {
+            self.huginn.swipe = Some((0.0, 0.0));
+            return;
+        }
         let serial = SCOUNTER.next_serial();
         let pointer = self.pointer.clone();
         pointer.gesture_swipe_begin(
@@ -254,6 +272,11 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     }
 
     fn on_gesture_swipe_update<B: InputBackend>(&mut self, evt: B::GestureSwipeUpdateEvent) {
+        if let Some((x, y)) = self.huginn.swipe.as_mut() {
+            *x += evt.delta().x;
+            *y += evt.delta().y;
+            return;
+        }
         let pointer = self.pointer.clone();
         pointer.gesture_swipe_update(
             self,
@@ -265,6 +288,18 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     }
 
     fn on_gesture_swipe_end<B: InputBackend>(&mut self, evt: B::GestureSwipeEndEvent) {
+        if let Some((x, y)) = self.huginn.swipe.take() {
+            if !evt.cancelled() {
+                if y < -60.0 && y.abs() > x.abs() {
+                    self.overview_open();
+                } else if y > 60.0 && y.abs() > x.abs() {
+                    self.overview_close(None);
+                } else if x.abs() > 80.0 {
+                    self.space_step(if x < 0.0 { 1 } else { -1 }, false);
+                }
+            }
+            return;
+        }
         let serial = SCOUNTER.next_serial();
         let pointer = self.pointer.clone();
         pointer.gesture_swipe_end(
@@ -439,6 +474,18 @@ impl<BackendData: Backend> HuginnState<BackendData> {
         let layers = layer_map_for_output(output);
 
         let mut under = None;
+        // The top-most layer surface on a level that takes input there (its input region counts: the shell's
+        // full-screen surfaces, like the Welcome tour's, take clicks only where they say).
+        let in_layers = |levels: &[WlrLayer]| {
+            levels.iter().find_map(|level| {
+                layers.layers_on(*level).rev().find_map(|layer| {
+                    let layer_loc = layers.layer_geometry(layer)?.loc;
+                    layer
+                        .surface_under(pos - output_geo.loc.to_f64() - layer_loc.to_f64(), WindowSurfaceType::ALL)
+                        .map(|(surface, loc)| (PointerFocusTarget::from(surface), loc + layer_loc + output_geo.loc))
+                })
+            })
+        };
         if let Some((surface, loc)) = output
             .user_data()
             .get::<FullscreenSurface>()
@@ -446,24 +493,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             .and_then(|w| w.surface_under(pos - output_geo.loc.to_f64(), WindowSurfaceType::ALL))
         {
             under = Some((surface, loc + output_geo.loc));
-        } else if let Some(focus) = layers
-            .layer_under(WlrLayer::Overlay, pos - output_geo.loc.to_f64())
-            .or_else(|| layers.layer_under(WlrLayer::Top, pos - output_geo.loc.to_f64()))
-            .and_then(|layer| {
-                let layer_loc = layers.layer_geometry(layer).unwrap().loc;
-                layer
-                    .surface_under(
-                        pos - output_geo.loc.to_f64() - layer_loc.to_f64(),
-                        WindowSurfaceType::ALL,
-                    )
-                    .map(|(surface, loc)| {
-                        (
-                            PointerFocusTarget::from(surface),
-                            loc + layer_loc + output_geo.loc,
-                        )
-                    })
-            })
-        {
+        } else if let Some(focus) = in_layers(&[WlrLayer::Overlay, WlrLayer::Top]) {
             under = Some(focus)
         } else if let Some(focus) = self.space.element_under(pos).and_then(|(window, loc)| {
             window
@@ -471,24 +501,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
                 .map(|(surface, surf_loc)| (surface, surf_loc + loc))
         }) {
             under = Some(focus);
-        } else if let Some(focus) = layers
-            .layer_under(WlrLayer::Bottom, pos - output_geo.loc.to_f64())
-            .or_else(|| layers.layer_under(WlrLayer::Background, pos - output_geo.loc.to_f64()))
-            .and_then(|layer| {
-                let layer_loc = layers.layer_geometry(layer).unwrap().loc;
-                layer
-                    .surface_under(
-                        pos - output_geo.loc.to_f64() - layer_loc.to_f64(),
-                        WindowSurfaceType::ALL,
-                    )
-                    .map(|(surface, loc)| {
-                        (
-                            PointerFocusTarget::from(surface),
-                            loc + layer_loc + output_geo.loc,
-                        )
-                    })
-            })
-        {
+        } else if let Some(focus) = in_layers(&[WlrLayer::Bottom, WlrLayer::Background]) {
             under = Some(focus)
         };
         under.map(|(s, l)| (s, l.to_f64()))
@@ -1159,6 +1172,16 @@ enum KeyAction {
     Search,
     /// Super+L
     Lock,
+    /// Something the shell does: "today" (Super+T), "menu" (Alt on its own)…
+    Shell(&'static str),
+    /// Super+Tab: the Overview
+    Overview,
+    /// Super+Ctrl+←/→ (the space beside), Super+Shift+←/→ (taking the window in front along)
+    SpaceStep(i32, bool),
+    /// Super+1…9
+    SpaceGo(usize),
+    /// Super+←/→/↑/↓: through the sizes
+    Snap(&'static str),
     /// Alt+F4
     CloseWindow,
     /// Super+Up, Super+Down
@@ -1209,12 +1232,26 @@ fn process_keyboard_shortcut(modifiers: ModifiersState, keysym: Keysym) -> Optio
         Some(KeyAction::Search)
     } else if modifiers.logo && (keysym == Keysym::l || keysym == Keysym::L) {
         Some(KeyAction::Lock)
+    } else if modifiers.logo && !modifiers.shift && (keysym == Keysym::t || keysym == Keysym::T) {
+        Some(KeyAction::Shell("today"))
+    } else if modifiers.logo && keysym == Keysym::Tab {
+        Some(KeyAction::Overview)
+    } else if modifiers.logo && modifiers.ctrl && (keysym == Keysym::Left || keysym == Keysym::Right) {
+        Some(KeyAction::SpaceStep(if keysym == Keysym::Left { -1 } else { 1 }, false))
+    } else if modifiers.logo && modifiers.shift && (keysym == Keysym::Left || keysym == Keysym::Right) {
+        Some(KeyAction::SpaceStep(if keysym == Keysym::Left { -1 } else { 1 }, true))
+    } else if modifiers.logo && !modifiers.shift && (Keysym::_1.raw()..=Keysym::_9.raw()).contains(&keysym.raw()) {
+        Some(KeyAction::SpaceGo((keysym.raw() - Keysym::_1.raw()) as usize))
+    } else if modifiers.logo && keysym == Keysym::Left {
+        Some(KeyAction::Snap("left"))
+    } else if modifiers.logo && keysym == Keysym::Right {
+        Some(KeyAction::Snap("right"))
     } else if modifiers.alt && keysym == Keysym::F4 {
         Some(KeyAction::CloseWindow)
     } else if modifiers.logo && keysym == Keysym::Up {
-        Some(KeyAction::Maximise)
+        Some(KeyAction::Snap("up"))
     } else if modifiers.logo && keysym == Keysym::Down {
-        Some(KeyAction::Minimise)
+        Some(KeyAction::Snap("down"))
     } else if modifiers.alt && (keysym == Keysym::Tab || keysym == Keysym::ISO_Left_Tab) {
         Some(KeyAction::Switch(!(modifiers.shift || keysym == Keysym::ISO_Left_Tab)))
     } else if keysym == Keysym::Print {
@@ -1251,6 +1288,7 @@ impl<BackendData: Backend> VirtualKeyboardHandler for HuginnState<BackendData> {
                     action @ (KeyAction::None
                     | KeyAction::Launcher
                     | KeyAction::Search
+                    | KeyAction::Shell(_)
                     | KeyAction::Hardware(_)) => self.process_common_key_action(action),
                     action => debug!(?action, "ignoring key action from a virtual keyboard"),
                 }

@@ -359,7 +359,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
                 .find(|e| matches!(e.0.x11_surface(), Some(w) if w == window));
 
             if let Some(element) = element {
-                let mut initial_window_location = self.space.element_location(element).unwrap();
+                let mut initial_window_location = self.space.element_location(&element).unwrap();
 
                 // If surface is maximized then unmaximize it
                 if window.is_maximized() {
@@ -397,11 +397,12 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             .space
             .elements()
             .find(|e| matches!(e.0.x11_surface(), Some(w) if w == window))
+            .cloned()
         else {
             return;
         };
 
-        let mut initial_window_location = self.space.element_location(element).unwrap();
+        let mut initial_window_location = self.space.element_location(&element).unwrap();
 
         // If surface is maximized then unmaximize it
         if window.is_maximized() {
@@ -419,6 +420,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             }
         }
 
+        self.unsnap_for_drag(&element);
         let grab = PointerMoveSurfaceGrab {
             start_data,
             window: element.clone(),

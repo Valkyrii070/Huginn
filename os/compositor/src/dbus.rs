@@ -34,6 +34,15 @@ pub enum Request {
     Windows(mpsc::Sender<String>),
     ActivateApp(Vec<String>, mpsc::Sender<bool>),
     WindowAction(String),
+    /// Something done to one window, by the id the window list gives it: "activate", "minimise", "close",
+    /// "toggle" (hide it if it's in front, else bring it forward), "maximise".
+    WindowDo(u64, String),
+    /// The shell's Overview: "close", "toggle", "activate:ID", "dim:ID,ID…"
+    OverviewDo(String),
+    /// Spaces: "switch:N", "add", "remove:N", "rename:N:name", "move:ID:N", "reorder:A:B"
+    SpaceDo(String),
+    /// Where the dock's tiles are, and how windows hide into them (JSON)
+    DockLayout(String),
 }
 
 /// What the compositor tells others over the bus.
@@ -45,12 +54,24 @@ pub enum Outgoing {
     Launcher,
     /// Super+Space (with nothing typed).
     Search,
+    /// A key for the shell (org.huginn.Shell.Key): "today" (Super+T)…
+    ShellKey(String),
     /// Print ("screen") and Shift+Print / Super+Shift+S ("choose").
     Screenshot(String),
     /// A hardware key, by the session daemon's name for it ("volumeUp", "playPause"…).
     Key(String),
     /// logind's LockedHint for this session.
     LockedHint(bool),
+    /// The windows changed (JSON, as `Windows` gives them): org.huginn.Shell.Windows.
+    Windows(String),
+    /// The Overview opened (where each window is in it) or closed: org.huginn.Shell.Overview.
+    Overview(String),
+    /// A dragged window would snap there ("" none): org.huginn.Shell.SnapPreview.
+    SnapPreview(String),
+    /// After snapping one: the other half, and the windows that could fill it: org.huginn.Shell.SnapAssist.
+    SnapAssist(String),
+    /// Alt+Tab: the windows and the one picked ("" when it's over): org.huginn.Shell.Switcher.
+    Switcher(String),
 }
 
 /// What the bus thread can read without asking the event loop.
@@ -128,13 +149,36 @@ impl Compositor {
         String::new()
     }
 
-    /// The windows, as JSON: [{"app", "title", "minimised", "focused"}].
+    /// The windows, as JSON: {"current": space, "spaces": [names], "windows": [{"id", "app", "title", "minimised",
+    /// "active", "space", "x", "y", "w", "h"}]}. The shell is also told whenever this changes (Shell.Windows).
     fn windows(&self) -> String {
         let (tx, rx) = mpsc::channel();
         if self.to_loop.send(Request::Windows(tx)).is_err() {
             return "[]".into();
         }
-        rx.recv_timeout(Duration::from_secs(1)).unwrap_or_else(|_| "[]".into())
+        rx.recv_timeout(Duration::from_secs(1)).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// The Overview: "toggle", "close", "activate:ID", "dim:ID,ID…".
+    fn overview_do(&self, action: &str) {
+        let _ = self.to_loop.send(Request::OverviewDo(action.to_string()));
+    }
+
+    /// Spaces: "switch:N", "add", "remove:N", "rename:N:name", "move:ID:N", "reorder:A:B".
+    fn space_do(&self, action: &str) {
+        let _ = self.to_loop.send(Request::SpaceDo(action.to_string()));
+    }
+
+    /// The dock: where its tiles are and how windows hide into them (JSON).
+    fn dock_layout(&self, json: &str) {
+        let _ = self.to_loop.send(Request::DockLayout(json.to_string()));
+    }
+
+    /// Something done to one window, by its id in the window list (see `Request::WindowDo`).
+    fn window_do(&self, id: &str, action: &str) {
+        if let Ok(id) = id.parse::<u64>() {
+            let _ = self.to_loop.send(Request::WindowDo(id, action.to_string()));
+        }
     }
 
     /// Bring forward (and un-minimise) the most recent window of an app, by any of its ids (desktop file id, app id,
@@ -190,7 +234,13 @@ pub fn start(to_loop: LoopSender<Request>, shared: Shared) -> mpsc::Sender<Outgo
                     }
                     Outgoing::Launcher => shell("ToggleLauncher", &()),
                     Outgoing::Search => shell("Search", &("",)),
+                    Outgoing::ShellKey(what) => shell("Key", &(what.as_str(),)),
                     Outgoing::Screenshot(what) => shell("Screenshot", &(what.as_str(),)),
+                    Outgoing::Windows(json) => shell("Windows", &(json.as_str(),)),
+                    Outgoing::Overview(json) => shell("Overview", &(json.as_str(),)),
+                    Outgoing::SnapPreview(json) => shell("SnapPreview", &(json.as_str(),)),
+                    Outgoing::SnapAssist(json) => shell("SnapAssist", &(json.as_str(),)),
+                    Outgoing::Switcher(json) => shell("Switcher", &(json.as_str(),)),
                     Outgoing::Key(name) => (name.as_str(),).send_to(
                         &conn,
                         "org.huginn.Session",

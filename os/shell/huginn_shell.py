@@ -155,16 +155,22 @@ class Settings(QObject):
     """User customisation, kept in ~/.config/huginn-shell/settings.json and shared by the shell and every app.
     Each process watches the file, so a change made anywhere (realm, dark mode, menu style) shows everywhere."""
     changed = Signal()
-    DEFAULTS = {"menuStyle": "dropdown", "dark": "true", "realm": "aurora", "clock24": "true", "barDate": "true", "batteryPercent": "false",
+    DEFAULTS = {"menuStyle": "one", "dark": "true", "realm": "aurora", "clock24": "true", "barDate": "true", "batteryPercent": "false",
                 "dockHide": "false", "dockDots": "true", "autoUpdate": "true", "liveWallpaper": "false",
-                "contrast": "false", "reduceTransparency": "false", "reduceMotion": "false", "uiScale": "1"}       # accessibility
-    SWITCHES = ("clock24", "barDate", "batteryPercent", "dockHide", "dockDots", "autoUpdate", "liveWallpaper", "contrast", "reduceTransparency", "reduceMotion")
+                "contrast": "false", "reduceTransparency": "false", "reduceMotion": "false", "uiScale": "1",       # accessibility
+                # Settings › Desktop & Dock
+                "dockSize": "44", "hideStyle": "drop", "dockClickHides": "true", "overviewOpen": "glide", "hotCorner": "false",
+                "spacesAllScreens": "true", "inAppMotion": "grow", "fillButtonLayouts": "true", "snapGaps": "true", "keepSnapped": "true"}
+    SWITCHES = ("clock24", "barDate", "batteryPercent", "dockHide", "dockDots", "autoUpdate", "liveWallpaper", "contrast", "reduceTransparency", "reduceMotion",
+                "dockClickHides", "hotCorner", "spacesAllScreens", "fillButtonLayouts", "snapGaps", "keepSnapped")
     SCALES = ("1", "1.25", "1.5", "1.75", "2")
 
     def __init__(self, path: Path, realms: list, persist: bool = True):
         super().__init__()
         self._path, self._persist, self._values = path, persist, dict(self.DEFAULTS)
-        self._choices = {"menuStyle": ("dropdown", "inline"), "dark": ("true", "false"), "realm": tuple(realms), "uiScale": self.SCALES,
+        self._choices = {"menuStyle": ("one", "row", "dropdown", "inline"), "dark": ("true", "false"), "realm": tuple(realms), "uiScale": self.SCALES,
+                         "dockSize": ("36", "40", "44", "52", "60"), "hideStyle": ("drop", "line", "comet"), "overviewOpen": ("glide", "light"),
+                         "inAppMotion": ("grow", "slide"),
                          **{k: ("true", "false") for k in self.SWITCHES}}
         self._load()
         self._watcher = QFileSystemWatcher(self)
@@ -203,6 +209,16 @@ class Settings(QObject):
     reduceTransparency = Property(bool, lambda self: self._values["reduceTransparency"] == "true", notify=changed)
     reduceMotion = Property(bool, lambda self: self._values["reduceMotion"] == "true", notify=changed)
     uiScale = Property(str, lambda self: self._values["uiScale"], notify=changed)
+    dockSize = Property(int, lambda self: int(self._values["dockSize"]), notify=changed)
+    hideStyle = Property(str, lambda self: self._values["hideStyle"], notify=changed)
+    dockClickHides = Property(bool, lambda self: self._values["dockClickHides"] == "true", notify=changed)
+    overviewOpen = Property(str, lambda self: self._values["overviewOpen"], notify=changed)
+    hotCorner = Property(bool, lambda self: self._values["hotCorner"] == "true", notify=changed)
+    spacesAllScreens = Property(bool, lambda self: self._values["spacesAllScreens"] == "true", notify=changed)
+    inAppMotion = Property(str, lambda self: self._values["inAppMotion"], notify=changed)
+    fillButtonLayouts = Property(bool, lambda self: self._values["fillButtonLayouts"] == "true", notify=changed)
+    snapGaps = Property(bool, lambda self: self._values["snapGaps"] == "true", notify=changed)
+    keepSnapped = Property(bool, lambda self: self._values["keepSnapped"] == "true", notify=changed)
 
     def override(self, key: str, value: str) -> None:
         """Set a value for this run only (command-line flags)."""
@@ -884,7 +900,7 @@ def main() -> int:
     ap.add_argument("--realm", default="")
     ap.add_argument("--menus", action="store_true", help="preview: start with the app menus open")
     ap.add_argument("--arrive", action="store_true", help="preview: play the arrival after the sign-in screen")
-    ap.add_argument("--menu-style", choices=["dropdown", "inline"], default="", help="override the saved menu style for this run")
+    ap.add_argument("--menu-style", choices=["one", "row"], default="", help="override the saved menu style for this run")
     ap.add_argument("--live", default="", help="preview: what the live island shows (one, call, share, announce, event, none; default: music, a download, a timer)")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dark", action="store_true")
@@ -926,6 +942,15 @@ def main() -> int:
     from huginn_system import System
     status = System(demo=args.preview, apps=apps)              # battery, network, Bluetooth, levels, the app in front
     ctx.setContextProperty("Status", status)
+    from huginn_stacks import Stacks
+    stacks = Stacks(demo=args.preview, icon=own_icon)               # the dock's stacks: Downloads, and folders put there
+    ctx.setContextProperty("Stacks", stacks)
+    from huginn_today import Today
+    today = Today(demo=args.preview, settings=settings)                                 # the month, the weather, what's coming (the date, Super+T)
+    ctx.setContextProperty("Today", today)
+    from huginn_tour import Tour
+    tour = Tour(demo=args.preview)                                    # the Welcome tour (first sign-in; what's new after updates)
+    ctx.setContextProperty("Tour", tour)
     status.activeChanged.connect(lambda: live.setFront(status.active.get("appId", "")))    # two players: the one not in front wins
     from huginn_search import Search
     search = Search(apps, tabs, demo=args.preview)               # Search everything (Super+Space)

@@ -74,12 +74,50 @@ Window {
                 required property var modelData
                 required property int index
                 width: 12; height: 12; radius: 6; color: modelData[0]; border.width: 1; border.color: "#22000000"; anchors.verticalCenter: parent.verticalCenter
-                MouseArea { anchors.fill: parent; anchors.margins: -3
-                    onClicked: index === 0 ? win.close() : index === 1 ? win.showMinimized() : (win.maximised ? win.showNormal() : win.showMaximized()) }
+                MouseArea { anchors.fill: parent; anchors.margins: -3; hoverEnabled: true
+                    onClicked: index === 0 ? win.close() : index === 1 ? win.showMinimized() : (win.maximised ? win.showNormal() : win.showMaximized())
+                    // the fill button, held (or pointed at for a moment): the layouts
+                    onPressAndHold: if (index === 2 && layouts.able) layouts.shown = true
+                    onContainsMouseChanged: if (index === 2) { if (containsMouse) layoutsHover.restart(); else layoutsHover.stop() } }
             }
         }
         Label { text: win.title; font.pixelSize: 12; font.weight: Font.DemiBold; leftPadding: 4; rightPadding: win.heading !== "" ? 2 : 8; anchors.verticalCenter: parent.verticalCenter }
         Label { visible: win.heading !== ""; text: win.heading; secondary: true; font.pixelSize: 12; rightPadding: 8; width: Math.min(implicitWidth, 240); elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter }
+    }
+    // The fill button's layouts: halves, thirds, two-thirds, quarters, all of it (Settings › Desktop & Dock can turn
+    // them off). Huginn's shell does it, under its own compositor or KWin.
+    Timer { id: layoutsHover; interval: 650; onTriggered: if (layouts.able) layouts.shown = true }
+    MouseArea { anchors.fill: parent; z: 19; visible: layouts.shown; onClicked: layouts.shown = false }
+    Rectangle {
+        id: layouts
+        property bool shown: false
+        readonly property bool able: typeof AppMenu !== "undefined" && AppMenu !== null && Settings.fillButtonLayouts !== false
+        visible: shown; z: 20; x: 12; y: 48
+        width: grid.width + 20; height: grid.height + 20; radius: 16
+        color: Theme.t.dark ? Qt.rgba(0.11, 0.12, 0.15, 0.97) : Qt.rgba(0.98, 0.98, 0.99, 0.98); border.width: 1; border.color: Theme.t.islandLine
+        transformOrigin: Item.TopLeft
+        scale: shown ? 1 : 0.9
+        Behavior on scale { NumberAnimation { duration: Theme.t.openMs ? 140 : 0; easing.type: Easing.OutCubic } }
+        Grid {
+            id: grid
+            x: 10; y: 10; columns: 4; spacing: 8
+            Repeater {
+                model: [["left", [[0, 0, .5, 1]]], ["right", [[.5, 0, .5, 1]]], ["left-third", [[0, 0, .333, 1]]], ["right-third", [[.667, 0, .333, 1]]],
+                        ["left-two-thirds", [[0, 0, .667, 1]]], ["right-two-thirds", [[.333, 0, .667, 1]]], ["top-left", [[0, 0, .5, .5]]], ["top-right", [[.5, 0, .5, .5]]],
+                        ["bottom-left", [[0, .5, .5, .5]]], ["bottom-right", [[.5, .5, .5, .5]]], ["max", [[0, 0, 1, 1]]]]
+                Rectangle {
+                    required property var modelData
+                    width: 56; height: 36; radius: 7; color: lh.containsMouse ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.18) : Theme.t.hover
+                    border.width: lh.containsMouse ? 1.5 : 1; border.color: lh.containsMouse ? Theme.t.accent : Theme.t.islandLine
+                    Repeater {
+                        model: parent.modelData[1]
+                        Rectangle { required property var modelData; x: 4 + modelData[0] * 48; y: 4 + modelData[1] * 28; width: modelData[2] * 48; height: modelData[3] * 28; radius: 4
+                            color: lh.containsMouse ? Theme.t.accent : Theme.t.text_secondary; opacity: 0.85 }
+                    }
+                    MouseArea { id: lh; anchors.fill: parent; hoverEnabled: true; onClicked: { layouts.shown = false; AppMenu.snap(parent.modelData[0]) } }
+                }
+            }
+        }
     }
     MouseArea {   // resize from the bottom-right corner
         width: 16; height: 16; z: 9; anchors { right: parent.right; bottom: parent.bottom } cursorShape: Qt.SizeFDiagCursor

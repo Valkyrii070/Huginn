@@ -21,6 +21,29 @@ from pathlib import Path
 from gi.repository import Gio, GLib
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 
+# KWin script: the window list for the shell (the same as huginnactive's main.js, for a shell started after KWin)
+WINDOWS_JS = """var lastWindows = "";
+function spaceOf(w) {
+    if (w.onAllDesktops || !w.desktops || w.desktops.length === 0) return -1;
+    return workspace.desktops.indexOf(w.desktops[0]);
+}
+function reportWindows() {
+    var rows = [];
+    var all = workspace.windowList();
+    for (var i = 0; i < all.length; i++) {
+        var w = all[i];
+        if (!w.normalWindow || w.skipTaskbar) continue;
+        var g = w.frameGeometry;
+        rows.push({ id: String(w.internalId), app: w.desktopFileName || w.resourceClass || "", cls: w.resourceClass || "",
+                    title: w.caption, minimised: w.minimized, active: w === workspace.activeWindow, space: spaceOf(w), pid: w.pid, full: w.fullScreen,
+                    x: g.x, y: g.y, w: g.width, h: g.height });
+    }
+    var spaces = [];
+    for (var j = 0; j < workspace.desktops.length; j++) spaces.push(workspace.desktops[j].name);
+    callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Windows",
+             JSON.stringify({ current: workspace.desktops.indexOf(workspace.currentDesktop), spaces: spaces, windows: rows }));
+}"""
+
 SHELL_XML = """<node><interface name="org.huginn.Shell">
   <method name="Active"><arg type="s" name="caption" direction="in"/><arg type="s" name="app" direction="in"/>
     <arg type="s" name="desktop" direction="in"/><arg type="b" name="maximized" direction="in"/></method>
@@ -29,9 +52,30 @@ SHELL_XML = """<node><interface name="org.huginn.Shell">
   <method name="Launcher"><arg type="s" name="what" direction="in"/></method>
   <method name="Search"><arg type="s" name="text" direction="in"/></method>
   <method name="Screenshot"><arg type="s" name="what" direction="in"/></method>
+  <method name="Windows"><arg type="s" name="json" direction="in"/></method>
+  <method name="Key"><arg type="s" name="what" direction="in"/></method>
+  <method name="Tour"/>
+  <method name="Overview"><arg type="s" name="json" direction="in"/></method>
+  <method name="SnapPreview"><arg type="s" name="json" direction="in"/></method>
+  <method name="SnapAssist"><arg type="s" name="json" direction="in"/></method>
+  <method name="Switcher"><arg type="s" name="json" direction="in"/></method>
+  <method name="Snap"><arg type="s" name="layout" direction="in"/></method>
+  <method name="AppMenu"/>
 </interface></node>"""
 HISTORY = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "huginn" / "notifications.jsonl"
+SEEN_NOTES = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "huginn" / "notifications-seen"
+BUSY_FLAG = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "huginn-busy-screen"
 
+
+
+def QProcess_start(app: str) -> None:
+    """One of Huginn's own apps."""
+    from PySide6.QtCore import QProcess
+    here = Path(__file__).resolve().parent
+    for d in (Path("/usr/share/huginn-apps"), here.parent / "apps"):
+        if (d / "huginn_app.py").exists():
+            QProcess.startDetached("python3", [str(d / "huginn_app.py"), app])
+            return
 
 
 def qt_runs_glib() -> bool:
@@ -49,8 +93,14 @@ def _js(text: str) -> str:
 class System(QObject):
     changed = Signal()
     activeChanged = Signal()
+    windowsChanged = Signal()
+    menusChanged = Signal()
+    sceneChanged = Signal()                                # the Overview, snapping, Alt+Tab (Huginn's compositor)
     launcherWanted = Signal()                              # Super on its own (KWin asks)
     searchWanted = Signal(str)                             # Meta+Space: Search everything
+    keyWanted = Signal(str)                                # a key for the shell: "today" (Meta+T)…
+    tourWanted = Signal()                                  # Huginn's menu: Take the tour again
+    shellMenuAction = Signal(str)                          # a menu item the shell itself does (about, aboutApp, appWindows, pin)
 
     def __init__(self, demo: bool, apps=None):
         super().__init__()
@@ -64,6 +114,11 @@ class System(QObject):
         self._night = {"available": False, "on": False}
         self._notes = []
         self._active = {"name": "", "appId": "", "caption": "", "maximized": False}
+        self._windows = []                                 # every window (the dock, the Overview): see _read_windows
+        self._spaces = {"current": 0, "names": ["Main"]}
+        self._menus = {}                                   # the app in front's menus (the top bar's one menu)
+        self._overview, self._snap_preview, self._snap_assist, self._switcher = {}, {}, {}, {}
+        self._menu_bus = ""
         self._bt_path = ""
         self._pending = {}                                 # dock clicks waiting for KWin to say if a window was there
         self.sb = self.yb = None
@@ -77,6 +132,11 @@ class System(QObject):
             self._levels = {"brightness": 0.68, "volume": 0.42, "muted": False}
             self._night = {"available": True, "on": False}
             self._notes = [{"app": "Software Update", "summary": "Updates are ready", "body": "3 updates, including Huginn 1.4.", "ago": "2 min"}]
+            demo_windows = [("1", "huginn-files", "Documents › Travel", False, False), ("2", "huginn-files", "Pictures › Iceland", False, True),
+                            ("3", "huginn-files", "Downloads", True, False), ("4", "huginn-writer", "Iceland trip plan", False, False)]
+            self._windows = [{"id": i, "appId": a, "name": "", "title": t, "minimised": m, "active": act, "space": 0}
+                             for i, a, t, m, act in demo_windows]
+            QTimer.singleShot(0, self._name_windows)
             return
         try:
             self.sb = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -105,11 +165,19 @@ class System(QObject):
         self._pump = QTimer(self, interval=40, timeout=lambda: GLib.MainContext.default().iteration(False))
         if not qt_runs_glib():
             self._pump.start()
+        from PySide6.QtCore import QFileSystemWatcher
+        HISTORY.parent.mkdir(parents=True, exist_ok=True)
+        self._notes_watch = QFileSystemWatcher([str(HISTORY.parent)], self)        # a notification came: the dot, the Control Centre
+        self._notes_watch.directoryChanged.connect(lambda *_: self._later(self._reread_notes))
+        self._notes_watch.fileChanged.connect(lambda *_: self._later(self._reread_notes))
+        if HISTORY.exists():
+            self._notes_watch.addPath(str(HISTORY))
         self._slow = QTimer(self, interval=20000, timeout=self.refresh)        # the Wi‑Fi signal, and anything missed
         self._slow.start()
         QTimer.singleShot(800, self.refresh)
         QTimer.singleShot(1500, self._read_power)
         QTimer.singleShot(1200, self._ask_kwin)            # KWin's own script reports changes; this asks for the start
+        QTimer.singleShot(1300, self._ask_windows)
 
     def _ask_kwin(self):
         """When the shell (re)starts after KWin, ask once which window is in front."""
@@ -120,6 +188,229 @@ if (w && w.fullScreen) full = true;
 else if (w) { var a = workspace.clientArea(KWin.MaximizeArea, w); full = w.frameGeometry.width >= a.width - 2 && w.frameGeometry.height >= a.height - 2; }
 if (!w || w.normalWindow || w.dialog)
     callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Active", w ? w.caption : "", w ? w.resourceClass : "", w ? w.desktopFileName : "", full);""")
+
+    def _ask_windows(self):
+        """The window list, once at the start (afterwards the compositor or KWin's script tells us of changes)."""
+        if not self.sb:
+            return
+        if self._own_compositor():
+            got = self._compositor("Windows", None, "(s)")
+            if got:
+                self._read_windows(got[0])
+        elif self._kwin_running():
+            self.kwin(WINDOWS_JS + "\nreportWindows();")
+
+    def _read_windows(self, text: str) -> None:
+        try:
+            data = json.loads(text or "{}")
+        except ValueError:
+            return
+        if isinstance(data, list):                         # an older compositor: just the windows
+            data = {"windows": data}
+        rows = []
+        for w in data.get("windows", []):
+            app_id = w.get("app", "")
+            rows.append({"id": str(w.get("id", "")), "appId": app_id, "pid": int(w.get("pid", 0) or 0), "name": self._app_name(app_id) or self._app_name(w.get("cls", "")),
+                         "title": w.get("title", ""), "minimised": bool(w.get("minimised")), "active": bool(w.get("active") or w.get("focused")),
+                         "space": int(w.get("space", 0)), "full": bool(w.get("full")), "x": w.get("x", 0), "y": w.get("y", 0), "w": w.get("w", 0), "h": w.get("h", 0)})
+        self._windows = rows
+        self._spaces = {"current": int(data.get("current", 0)), "names": list(data.get("spaces") or ["Main"])}
+        self.windowsChanged.emit()
+
+    def _name_windows(self):
+        for w in self._windows:
+            w["name"] = self._app_name(w["appId"]) or w["name"]
+        self.windowsChanged.emit()
+
+    @Slot(str, str)
+    def windowDo(self, wid: str, action: str) -> None:
+        """Something done to one window, by its id in the list: activate, minimise, close, toggle (hide it if it's
+        in front, else bring it forward), maximise."""
+        own = action.startswith(("snap:", "space:"))           # Huginn's compositor only (KWin: snapFront / spaceDo)
+        if action not in ("activate", "minimise", "close", "toggle", "maximise") and not own or not wid:
+            return
+        if own and (self._demo or not self.sb or not self._own_compositor()):
+            return
+        if self._demo or not self.sb:
+            for w in self._windows:
+                if w["id"] == wid:
+                    if action == "close":
+                        self._windows.remove(w)
+                        break
+                    hide = action == "minimise" or (action == "toggle" and w["active"] and not w["minimised"])
+                    for o in self._windows:
+                        o["active"] = False
+                    w["minimised"] = hide
+                    w["active"] = not hide
+                    break
+            self.windowsChanged.emit()
+            return
+        if self._own_compositor():
+            self._compositor("WindowDo", GLib.Variant("(ss)", (wid, action)), None)
+            return
+        do = {"activate": "w.minimized = false; workspace.activeWindow = w;",
+              "minimise": "w.minimized = true;",
+              "close": "w.closeWindow();",
+              "toggle": "if (w === workspace.activeWindow && !w.minimized) w.minimized = true; else { w.minimized = false; workspace.activeWindow = w; }",
+              "maximise": "w.minimized = false; workspace.activeWindow = w; w.setMaximize(true, true);"}[action]
+        self.kwin(f"""var all = workspace.windowList();
+for (var i = 0; i < all.length; i++) {{ var w = all[i]; if (String(w.internalId) === {json.dumps(wid)}) {{ {do} break; }} }}""")
+
+    # ------------------------------------------------------------------ the app in front's menus
+    def _huginn_menus(self) -> dict:
+        """With nothing in front, the name in the bar is Huginn: the desktop's own menu."""
+        def it(label, act, keys=""):
+            return {"label": label, "id": act, "keys": keys, "enabled": True}
+        return {"app": "Huginn", "key": "huginn", "groups": [],
+                "top": [it("About Huginn OS", "shell:about"), it("Settings…", "shell:settings", "Ctrl+,")],
+                "middle": [it("Change wallpaper…", "shell:wallpaper"), it("Desktop & Dock settings…", "shell:desktop"), it("Show the desktop", "shell:showDesktop", "Super+D"),
+                           {"sep": True}, it("Help", "shell:help", "F1"), it("Take the tour again", "shell:tour")],
+                "bottom": []}
+
+    def _basic_menus(self, name: str) -> dict:
+        """An app that doesn't share its menus: the same basics as every other app's, so the menu is never empty."""
+        def it(label, act, keys="", on=True):
+            return {"label": label, "id": act, "keys": keys, "enabled": on}
+        return {"app": name, "key": "", "groups": [],
+                "top": [it(f"About {name}", "shell:aboutApp"), it(f"{name} Settings…", "", "Ctrl+,", False)],
+                "middle": [it("Show all its windows", "shell:appWindows"), it("Keep in the dock", "shell:pin")],
+                "bottom": [it("Minimise", "shell:minimise"), it("Close window", "shell:close", "Ctrl+W"), it(f"Quit {name}", "shell:quit", "Ctrl+Q")]}
+
+    def _front_window(self):
+        """The window whose app is in the bar (the shell's own panels can have the keyboard meanwhile)."""
+        front = next((w for w in self._windows if w.get("active") and not w.get("minimised")), None)
+        if front is None and self._active.get("appId"):
+            mine = [w for w in self._windows if not w.get("minimised") and w.get("appId", "").lower() == self._active["appId"].lower()]
+            front = mine[-1] if mine else None
+        return front
+
+    @Slot()
+    def loadMenus(self) -> None:
+        name = self._active.get("name") or ""
+        front = self._front_window()
+        if not name or front is None and not self._demo:
+            self._menu_bus = ""
+            self._menus = self._huginn_menus()
+            self.menusChanged.emit()
+            return
+        self._menus = self._basic_menus(name)
+        self._menu_bus = ""
+        self.menusChanged.emit()
+        pid = (front or {}).get("pid", 0)
+        if self._demo or not self.sb or not pid:
+            return
+        bus = f"org.huginn.App.p{pid}"
+
+        def got(conn, res):
+            try:
+                text = conn.call_finish(res).unpack()[0]
+                data = json.loads(text)
+            except (GLib.Error, ValueError):
+                return
+            if data.get("groups") is not None:
+                data.setdefault("middle", [])
+                self._menus = data
+                self._menu_bus = bus
+                self.menusChanged.emit()
+        self.sb.call(bus, "/org/huginn/App", "org.huginn.App", "Menus", None, GLib.VariantType("(s)"),
+                     Gio.DBusCallFlags.NO_AUTO_START, 1500, None, got)
+
+    @Slot(str)
+    def menuTrigger(self, act: str) -> None:
+        if not act:
+            return
+        if act.startswith("shell:"):
+            what = act[6:]
+            front = self._front_window()
+            if what == "minimise":
+                self.windowAction("minimise")
+            elif what == "close":
+                self.windowAction("close")
+            elif what == "quit" and front:
+                for w in [w for w in self._windows if w.get("name") == front.get("name")]:
+                    self.windowDo(w["id"], "close")
+            elif what in ("settings", "wallpaper", "desktop"):
+                self.openSettings({"settings": "", "wallpaper": "appearance", "desktop": "desktop"}[what])
+            elif what == "help":
+                QProcess_start("help")
+            elif what == "tour":
+                self.tourWanted.emit()
+            elif what == "showDesktop":
+                for w in self._windows:
+                    if not w.get("minimised"):
+                        self.windowDo(w["id"], "minimise")
+            else:
+                self.shellMenuAction.emit(what)
+            return
+        if self._menu_bus and self.sb:
+            self.sb.call(self._menu_bus, "/org/huginn/App", "org.huginn.App", "Trigger", GLib.Variant("(s)", (act,)), None,
+                         Gio.DBusCallFlags.NO_AUTO_START, 1500, None, None)
+
+    # ------------------------------------------------------------------ the Overview, spaces, snapping
+    @Slot(str)
+    def overviewDo(self, action: str) -> None:
+        """The Overview: toggle, close, activate:ID, dim:ID,ID… (KWin: its own Overview, for toggle)."""
+        if self._demo or not self.sb:
+            return
+        if self._own_compositor():
+            self._compositor("OverviewDo", GLib.Variant("(s)", (action,)), None)
+        elif self._kwin_running() and action in ("toggle", "open"):
+            try:
+                self.sb.call_sync("org.kde.kglobalaccel", "/component/kwin", "org.kde.kglobalaccel.Component", "invokeShortcut",
+                                  GLib.Variant("(s)", ("Overview",)), None, 0, 1500, None)
+            except GLib.Error:
+                pass
+
+    @Slot(str)
+    def spaceDo(self, action: str) -> None:
+        """Spaces: switch:N, add, remove:N, rename:N:name, move:ID:N, reorder:A:B."""
+        if self._demo or not self.sb:
+            return
+        if self._own_compositor():
+            self._compositor("SpaceDo", GLib.Variant("(s)", (action,)), None)
+            return
+        parts = action.split(":", 2)
+        what, a, b = (parts + ["", "", ""])[:3]
+        js = {"switch": f"var d = workspace.desktops[{int(a or 0)}]; if (d) workspace.currentDesktop = d;",
+              "add": "workspace.createDesktop(workspace.desktops.length, 'Space ' + (workspace.desktops.length + 1));",
+              "remove": f"var d = workspace.desktops[{int(a or 0)}]; if (d && workspace.desktops.length > 1) workspace.removeDesktop(d);",
+              "rename": f"var d = workspace.desktops[{int(a or 0) if a.isdigit() else 0}]; if (d) d.name = {json.dumps(b)};",
+              "move": f"var d = workspace.desktops[{int(b or 0) if b.isdigit() else 0}]; var all = workspace.windowList();"
+                      f" for (var i = 0; i < all.length; i++) if (String(all[i].internalId) === {json.dumps(a)} && d) all[i].desktops = [d];"}.get(what)
+        if js:
+            self.kwin(js + "\n" + WINDOWS_JS + "\nreportWindows();")
+
+    @Slot(str)
+    def dockLayout(self, text: str) -> None:
+        """Where the dock's tiles are (windows hide into them) and how: for Huginn's compositor."""
+        if self._demo or not self.sb or not self._own_compositor():
+            return
+        self._compositor("DockLayout", GLib.Variant("(s)", (text,)), None)
+
+    @Slot(str)
+    def snapFront(self, layout: str) -> None:
+        """The window in front, snapped: left, right, max, top-left…, left-third, right-two-thirds… (its fill button)."""
+        front = self._front_window()
+        if not front or self._demo or not self.sb:
+            return
+        if self._own_compositor():
+            self.windowDo(front["id"], "snap:" + layout)
+            return
+        part = {"left": (0, 0, .5, 1), "right": (.5, 0, .5, 1), "max": (0, 0, 1, 1), "top-left": (0, 0, .5, .5), "top-right": (.5, 0, .5, .5),
+                "bottom-left": (0, .5, .5, .5), "bottom-right": (.5, .5, .5, .5), "left-third": (0, 0, 1 / 3, 1), "right-third": (2 / 3, 0, 1 / 3, 1),
+                "left-two-thirds": (0, 0, 2 / 3, 1), "right-two-thirds": (1 / 3, 0, 2 / 3, 1)}.get(layout)
+        if part:
+            x, y, w, h = part
+            self.kwin(f"""var all = workspace.windowList();
+for (var i = 0; i < all.length; i++) {{ var win = all[i]; if (String(win.internalId) !== {json.dumps(front['id'])}) continue;
+  var a = workspace.clientArea(KWin.MaximizeArea, win), g = 8;
+  win.frameGeometry = {{ x: a.x + g + (a.width - 2 * g) * {x} + ({x} > 0 ? g / 2 : 0), y: a.y + g + (a.height - 2 * g) * {y} + ({y} > 0 ? g / 2 : 0),
+                        width: (a.width - 2 * g) * {w} - ({w} < 1 ? g / 2 : 0), height: (a.height - 2 * g) * {h} - ({h} < 1 ? g / 2 : 0) }}; }}""")
+
+    @Slot()
+    def assistDone(self) -> None:
+        self._snap_assist = {}
+        self.sceneChanged.emit()
 
     def _later(self, fn):
         QTimer.singleShot(150, fn)
@@ -229,22 +520,65 @@ if (!w || w.normalWindow || w.dialog)
 
     @staticmethod
     def _read_notes() -> list:
+        """What came, grouped by app (the newest of each, and how many more), newest app first."""
         try:
-            lines = HISTORY.read_text(encoding="utf-8").splitlines()[-30:]
+            lines = HISTORY.read_text(encoding="utf-8").splitlines()[-60:]
         except OSError:
             return []
-        out = []
+        out, at = [], {}
         for line in reversed(lines):
             try:
                 n = json.loads(line)
             except ValueError:
                 continue
+            app = n.get("app", "")
+            if app in at:
+                out[at[app]]["more"] += 1
+                continue
+            if len(out) >= 6:
+                continue
             ago = max(0, int(time.time()) - int(n.get("at", 0)))
             text = "now" if ago < 60 else f"{ago // 60} min" if ago < 3600 else f"{ago // 3600} h" if ago < 86400 else f"{ago // 86400} d"
-            out.append({"app": n.get("app", ""), "summary": n.get("summary", ""), "body": n.get("body", ""), "ago": text})
-            if len(out) >= 6:
-                break
+            at[app] = len(out)
+            out.append({"app": app, "summary": n.get("summary", ""), "body": n.get("body", ""), "ago": text, "at": int(n.get("at", 0)), "more": 0,
+                        "icon": n.get("icon", "")})
         return out
+
+    def _reread_notes(self) -> None:
+        if HISTORY.exists() and str(HISTORY) not in self._notes_watch.files():
+            self._notes_watch.addPath(str(HISTORY))
+        notes = self._read_notes()
+        if notes != self._notes:
+            self._notes = notes
+            self.changed.emit()
+
+    def _waiting(self) -> bool:
+        """Notifications came since the Control Centre was last opened: a dot by the status icons."""
+        try:
+            seen = float(SEEN_NOTES.read_text(encoding="utf-8") or 0)
+        except (OSError, ValueError):
+            seen = 0
+        return any(n.get("at", 0) > seen for n in self._notes)
+
+    @Slot()
+    def notesSeen(self) -> None:
+        try:
+            SEEN_NOTES.parent.mkdir(parents=True, exist_ok=True)
+            SEEN_NOTES.write_text(str(time.time()), encoding="utf-8")
+        except OSError:
+            pass
+        self.changed.emit()
+
+    @Slot(bool)
+    def setBusyScreen(self, busy: bool) -> None:
+        """Something has the whole screen, or it's being shared: notifications wait quietly (calls and alarms don't)."""
+        try:
+            if busy:
+                BUSY_FLAG.write_text("1", encoding="utf-8")
+            elif BUSY_FLAG.exists():
+                BUSY_FLAG.unlink()
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------ changing
     def _set(self, bus, name, path, iface, prop, value) -> None:
@@ -412,6 +746,32 @@ if (!w || w.normalWindow || w.dialog)
             app = self._app_name(desktop or resource)
             self._active = {"name": app or caption, "appId": desktop or resource, "caption": caption, "maximized": bool(maximized)}
             self.activeChanged.emit()
+        elif method == "Key":
+            self.keyWanted.emit(params.unpack()[0])
+        elif method == "Tour":                                   # Welcome in the apps, Help, Huginn's menu
+            self.tourWanted.emit()
+        elif method == "Snap":                                   # an app's fill button: the window in front, snapped
+            layout = params.unpack()[0]
+            QTimer.singleShot(0, lambda: self.snapFront(layout))
+        elif method in ("Overview", "SnapPreview", "SnapAssist", "Switcher"):
+            text = params.unpack()[0]
+            try:
+                data = json.loads(text) if text else {}
+            except ValueError:
+                data = {}
+            if method == "Overview":
+                self._overview = data
+            elif method == "SnapPreview":
+                self._snap_preview = data
+            elif method == "SnapAssist":
+                self._snap_assist = data
+            else:
+                self._switcher = data
+            self.sceneChanged.emit()
+        elif method == "AppMenu":                                # Alt on its own (KWin)
+            self.keyWanted.emit("menu")
+        elif method == "Windows":
+            self._read_windows(params.unpack()[0])
         elif method == "Activated":
             key, found = params.unpack()
             command = self._pending.pop(key, "")
@@ -522,7 +882,16 @@ callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Activated
     dnd = Property(bool, lambda self: self._dnd, notify=changed)
     nightLight = Property("QVariantMap", lambda self: self._night, notify=changed)
     notifications = Property("QVariantList", lambda self: self._notes, notify=changed)
+    waiting = Property(bool, lambda self: self._waiting(), notify=changed)
     active = Property("QVariantMap", lambda self: self._active, notify=activeChanged)
+    windows = Property("QVariantList", lambda self: self._windows, notify=windowsChanged)
+    menus = Property("QVariantMap", lambda self: self._menus, notify=menusChanged)
+    overview = Property("QVariantMap", lambda self: self._overview, notify=sceneChanged)
+    snapPreview = Property("QVariantMap", lambda self: self._snap_preview, notify=sceneChanged)
+    snapAssist = Property("QVariantMap", lambda self: self._snap_assist, notify=sceneChanged)
+    switcher = Property("QVariantMap", lambda self: self._switcher, notify=sceneChanged)
+    ownCompositor = Property(bool, lambda self: bool(self.sb) and self._own_compositor(), constant=True)
+    spaces = Property("QVariantMap", lambda self: self._spaces, notify=windowsChanged)
     powerCaps = Property("QVariantMap", lambda self: self._power, notify=changed)
 
     def _primary(self) -> str:
