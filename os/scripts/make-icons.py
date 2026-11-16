@@ -313,9 +313,12 @@ PAGE = "M68 18h88l52 52v152a18 18 0 0 1-18 18H68a18 18 0 0 1-18-18V36a18 18 0 0 
 FOLD = "M156 18v34a18 18 0 0 0 18 18h34z"
 
 
-def _glass_defs(bright: str) -> str:
+def _glass_defs(bright: str, deep: str = "") -> str:
     rise = mix(bright, "#FFFFFF", 0.42)
-    return (f'<linearGradient id="smoke" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B3038"/><stop offset="1" stop-color="#121519"/></linearGradient>'
+    hi, lo = mix(bright, "#FFFFFF", 0.22), mix(bright, deep or "#000000", 0.35)
+    return (f'<linearGradient id="solid" gradientUnits="userSpaceOnUse" x1="0" y1="100" x2="0" y2="200"><stop offset="0" stop-color="{hi}"/><stop offset="1" stop-color="{lo}"/></linearGradient>'
+            f'<filter id="under" x="-30%" y="-30%" width="160%" height="170%"><feGaussianBlur stdDeviation="4"/><feOffset dy="4"/></filter>'
+            f'<linearGradient id="smoke" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B3038"/><stop offset="1" stop-color="#121519"/></linearGradient>'
             f'<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".32"/><stop offset=".55" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="{bright}" stop-opacity=".8"/></linearGradient>'
             f'<radialGradient id="glow" cx=".5" cy="1.05" r=".75"><stop offset="0" stop-color="{bright}" stop-opacity=".45"/><stop offset="1" stop-color="{bright}" stop-opacity="0"/></radialGradient>'
             f'<linearGradient id="ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{rise}"/><stop offset="1" stop-color="{bright}"/></linearGradient>'
@@ -328,14 +331,16 @@ def folder_svg(emblem: str) -> str:
     tint_top, tint_bottom = mix(bright, "#2B3038", 0.55), mix(deep, "#121519", 0.55)
     pic = EMBLEM[emblem]
     paint = (lambda white, detail: pic.replace('fill="#fff"', f'fill="{white}"').replace('stroke="#fff"', f'stroke="{white}"').replace("{c}", detail))
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright)}'
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright, deep)}'
             f'<linearGradient id="tint" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{tint_top}"/><stop offset="1" stop-color="{tint_bottom}"/></linearGradient>'
             f'<linearGradient id="hi" gradientUnits="userSpaceOnUse" x1="0" y1="92" x2="0" y2="140"><stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>'
             f'<path d="{FOLDER_FRONT}" fill="#000" opacity=".45" filter="url(#drop)"/>'
             f'<path d="{FOLDER_BACK}" fill="url(#smoke)"/><path d="{FOLDER_BACK}" fill="none" stroke="#fff" stroke-opacity=".18" stroke-width="3"/>'
             f'<path fill="#fff" opacity=".85" d="M60 80h136a8 8 0 0 1 8 8v20H52V88a8 8 0 0 1 8-8z"/>'   # a sheet of paper peeking out
             f'<path d="{FOLDER_FRONT}" fill="url(#tint)"/><path d="{FOLDER_FRONT}" fill="url(#glow)"/>'
-            + (f'<g filter="url(#halo)" opacity=".6">{paint(bright, bright)}</g>{paint("url(#ink)", tint_bottom)}' if pic else "")
+            # what it holds: solid, as on the app icons (STYLE "glass": glowing)
+            + ((f'<g filter="url(#halo)" opacity=".6">{paint(bright, bright)}</g>{paint("url(#ink)", tint_bottom)}' if STYLE == "glass" else
+                f'<g opacity=".5" filter="url(#under)">{paint("#000", "#000")}</g>{paint("url(#solid)", "#FFFFFF")}') if pic else "")
             + f'<path d="{FOLDER_FRONT}" fill="none" stroke="url(#rim)" stroke-width="3"/><path d="M48 95h160" stroke="url(#hi)" stroke-width="4" stroke-linecap="round"/></svg>\n')
 
 
@@ -356,10 +361,12 @@ def file_svg(kind: str, colours: dict) -> str:
     tag = (f'<rect x="{128 - (18 + 19 * len(label)) / 2:.0f}" y="180" width="{18 + 19 * len(label)}" height="38" rx="12" fill="{bright}"/>'
            f'<text x="128" y="207" text-anchor="middle" font-family="Inter, Inter Variable, sans-serif" font-weight="800" font-size="25" fill="#0C1013">{label}</text>') if label else ""
     lift = ' transform="translate(0 -6)"' if label else ' transform="translate(0 16)"'
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright)}</defs>'
+    inside = (f'<g filter="url(#halo)" opacity=".55">{paint(bright)}</g>{paint("url(#ink)")}' if STYLE == "glass" else
+              f'<g opacity=".5" filter="url(#under)">{paint("#000")}</g>{paint("url(#solid)")}')
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright, deep)}</defs>'
             f'<path d="{PAGE}" fill="#000" opacity=".45" filter="url(#drop)"/><path d="{PAGE}" fill="url(#smoke)"/><path d="{PAGE}" fill="url(#glow)"/>'
             f'<path d="{FOLD}" fill="#fff" opacity=".16"/>'
-            f'<g{lift}><g filter="url(#halo)" opacity=".55">{paint(bright)}</g>{paint("url(#ink)")}</g>{tag}'
+            f'<g{lift}>{inside}</g>{tag}'
             f'<path d="{PAGE}" fill="none" stroke="url(#rim)" stroke-width="3"/></svg>\n')
 
 
