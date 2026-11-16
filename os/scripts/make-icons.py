@@ -4,9 +4,12 @@
     python3 scripts/make-icons.py            # writes the icons into the image's icon folder
     python3 scripts/make-icons.py --sheet F  # also writes one picture F showing them all
 
-Each icon is a rounded tile in the app's own colour (tokens/tokens.json) with a white picture of what the app is
-for. They are written as SVG (hicolor/scalable) and as PNG at 256, 128, 64 and 48 pixels, named huginn-<app>, which
-is what the .desktop files and the dock ask for. It also renders the two marks kept in branding/: huginn-os (the
+Each icon is a tile of smoked glass (a squircle) with a picture of what the app is for, glowing in the app's own colour
+(tokens/tokens.json): the colour rises from deep at its foot to light at its top, glossy across its upper half, with a
+soft halo of it on the glass. The tile is thick glass: a lit top edge, a darker foot, a shadow under it, and along its
+bottom edge a thin line of the app's colour, as the dock's Ring. (Chosen on the design canvas, round 22: "smoked glass,
+all together, without the spark".) They are written as SVG (hicolor/scalable) and as PNG at 256, 128, 64 and 48
+pixels, named huginn-<app>, which is what the .desktop files and the dock ask for. It also renders the two marks kept in branding/: huginn-os (the
 system's own logo) and huginn-browser. The pictures are drawn here, by hand, in SVG; nothing is traced or
 borrowed. Change a picture below and run this again.
 """
@@ -109,20 +112,250 @@ PICS = {
 }
 
 
+# Richer pictures for the apps seen most (the dock's, and a few more): the same subjects with more to them.
+DETAIL = {
+    "files": f'<path {W} opacity=".55" d="M56 96a14 14 0 0 1 14-14h38l14 16h64a14 14 0 0 1 14 14v10H56z"/>'
+             f'<rect {W} opacity=".9" x="78" y="92" width="96" height="40" rx="6" transform="rotate(-6 126 112)"/><rect fill="{{c}}" opacity=".5" x="90" y="104" width="52" height="6" rx="3" transform="rotate(-6 126 112)"/>'
+             f'<rect {W} x="56" y="114" width="144" height="80" rx="14"/><rect fill="{{c}}" opacity=".55" x="104" y="128" width="48" height="8" rx="4"/>',
+    "mail": f'<rect {W} x="52" y="78" width="152" height="104" rx="18"/><path fill="none" opacity=".25" d="M58 172l50-40M198 172l-50-40" stroke="{{c}}" stroke-width="6" stroke-linecap="round"/>'
+            f'<path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" d="M68 98l60 44 60-44"/>'
+            f'<rect fill="{{c}}" opacity=".45" x="104" y="158" width="48" height="7" rx="3.5"/><rect fill="{{c}}" opacity=".3" x="112" y="170" width="32" height="6" rx="3"/>',
+    "calendar": f'<rect {W} x="60" y="68" width="136" height="128" rx="20"/><path fill="{{c}}" d="M60 88a20 20 0 0 1 20-20h96a20 20 0 0 1 20 20v18H60z"/>'
+                f'<rect {W} x="88" y="54" width="12" height="30" rx="6"/><rect {W} x="156" y="54" width="12" height="30" rx="6"/>'
+                f'<text x="128" y="174" text-anchor="middle" font-family="Inter, Inter Variable, sans-serif" font-weight="700" font-size="64" fill="{{c}}">16</text>',
+    "photos": f'<rect {W} opacity=".45" x="70" y="58" width="120" height="104" rx="12" transform="rotate(-8 130 110)"/>'
+              f'<rect {W} x="52" y="80" width="152" height="116" rx="16"/><path fill="{{c}}" d="M64 184l40-52 28 34 18-20 42 38z"/><circle fill="{{c}}" cx="168" cy="110" r="12"/>',
+    "music": f'<path {W} d="M104 82l84-16v22l-84 16z"/><rect {W} x="104" y="90" width="12" height="86"/><rect {W} x="176" y="76" width="12" height="86"/>'
+             f'<ellipse {W} cx="96" cy="176" rx="22" ry="17"/><ellipse {W} cx="168" cy="162" rx="22" ry="17"/>'
+             + "".join(f'<path fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity="{o}" d="M{x} {132 - r}a{r} {r} 0 0 0 0 {2 * r}"/>' for x, r, o in ((80, 18, .8), (66, 32, .45))),
+    "notes": f'<path {W} d="M80 56h96a16 16 0 0 1 16 16v88l-40 40H80a16 16 0 0 1-16-16V72a16 16 0 0 1 16-16z"/><path fill="{{c}}" opacity=".35" d="M152 200v-28a12 12 0 0 1 12-12h28z"/>'
+             f'<path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M82 88l8 8 14-16"/><rect fill="{{c}}" opacity=".8" x="114" y="84" width="58" height="10" rx="5"/>'
+             f'<rect fill="{{c}}" opacity=".8" x="86" y="114" width="84" height="10" rx="5"/><rect fill="{{c}}" opacity=".8" x="86" y="138" width="52" height="10" rx="5"/>',
+    "writer": f'<rect {W} opacity=".4" x="58" y="62" width="96" height="124" rx="12"/><rect fill="{{c}}" opacity=".5" x="72" y="80" width="56" height="7" rx="3.5"/><rect fill="{{c}}" opacity=".5" x="72" y="96" width="40" height="7" rx="3.5"/>'
+              f'<path {W} d="M168 64l30 30-84 84-42 8 8-42z"/><path fill="{{c}}" d="M156 76l30 30-8 8-30-30z"/><path fill="{{c}}" d="M80 186l6-30 24 24z"/>',
+    "terminal": f'<rect fill="#0E1319" x="44" y="66" width="168" height="124" rx="20"/><path fill="#fff" opacity=".12" d="M64 66h128a20 20 0 0 1 20 20v8H44v-8a20 20 0 0 1 20-20z"/>'
+                + "".join(f'<circle fill="#fff" opacity=".7" cx="{x}" cy="80" r="4.5"/>' for x in (62, 76, 90))
+                + f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M72 112l26 22-26 22"/><rect {W} x="114" y="150" width="30" height="12" rx="6"/><rect {W} opacity=".7" x="152" y="142" width="14" height="22" rx="3"/>',
+    "weather": f'<circle fill="#FFE08A" cx="100" cy="100" r="30"/>'
+               + "".join(f'<rect fill="#FFE08A" x="96" y="50" width="8" height="16" rx="4" transform="rotate({a} 100 100)"/>' for a in range(0, 360, 45))
+               + f'<circle {W} cx="108" cy="164" r="30"/><circle {W} cx="150" cy="148" r="40"/><circle {W} cx="186" cy="168" r="26"/><rect {W} x="108" y="166" width="78" height="28"/>',
+    "clock": f'<circle {W} cx="128" cy="128" r="72"/>'
+             + "".join(f'<rect fill="{{c}}" opacity="{1 if a % 90 == 0 else .45}" x="125" y="64" width="6" height="{14 if a % 90 == 0 else 9}" rx="3" transform="rotate({a} 128 128)"/>' for a in range(0, 360, 30))
+             + f'<path fill="none" stroke="{{c}}" stroke-width="10" stroke-linecap="round" d="M128 92v36l26 16"/><path fill="none" stroke="#FF5F57" stroke-width="4" stroke-linecap="round" d="M128 128L98 168"/><circle fill="{{c}}" cx="128" cy="128" r="8"/>',
+    "camera": f'<rect {W} x="98" y="66" width="60" height="30" rx="10"/><rect {W} x="48" y="84" width="160" height="110" rx="22"/>'
+              f'<circle fill="{{c}}" cx="128" cy="140" r="38"/><circle fill="none" stroke="#fff" stroke-opacity=".5" stroke-width="5" cx="128" cy="140" r="27"/><circle fill="{{c}}" cx="128" cy="140" r="17"/>'
+              f'<circle fill="#fff" opacity=".7" cx="120" cy="131" r="6"/><circle fill="{{c}}" cx="184" cy="106" r="7"/><rect fill="{{c}}" opacity=".5" x="62" y="100" width="22" height="8" rx="4"/>',
+    "settings": "".join(f'<rect {W} x="116" y="52" width="24" height="40" rx="8" transform="rotate({a} 128 128)"/>' for a in range(0, 360, 45))
+                + f'<circle {W} cx="128" cy="128" r="50"/><circle fill="none" stroke="{{c}}" stroke-opacity=".5" stroke-width="6" cx="128" cy="128" r="34"/><circle fill="{{c}}" cx="128" cy="128" r="18"/>',
+    "store": f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" d="M98 102V90a30 30 0 0 1 60 0v12"/><path {W} d="M70 98h116l10 86a12 12 0 0 1-12 14H72a12 12 0 0 1-12-14z"/>'
+             f'<circle fill="{{c}}" cx="100" cy="124" r="8"/><circle fill="{{c}}" cx="156" cy="124" r="8"/><path fill="{{c}}" d="M128 142l7 14 15 2-11 10 3 15-14-7-14 7 3-15-11-10 15-2z"/>',
+}
+PICS.update(DETAIL)
+
+
 def mix(a: str, b: str, t: float) -> str:
     pa, pb = (int(a[i:i + 2], 16) for i in (1, 3, 5)), (int(b[i:i + 2], 16) for i in (1, 3, 5))
     return "#" + "".join(f"{round(x + (y - x) * t):02X}" for x, y in zip(pa, pb))
 
 
+def squircle(x: float, y: float, w: float, h: float, n: float = 5.0, steps: int = 72) -> str:
+    """A superellipse: softer at the corners than a rounded rectangle."""
+    import math
+    cx, cy, a, b = x + w / 2, y + h / 2, w / 2, h / 2
+    pts = []
+    for i in range(steps):
+        t = 2 * math.pi * i / steps
+        c, s = math.cos(t), math.sin(t)
+        pts.append((cx + a * math.copysign(abs(c) ** (2 / n), c), cy + b * math.copysign(abs(s) ** (2 / n), s)))
+    return "M" + " L".join(f"{px:.1f} {py:.1f}" for px, py in pts) + "Z"
+
+
+TILE, INNER = squircle(14, 14, 228, 228), squircle(16.5, 16.5, 223, 223)
+
+
 def icon(app: str, bright: str, deep: str) -> str:
-    top, bottom = mix(bright, deep, 0.18), mix(deep, "#000000", 0.08)
+    pic = PICS[app]
+
+    def paint(white: str, detail: str) -> str:
+        return pic.replace('fill="#fff"', f'fill="{white}"').replace('stroke="#fff"', f'stroke="{white}"').replace("{c}", detail)
+    cut, rise = "#16191E", mix(bright, "#FFFFFF", 0.42)
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>'
+            # the glass: smoke, the app's light rising from below, a sheen across the top, the rim
+            f'<linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B3038"/><stop offset="1" stop-color="#121519"/></linearGradient>'
+            f'<radialGradient id="glow" cx=".5" cy="1.04" r=".72"><stop offset="0" stop-color="{bright}" stop-opacity=".42"/><stop offset="1" stop-color="{bright}" stop-opacity="0"/></radialGradient>'
+            f'<linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".14"/><stop offset=".42" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+            f'<radialGradient id="spec" cx=".38" cy="0" r=".6"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
+            f'<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".30"/><stop offset=".55" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="{bright}" stop-opacity=".75"/></linearGradient>'
+            # thick glass: a lit top edge, a darker foot, a shadow under it
+            f'<linearGradient id="hi" gradientUnits="userSpaceOnUse" x1="0" y1="14" x2="0" y2="80"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+            f'<linearGradient id="lo" gradientUnits="userSpaceOnUse" x1="0" y1="180" x2="0" y2="242"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".55"/></linearGradient>'
+            f'<filter id="drop" x="-20%" y="-20%" width="140%" height="150%"><feGaussianBlur stdDeviation="6"/><feOffset dy="6"/></filter>'
+            f'<clipPath id="inside"><path d="{TILE}"/></clipPath>'
+            # the picture: the app's colour rising, glossy on top, deeper at its foot, a halo
+            f'<linearGradient id="ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{rise}"/><stop offset="1" stop-color="{bright}"/></linearGradient>'
+            f'<filter id="halo" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>'
+            f'<filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4"/></filter>'
+            f'<mask id="shape" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{paint("#fff", "#000")}</mask>'
+            f'<linearGradient id="gloss" gradientUnits="userSpaceOnUse" x1="0" y1="56" x2="0" y2="200"><stop offset="0" stop-color="#fff" stop-opacity=".62"/>'
+            f'<stop offset=".42" stop-color="#fff" stop-opacity=".08"/><stop offset=".43" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+            f'<linearGradient id="foot" gradientUnits="userSpaceOnUse" x1="0" y1="120" x2="0" y2="206"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".28"/></linearGradient>'
+            # Huginn's light along the bottom edge
+            f'<linearGradient id="ring" gradientUnits="userSpaceOnUse" x1="14" y1="0" x2="242" y2="0"><stop offset=".08" stop-color="{bright}" stop-opacity="0"/>'
+            f'<stop offset=".5" stop-color="{mix(bright, "#FFFFFF", 0.35)}"/><stop offset=".92" stop-color="{bright}" stop-opacity="0"/></linearGradient>'
+            f'<clipPath id="low"><rect x="0" y="196" width="256" height="60"/></clipPath>'
+            f'</defs>'
+            f'<path d="{TILE}" fill="#000" opacity=".5" filter="url(#drop)"/>'
+            f'<path d="{TILE}" fill="url(#tile)"/><path d="{TILE}" fill="url(#spec)"/><path d="{TILE}" fill="url(#glow)"/><path d="{TILE}" fill="url(#sheen)"/>'
+            f'<g filter="url(#halo)" opacity=".55">{paint(bright, bright)}</g>{paint("url(#ink)", cut)}'
+            f'<rect width="256" height="256" fill="url(#gloss)" mask="url(#shape)"/><rect width="256" height="256" fill="url(#foot)" mask="url(#shape)"/>'
+            f'<path d="{TILE}" fill="none" stroke="url(#rim)" stroke-width="3"/>'
+            f'<g clip-path="url(#inside)"><path d="{INNER}" fill="none" stroke="url(#hi)" stroke-width="5"/><path d="{INNER}" fill="none" stroke="url(#lo)" stroke-width="6"/></g>'
+            f'<g clip-path="url(#low)"><path d="{TILE}" fill="none" stroke="url(#ring)" stroke-width="9" filter="url(#soft)" opacity=".9"/>'
+            f'<path d="{TILE}" fill="none" stroke="url(#ring)" stroke-width="3.5"/></g>'
+            f'</svg>\n')
+
+
+# ------------------------------------------------------------------------------------------------ folders and files
+# Huginn's icon theme ("Huginn", inheriting Breeze for everything else): folders and the common kinds of file, in the
+# same smoked glass. A folder is a smoked-glass folder tinted with Files' blue, with what it holds glowing on its
+# front; a file is a smoked-glass page with its kind glowing on it and a label in the kind's colour. Small sizes
+# (16 to 24 pixels, lists) get plainer drawings: a flat shape in the colour, nothing that would blur into mush.
+THEME = ROOT / "config" / "overlay" / "usr" / "share" / "icons" / "Huginn"
+FOLDER_BLUE = ("#38B6FF", "#0B6FB8")
+EMBLEM = {   # what's on a folder's front (drawn around 128,156 in a 256 box)
+    "": "",
+    "documents": f'<path {W} d="M108 120h30l20 20v46a8 8 0 0 1-8 8h-42a8 8 0 0 1-8-8v-58a8 8 0 0 1 8-8z"/><rect fill="{{c}}" x="112" y="152" width="32" height="6" rx="3"/><rect fill="{{c}}" x="112" y="166" width="24" height="6" rx="3"/>',
+    "download": f'<path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" d="M128 118v60M104 156l24 24 24-24"/>',
+    "music": f'<path {W} d="M116 126l40-8v12l-40 8z"/><rect {W} x="116" y="132" width="8" height="44"/><rect {W} x="148" y="124" width="8" height="44"/><ellipse {W} cx="112" cy="178" rx="12" ry="9"/><ellipse {W} cx="144" cy="170" rx="12" ry="9"/>',
+    "pictures": f'<circle {W} cx="150" cy="134" r="9"/><path {W} d="M96 188l28-40 20 26 12-14 28 28z"/>',
+    "videos": f'<rect {W} x="94" y="124" width="68" height="60" rx="12"/><path fill="{{c}}" d="M120 140l24 14-24 14z"/>',
+    "desktop": f'<rect {W} x="92" y="122" width="72" height="48" rx="8"/><rect {W} x="122" y="170" width="12" height="12"/><rect {W} x="108" y="182" width="40" height="8" rx="4"/>',
+    "home": f'<path {W} d="M128 112l40 34v40a6 6 0 0 1-6 6h-22v-26h-24v26H94a6 6 0 0 1-6-6v-40z"/>',
+    "templates": f'<rect fill="none" stroke="#fff" stroke-width="9" stroke-dasharray="14 9" x="100" y="122" width="56" height="66" rx="8"/>',
+    "public": f'<circle {W} cx="112" cy="140" r="12"/><circle {W} cx="146" cy="140" r="12"/><path {W} d="M90 188a22 18 0 0 1 44 0zM124 188a22 18 0 0 1 44 0z"/>',
+}
+FOLDERS = {"folder": "", "folder-open": "", "inode-directory": "", "folder-documents": "documents", "folder-download": "download",
+           "folder-downloads": "download", "folder-music": "music", "folder-pictures": "pictures", "folder-images": "pictures",
+           "folder-videos": "videos", "folder-video": "videos", "folder-desktop": "desktop", "user-desktop": "desktop",
+           "user-home": "home", "folder-home": "home", "folder-templates": "templates", "folder-publicshare": "public"}
+# kinds of file: (colour key in tokens' apps, label, picture key)
+KINDS = {
+    "text-plain": ("disks", "TXT", "lines"), "text-x-generic": ("disks", "TXT", "lines"),
+    "application-pdf": ("documents", "PDF", "lines"),
+    "image-x-generic": ("photos", "", "image"), "image-png": ("photos", "PNG", "image"), "image-jpeg": ("photos", "JPG", "image"), "image-svg+xml": ("photos", "SVG", "image"),
+    "audio-x-generic": ("music", "", "note"), "audio-mpeg": ("music", "MP3", "note"), "audio-flac": ("music", "FLAC", "note"), "audio-x-wav": ("music", "WAV", "note"),
+    "video-x-generic": ("video", "", "play"), "video-mp4": ("video", "MP4", "play"), "video-x-matroska": ("video", "MKV", "play"), "video-webm": ("video", "WEBM", "play"),
+    "package-x-generic": ("archives", "", "zip"), "application-zip": ("archives", "ZIP", "zip"), "application-x-compressed-tar": ("archives", "TAR", "zip"),
+    "application-x-7z-compressed": ("archives", "7Z", "zip"), "application-x-tar": ("archives", "TAR", "zip"),
+    "x-office-document": ("writer", "DOC", "lines"), "application-vnd.oasis.opendocument.text": ("writer", "ODT", "lines"),
+    "application-vnd.openxmlformats-officedocument.wordprocessingml.document": ("writer", "DOCX", "lines"), "application-msword": ("writer", "DOC", "lines"),
+    "x-office-spreadsheet": ("sheets", "", "grid"), "application-vnd.oasis.opendocument.spreadsheet": ("sheets", "ODS", "grid"),
+    "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet": ("sheets", "XLSX", "grid"), "text-csv": ("sheets", "CSV", "grid"),
+    "x-office-presentation": ("slides", "", "bars"), "application-vnd.oasis.opendocument.presentation": ("slides", "ODP", "bars"),
+    "application-vnd.openxmlformats-officedocument.presentationml.presentation": ("slides", "PPTX", "bars"),
+    "text-x-script": ("code", "", "code"), "text-x-python": ("code", "PY", "code"), "application-json": ("code", "JSON", "code"),
+    "text-x-csrc": ("code", "C", "code"), "text-x-rust": ("code", "RS", "code"), "application-javascript": ("code", "JS", "code"),
+    "text-html": ("help", "HTML", "globe"), "application-x-executable": ("terminal", "", "prompt"), "application-x-shellscript": ("terminal", "SH", "prompt"),
+    "application-x-sharedlib": ("terminal", "SO", "prompt"), "unknown": ("disks", "", "dots"), "application-octet-stream": ("disks", "", "dots"),
+}
+GLYPH = {   # drawn around 128,128 in a 256 box, inside a page
+    "lines": "".join(f'<rect {W} x="84" y="{96 + i * 20}" width="{[88, 88, 88, 56][i]}" height="10" rx="5"/>' for i in range(4)),
+    "image": f'<circle {W} cx="154" cy="104" r="12"/><path {W} d="M80 164l36-50 26 32 16-18 34 36z"/>',
+    "note": f'<path {W} d="M108 92l52-10v14l-52 10z"/><rect {W} x="108" y="100" width="9" height="56"/><rect {W} x="151" y="92" width="9" height="56"/><ellipse {W} cx="102" cy="158" rx="15" ry="11"/><ellipse {W} cx="145" cy="150" rx="15" ry="11"/>',
+    "play": f'<path {W} d="M108 88l56 34-56 34z"/>',
+    "zip": "".join(f'<rect {W} x="{122 if i % 2 else 128}" y="{80 + i * 12}" width="10" height="8" rx="2"/>' for i in range(6)) + f'<rect {W} x="114" y="152" width="28" height="22" rx="6"/>',
+    "grid": f'<rect fill="none" stroke="#fff" stroke-width="8" x="82" y="88" width="92" height="76" rx="8"/><path fill="none" stroke="#fff" stroke-width="7" d="M82 114h92M82 139h92M113 88v76M144 88v76"/>',
+    "bars": "".join(f'<rect {W} x="{88 + i * 22}" y="{164 - h}" width="14" height="{h}" rx="4"/>' for i, h in enumerate([30, 52, 40, 66])),
+    "code": f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M106 98l-26 28 26 28M150 98l26 28-26 28"/>',
+    "globe": f'<circle fill="none" stroke="#fff" stroke-width="9" cx="128" cy="124" r="40"/><path fill="none" stroke="#fff" stroke-width="7" d="M88 124h80M128 84c-18 22-18 58 0 80M128 84c18 22 18 58 0 80"/>',
+    "prompt": f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M86 100l28 24-28 24"/><rect {W} x="126" y="142" width="44" height="12" rx="6"/>',
+    "dots": "".join(f'<circle {W} cx="{100 + i * 28}" cy="126" r="9"/>' for i in range(3)),
+}
+FOLDER_BACK = "M28 76a20 20 0 0 1 20-20h52l22 22h86a20 20 0 0 1 20 20v16H28z"
+FOLDER_FRONT = "M28 112a20 20 0 0 1 20-20h160a20 20 0 0 1 20 20v94a20 20 0 0 1-20 20H48a20 20 0 0 1-20-20z"
+PAGE = "M68 18h88l52 52v152a18 18 0 0 1-18 18H68a18 18 0 0 1-18-18V36a18 18 0 0 1 18-18z"
+FOLD = "M156 18v34a18 18 0 0 0 18 18h34z"
+
+
+def _glass_defs(bright: str) -> str:
+    rise = mix(bright, "#FFFFFF", 0.42)
+    return (f'<linearGradient id="smoke" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B3038"/><stop offset="1" stop-color="#121519"/></linearGradient>'
+            f'<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".32"/><stop offset=".55" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="{bright}" stop-opacity=".8"/></linearGradient>'
+            f'<radialGradient id="glow" cx=".5" cy="1.05" r=".75"><stop offset="0" stop-color="{bright}" stop-opacity=".45"/><stop offset="1" stop-color="{bright}" stop-opacity="0"/></radialGradient>'
+            f'<linearGradient id="ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{rise}"/><stop offset="1" stop-color="{bright}"/></linearGradient>'
+            f'<filter id="halo" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="8"/></filter>'
+            f'<filter id="drop" x="-20%" y="-20%" width="140%" height="150%"><feGaussianBlur stdDeviation="5"/><feOffset dy="5"/></filter>')
+
+
+def folder_svg(emblem: str) -> str:
+    bright, deep = FOLDER_BLUE
+    tint_top, tint_bottom = mix(bright, "#2B3038", 0.55), mix(deep, "#121519", 0.55)
+    pic = EMBLEM[emblem]
+    paint = (lambda white, detail: pic.replace('fill="#fff"', f'fill="{white}"').replace('stroke="#fff"', f'stroke="{white}"').replace("{c}", detail))
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright)}'
+            f'<linearGradient id="tint" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{tint_top}"/><stop offset="1" stop-color="{tint_bottom}"/></linearGradient>'
+            f'<linearGradient id="hi" gradientUnits="userSpaceOnUse" x1="0" y1="92" x2="0" y2="140"><stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>'
+            f'<path d="{FOLDER_FRONT}" fill="#000" opacity=".45" filter="url(#drop)"/>'
+            f'<path d="{FOLDER_BACK}" fill="url(#smoke)"/><path d="{FOLDER_BACK}" fill="none" stroke="#fff" stroke-opacity=".18" stroke-width="3"/>'
+            f'<path fill="#fff" opacity=".85" d="M60 80h136a8 8 0 0 1 8 8v20H52V88a8 8 0 0 1 8-8z"/>'   # a sheet of paper peeking out
+            f'<path d="{FOLDER_FRONT}" fill="url(#tint)"/><path d="{FOLDER_FRONT}" fill="url(#glow)"/>'
+            + (f'<g filter="url(#halo)" opacity=".6">{paint(bright, bright)}</g>{paint("url(#ink)", tint_bottom)}' if pic else "")
+            + f'<path d="{FOLDER_FRONT}" fill="none" stroke="url(#rim)" stroke-width="3"/><path d="M48 95h160" stroke="url(#hi)" stroke-width="4" stroke-linecap="round"/></svg>\n')
+
+
+def folder_small(emblem: str) -> str:
+    bright, deep = FOLDER_BLUE
+    pic = EMBLEM[emblem]
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">'
-            f'<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{top}"/><stop offset="1" stop-color="{bottom}"/></linearGradient>'
-            f'<linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".34"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient>'
-            f'<filter id="d" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#000" flood-opacity=".22"/></filter></defs>'
-            f'<rect x="14" y="14" width="228" height="228" rx="56" fill="url(#g)"/><rect x="14" y="14" width="228" height="228" rx="56" fill="url(#s)"/>'
-            f'<rect x="15.5" y="15.5" width="225" height="225" rx="54.5" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="3"/>'
-            f'<g filter="url(#d)">{PICS[app].replace("{c}", mix(deep, "#000000", 0.12))}</g></svg>\n')
+            f'<path fill="{deep}" d="{FOLDER_BACK}"/><path fill="{bright}" d="{FOLDER_FRONT}"/>'
+            + (f'<g transform="translate(128 160) scale(1.25) translate(-128 -156)">{pic.replace("{c}", bright)}</g>' if pic else "")
+            + '</svg>\n')
+
+
+def file_svg(kind: str, colours: dict) -> str:
+    key, label, glyph = KINDS[kind]
+    bright, deep = colours[key]
+    pic = GLYPH[glyph]
+    paint = (lambda white: pic.replace('fill="#fff"', f'fill="{white}"').replace('stroke="#fff"', f'stroke="{white}"'))
+    tag = (f'<rect x="{128 - (18 + 19 * len(label)) / 2:.0f}" y="180" width="{18 + 19 * len(label)}" height="38" rx="12" fill="{bright}"/>'
+           f'<text x="128" y="207" text-anchor="middle" font-family="Inter, Inter Variable, sans-serif" font-weight="800" font-size="25" fill="#0C1013">{label}</text>') if label else ""
+    lift = ' transform="translate(0 -6)"' if label else ' transform="translate(0 16)"'
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright)}</defs>'
+            f'<path d="{PAGE}" fill="#000" opacity=".45" filter="url(#drop)"/><path d="{PAGE}" fill="url(#smoke)"/><path d="{PAGE}" fill="url(#glow)"/>'
+            f'<path d="{FOLD}" fill="#fff" opacity=".16"/>'
+            f'<g{lift}><g filter="url(#halo)" opacity=".55">{paint(bright)}</g>{paint("url(#ink)")}</g>{tag}'
+            f'<path d="{PAGE}" fill="none" stroke="url(#rim)" stroke-width="3"/></svg>\n')
+
+
+def file_small(kind: str, colours: dict) -> str:
+    key, _label, glyph = KINDS[kind]
+    bright, deep = colours[key]
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">'
+            f'<path fill="#E9EDF2" d="{PAGE}"/><path fill="#B8C0CA" d="{FOLD}"/>'
+            f'<g transform="translate(128 128) scale(1.2) translate(-128 -128)">{GLYPH[glyph].replace("#fff", deep)}</g></svg>\n')
+
+
+def theme(colours: dict) -> int:
+    """Writes the Huginn icon theme: folders and kinds of file, big (scalable) and small (16, 22, 24)."""
+    dirs = []
+    for ctx, items, big, small in (("places", FOLDERS, lambda n: folder_svg(FOLDERS[n]), lambda n: folder_small(FOLDERS[n])),
+                                   ("mimetypes", KINDS, lambda n: file_svg(n, colours), lambda n: file_small(n, colours))):
+        for folder, draw, size in (("scalable", big, None), ("24", small, 24), ("22", small, 22), ("16", small, 16)):
+            where = THEME / folder / ctx
+            where.mkdir(parents=True, exist_ok=True)
+            for name in items:
+                (where / f"{name}.svg").write_text(draw(name), encoding="utf-8")
+            dirs.append((f"{folder}/{ctx}", ctx, size))
+    lines = ["[Icon Theme]", "Name=Huginn", "Comment=Huginn OS: folders and files in smoked glass", "Inherits=breeze,hicolor",
+             "Directories=" + ",".join(d for d, _, _ in dirs), ""]
+    for d, ctx, size in dirs:
+        context = "Places" if ctx == "places" else "MimeTypes"
+        if size is None:
+            lines += [f"[{d}]", "Size=256", "MinSize=32", "MaxSize=512", f"Context={context}", "Type=Scalable", ""]
+        else:
+            lines += [f"[{d}]", f"Size={size}", f"Context={context}", "Type=Fixed", ""]
+    (THEME / "index.theme").write_text("\n".join(lines), encoding="utf-8")
+    return len(FOLDERS) + len(KINDS)
 
 
 def main() -> int:
@@ -137,7 +370,8 @@ def main() -> int:
                 if hit is not None:
                     return hit
     colours = find(colours)
-    missing = sorted(set(k for k in colours if not k.startswith("_")) ^ set(PICS))
+    # the installer wears Huginn OS's own mark, and the sign-in prompt (authenticate) has no icon of its own
+    missing = sorted(set(k for k in colours if not k.startswith("_") and k not in ("installer", "authenticate")) ^ set(PICS))
     if missing:
         print("These apps have a colour but no picture, or the other way round:", ", ".join(missing))
         return 1
@@ -185,6 +419,7 @@ def main() -> int:
             if size == 128:
                 made[name] = img
     print(f"Drew {len(made)} icons into {OUT}")
+    print(f"Drew {theme(colours)} folders and kinds of file into {THEME}")
     if "--sheet" in sys.argv:
         target, cols = sys.argv[sys.argv.index("--sheet") + 1], 7
         rows = -(-len(made) // cols)

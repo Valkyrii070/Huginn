@@ -277,7 +277,7 @@ stage_customise() {
     install -d "$CHROOT/etc/xdg/Kvantum" "$CHROOT/etc/gtk-3.0" "$CHROOT/etc/gtk-4.0"
     printf '[General]\ntheme=HuginnAuroraDark\n' > "$CHROOT/etc/xdg/Kvantum/kvantum.kvconfig"
     for v in 3.0 4.0; do
-        printf '[Settings]\ngtk-theme-name=Breeze\ngtk-application-prefer-dark-theme=true\ngtk-font-name=Inter Variable 10\n' > "$CHROOT/etc/gtk-$v/settings.ini"
+        printf '[Settings]\ngtk-theme-name=Breeze\ngtk-icon-theme-name=Huginn\ngtk-application-prefer-dark-theme=true\ngtk-font-name=Inter Variable 10\n' > "$CHROOT/etc/gtk-$v/settings.ini"
     done
 
     # Huginn Shell and the tokens it reads.

@@ -200,10 +200,21 @@ its job needs it.
 
 ## Icons and looks
 
-- **App icons.** Every app has its own icon: a rounded tile in the app's colour with a white picture of what it is for.
-  `scripts/make-icons.py` draws all 34 from the colours in `tokens/tokens.json` (SVG, plus PNG at 256, 128, 64 and
-  48) into `config/overlay/usr/share/icons/hicolor/`, named `huginn-<app>`; the `.desktop` files and the dock use
-  them. Change a picture in that script and run it again.
+- **App icons** (redrawn 2026-11-15, chosen on the design canvas: "smoked glass, all together, without the spark").
+  Every app's icon is a tile of smoked glass (a squircle) with a picture of what the app is for, glowing in the
+  app's own colour: the colour rises from deep at its foot to light at its top, glossy across its upper half, with
+  a soft halo on the glass. The tile is thick glass (a lit top edge, a darker foot, a shadow under it), and a thin
+  line of the app's colour runs along its bottom edge, as the dock's Ring. The apps seen most have richer pictures
+  (the calendar's date, the clock's ticks, the lens's rings, papers in the folder). `scripts/make-icons.py` draws
+  all 51 from the colours in `tokens/tokens.json` (SVG, plus PNG at 256, 128, 64 and 48) into
+  `config/overlay/usr/share/icons/hicolor/`, named `huginn-<app>`; the `.desktop` files and the dock use them.
+  Change a picture in that script and run it again.
+- **Folders and files.** The same script writes the **Huginn icon theme** (`usr/share/icons/Huginn`, inheriting
+  Breeze for everything else, set for KDE's parts and GTK): folders as smoked glass tinted with Files' blue with what
+  they hold glowing on the front (Documents, Downloads, Music, Pictures, Videos, Desktop, Home, Templates, Public),
+  and the common kinds of file as smoked-glass pages with their kind glowing on them and a label in its colour (text,
+  PDF, pictures, music, video, archives, documents, sheets, slides, code, web pages, programs). Lists get plainer
+  drawings at 24 and 16 pixels.
 - **The two marks.** `branding/huginn-os.svg` is the system's logo (a white raven on a vivid aurora tile; shown in
   Welcome) and `branding/huginn-browser.svg` the browser's (the same raven in deep indigo on a pale aurora tile). The
   raven is a soft, rounded drawing made for these icons. The browser carries its icon itself (pull request #4).

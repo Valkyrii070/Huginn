@@ -10,6 +10,10 @@ toolBarFont=Inter Variable,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
 smallestReadableFont=Inter Variable,8,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
 fixed=JetBrains Mono,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
 
+[Icons]
+# Huginn's folders and files in smoked glass (scripts/make-icons.py); Breeze for everything else
+Theme=Huginn
+
 [KDE]
 # Huginn's look for Qt apps: Kvantum with Huginn's theme (/usr/share/Kvantum/Huginn*)
 widgetStyle=kvantum
