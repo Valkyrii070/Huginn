@@ -14,6 +14,7 @@ system's own logo) and huginn-browser. The pictures are drawn here, by hand, in 
 borrowed. Change a picture below and run this again.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -173,12 +174,24 @@ def squircle(x: float, y: float, w: float, h: float, n: float = 5.0, steps: int 
 TILE, INNER = squircle(14, 14, 228, 228), squircle(16.5, 16.5, 223, 223)
 
 
-def icon(app: str, bright: str, deep: str) -> str:
-    pic = PICS[app]
+# The two marks, in the same glass: the raven glowing in the realm's light (Huginn OS) and in violet (the browser).
+# Their bright original artwork stays in branding/ for Welcome, the boot screen and the browser's own project.
+RAVEN = (f'<path {W} d="M14 200 C36 164 66 132 104 110 C108 80 126 56 152 56 C168 56 181 64 188 77 C206 78 226 88 238 104 '
+         f'C222 106 205 111 190 116 C192 124 186 131 182 136 C174 166 174 206 182 242 H70 A56 56 0 0 1 14 186 Z"/>'
+         f'<path fill="none" stroke="{{c}}" stroke-width="9" stroke-linecap="round" opacity=".55" d="M52 204 C84 168 122 160 150 178"/>'
+         f'<path fill="none" stroke="{{c}}" stroke-width="9" stroke-linecap="round" opacity=".55" d="M96 226 C116 202 140 196 158 206"/>'
+         f'<circle fill="{{c}}" cx="160" cy="86" r="7.5"/><circle {W} cx="162" cy="84" r="2.6"/>')
+MARKS = {"huginn-os": ("#3DD6B5", "#7B61FF", ("#B9F5E8", "#7B61FF")), "huginn-browser": ("#8E7BFF", "#5B3FD6", ("#D9D2FF", "#7B61FF"))}
+
+
+def icon(app: str, bright: str, deep: str, pic: str | None = None, ink: tuple | None = None, clip: bool = False) -> str:
+    pic = PICS[app] if pic is None else pic
 
     def paint(white: str, detail: str) -> str:
         return pic.replace('fill="#fff"', f'fill="{white}"').replace('stroke="#fff"', f'stroke="{white}"').replace("{c}", detail)
     cut, rise = "#16191E", mix(bright, "#FFFFFF", 0.42)
+    top, bottom = ink if ink else (rise, bright)
+    inside = ' clip-path="url(#inside)"' if clip else ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>'
             # the glass: smoke, the app's light rising from below, a sheen across the top, the rim
             f'<linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B3038"/><stop offset="1" stop-color="#121519"/></linearGradient>'
@@ -192,7 +205,7 @@ def icon(app: str, bright: str, deep: str) -> str:
             f'<filter id="drop" x="-20%" y="-20%" width="140%" height="150%"><feGaussianBlur stdDeviation="6"/><feOffset dy="6"/></filter>'
             f'<clipPath id="inside"><path d="{TILE}"/></clipPath>'
             # the picture: the app's colour rising, glossy on top, deeper at its foot, a halo
-            f'<linearGradient id="ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{rise}"/><stop offset="1" stop-color="{bright}"/></linearGradient>'
+            f'<linearGradient id="ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{top}"/><stop offset="1" stop-color="{bottom}"/></linearGradient>'
             f'<filter id="halo" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>'
             f'<filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4"/></filter>'
             f'<mask id="shape" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{paint("#fff", "#000")}</mask>'
@@ -206,8 +219,8 @@ def icon(app: str, bright: str, deep: str) -> str:
             f'</defs>'
             f'<path d="{TILE}" fill="#000" opacity=".5" filter="url(#drop)"/>'
             f'<path d="{TILE}" fill="url(#tile)"/><path d="{TILE}" fill="url(#spec)"/><path d="{TILE}" fill="url(#glow)"/><path d="{TILE}" fill="url(#sheen)"/>'
-            f'<g filter="url(#halo)" opacity=".55">{paint(bright, bright)}</g>{paint("url(#ink)", cut)}'
-            f'<rect width="256" height="256" fill="url(#gloss)" mask="url(#shape)"/><rect width="256" height="256" fill="url(#foot)" mask="url(#shape)"/>'
+            f'<g{inside}><g filter="url(#halo)" opacity=".55">{paint(bright, bright)}</g>{paint("url(#ink)", cut)}'
+            f'<rect width="256" height="256" fill="url(#gloss)" mask="url(#shape)"/><rect width="256" height="256" fill="url(#foot)" mask="url(#shape)"/></g>'
             f'<path d="{TILE}" fill="none" stroke="url(#rim)" stroke-width="3"/>'
             f'<g clip-path="url(#inside)"><path d="{INNER}" fill="none" stroke="url(#hi)" stroke-width="5"/><path d="{INNER}" fill="none" stroke="url(#lo)" stroke-width="6"/></g>'
             f'<g clip-path="url(#low)"><path d="{TILE}" fill="none" stroke="url(#ring)" stroke-width="9" filter="url(#soft)" opacity=".9"/>'
@@ -380,33 +393,15 @@ def main() -> int:
     from PySide6.QtSvg import QSvgRenderer
     app = QGuiApplication.instance() or QGuiApplication(["icons", "-platform", "offscreen"])      # noqa: F841
     made = {}
-    for name in PICS:
-        svg = icon(name, *colours[name])
+
+    def write(name: str, svg: str, sizes=(256, 128, 64, 48)) -> bool:
         (OUT / "scalable" / "apps").mkdir(parents=True, exist_ok=True)
-        (OUT / "scalable" / "apps" / f"huginn-{name}.svg").write_text(svg, encoding="utf-8")
+        (OUT / "scalable" / "apps" / f"{name}.svg").write_text(svg, encoding="utf-8")
         draw = QSvgRenderer(QByteArray(svg.encode("utf-8")))
         if not draw.isValid():
             print(f"The picture for {name} isn't valid SVG.")
-            return 1
-        for size in (256, 128, 64, 48):
-            img = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
-            img.fill(Qt.transparent)
-            painter = QPainter(img)
-            painter.setRenderHint(QPainter.Antialiasing)
-            draw.render(painter, QRectF(0, 0, size, size))
-            painter.end()
-            folder = OUT / f"{size}x{size}" / "apps"
-            folder.mkdir(parents=True, exist_ok=True)
-            img.save(str(folder / f"huginn-{name}.png"))
-            if size == 128:
-                made[name] = img
-    # The two marks: Huginn OS itself, and the Huginn browser. Their artwork lives in branding/ (the raven is the
-    # browser's own); each has a plainer version for 32 pixels and below.
-    for name in ("huginn-os", "huginn-browser"):
-        art, small = ROOT / "branding" / f"{name}.svg", ROOT / "branding" / f"{name}-small.svg"
-        (OUT / "scalable" / "apps" / f"{name}.svg").write_text(art.read_text(encoding="utf-8"), encoding="utf-8")
-        for size in (512, 256, 128, 64, 48, 32, 24, 16):
-            draw = QSvgRenderer(str(small if size <= 32 else art))
+            return False
+        for size in sizes:
             img = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
             img.fill(Qt.transparent)
             painter = QPainter(img)
@@ -418,6 +413,18 @@ def main() -> int:
             img.save(str(folder / f"{name}.png"))
             if size == 128:
                 made[name] = img
+        return True
+
+    for name in PICS:
+        if not write(f"huginn-{name}", icon(name, *colours[name])):
+            return 1
+    # the calendar without its date: the dock and the launcher write today's over it (AppIcon.qml)
+    blank = re.sub(r"<text[^>]*>[^<]*</text>", "", PICS["calendar"])
+    write("huginn-calendar-blank", icon("calendar", *colours["calendar"], pic=blank), sizes=(256, 128))
+    made.pop("huginn-calendar-blank", None)
+    # The two marks: Huginn OS itself, and the Huginn browser, in the same glass.
+    for name, (bright, deep, ink) in MARKS.items():
+        write(name, icon(name, bright, deep, pic=RAVEN, ink=ink, clip=True), sizes=(512, 256, 128, 64, 48, 32, 24, 16))
     print(f"Drew {len(made)} icons into {OUT}")
     print(f"Drew {theme(colours)} folders and kinds of file into {THEME}")
     if "--sheet" in sys.argv:

@@ -19,7 +19,18 @@ Rectangle {
     border.color: Theme.t.line
     gradient: brand ? huginn : null
     Gradient { id: huginn; GradientStop { position: 0; color: Theme.t.glowA } GradientStop { position: 1; color: Theme.t.glowB } }
-    Image { visible: tile.own !== ""; anchors.centerIn: parent; width: Math.round(tile.size * 1.1); height: width; source: tile.own; sourceSize: Qt.size(128, 128); smooth: true; mipmap: true }
+    // Calendar shows today's date: its picture without one, and the day written over it where the date goes.
+    readonly property bool calendar: own.endsWith("/huginn-calendar.png")
+    property int day: new Date().getDate()
+    Timer { running: tile.calendar && tile.visible; repeat: true; interval: 60000; onTriggered: tile.day = new Date().getDate() }
+    Image { id: pic; visible: tile.own !== ""; anchors.centerIn: parent; width: Math.round(tile.size * 1.1); height: width; sourceSize: Qt.size(128, 128); smooth: true; mipmap: true
+        source: tile.calendar ? tile.own.replace("/huginn-calendar.png", "/huginn-calendar-blank.png") : tile.own }
+    Text {
+        visible: tile.calendar && tile.own !== ""
+        readonly property real k: pic.width / 256           // the picture's own units (make-icons.py draws in 256)
+        text: tile.day; color: "#16191E"; font.family: "Inter"; font.weight: Font.Bold; font.pixelSize: Math.max(6, Math.round(64 * k))
+        x: pic.x + 128 * k - width / 2; y: pic.y + 174 * k - baselineOffset
+    }
     Glyph { visible: tile.glyph !== "" && tile.own === ""; anchors.centerIn: parent; name: tile.glyph; size: Math.round(tile.size * 0.5); ink: tile.brand ? "#0B1512" : Theme.t.icon }
     Image {
         visible: tile.glyph === "" && tile.image !== "" && tile.own === ""
