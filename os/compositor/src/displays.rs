@@ -16,6 +16,9 @@ use smithay::{
 
 use crate::state::{Backend, HuginnState};
 
+/// Settings › Displays, "Sharp older apps": X11 apps draw at the screens' scale (Xft.dpi) instead of being stretched.
+pub static SHARP_X11: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 const ROTATIONS: [(Transform, u32, &str); 4] = [
     (Transform::Normal, 1, "normal"),
     (Transform::_90, 2, "left"),
@@ -106,6 +109,52 @@ pub fn warmth(kelvin: u32) -> [f64; 3] {
 }
 
 impl<B: Backend + 'static> HuginnState<B> {
+    /// XWayland's scale: the largest of the screens' (HUGINN_XWAYLAND_SCALE overrides; 1 with sharp X11 apps off).
+    /// X11 apps then draw at the screens' real resolution, told to make things bigger through Xft.dpi, and Smithay
+    /// turns their sizes and places into the desktop's. Apps read Xft.dpi when they open.
+    pub fn xwayland_rescale(&mut self) {
+        #[cfg(feature = "xwayland")]
+        {
+            use smithay::wayland::compositor::CompositorHandler;
+            let Some(client) = self.xwayland_client.clone() else { return };
+            let scale = std::env::var("HUGINN_XWAYLAND_SCALE").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or_else(|| {
+                if SHARP_X11.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.space.outputs().map(|o| o.current_scale().fractional_scale()).fold(1.0, f64::max)
+                } else {
+                    1.0
+                }
+            });
+            let state = self.client_compositor_state(&client);
+            if (state.client_scale() - scale).abs() < 0.001 {
+                return;
+            }
+            state.set_client_scale(scale);
+            // the screens again, at the new scale, for XWayland
+            for o in self.space.outputs() {
+                o.change_current_state(o.current_mode(), None, None, None);
+            }
+            if let Some(n) = self.xdisplay {
+                let resources = format!("Xft.dpi: {}\nXcursor.size: {}\n", (96.0 * scale).round(), (24.0 * scale).round());
+                if let Ok(mut child) = std::process::Command::new("xrdb")
+                    .args(["-merge", "-"])
+                    .env("DISPLAY", format!(":{n}"))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    use std::io::Write;
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(resources.as_bytes());
+                    }
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
+            }
+        }
+    }
+
     /// A screen just plugged in: put back its saved rotation, size of things and place.
     pub fn restore_display(&mut self, output: &Output) {
         let Some(s) = saved(output) else { return };
@@ -123,6 +172,7 @@ impl<B: Backend + 'static> HuginnState<B> {
         if let Some(loc) = loc {
             self.space.map_output(output, loc);
         }
+        self.xwayland_rescale();
     }
 
     /// The screens, as `kscreen-doctor -j` lists them (those turned off too).
@@ -225,6 +275,7 @@ impl<B: Backend + 'static> HuginnState<B> {
             _ => return format!("Not something a screen can do: {change}."),
         }
         remember(&output);
+        self.xwayland_rescale();
         self.backend_data.reset_buffers(&output);
         crate::shell::fixup_positions(&mut self.space, self.pointer.current_location());
         self.refit_windows();

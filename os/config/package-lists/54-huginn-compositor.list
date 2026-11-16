@@ -19,4 +19,6 @@ qml6-module-qtwayland-compositor
 qml6-module-qtquick-effects
 qml6-module-qtcore
 xwayland
+# xrdb: X11 apps told to draw at the screens' scale (Xft.dpi)
+x11-xserver-utils
 libxcb-cursor0

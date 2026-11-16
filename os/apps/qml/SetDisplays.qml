@@ -58,6 +58,9 @@ Column {
             SetChoice { each: 74; options: pg.cur ? pg.cur.rates.slice(0, 4).map(function (r) { return [r.id, r.label] }) : []; value: pg.cur ? String(pg.cur.hz) : ""; onPicked: function (v) { Backend.setRate(pg.cur.name, v) } } }
         SetRow { title: "Turn"; sub: "For a screen on its side"
             SetChoice { each: 70; options: [["normal", "None"], ["left", "Left"], ["right", "Right"], ["inverted", "Upside"]]; value: pg.cur ? pg.cur.rotation : "normal"; onPicked: function (v) { Backend.setRotation(pg.cur.name, v) } } } }
+    SetCard { title: "Older apps"
+        SetRow { title: "Sharp older apps"; sub: "Apps made for X11 draw themselves at the size of things you chose, instead of being stretched (Huginn's own compositor; opening them again shows the change)."
+            Toggle { on: Settings.sharpX11; onToggled: function (v) { Settings.set("sharpX11", v ? "true" : "false") } } } }
     SetCard { visible: pg.d.brightness >= 0; title: "Brightness"
         SetRow { title: "Brightness"; SetSlider { width: 280; glyphLeft: "sun"; value: pg.d.brightness / 100; onMoved: function (v) { Backend.setBrightness(Math.round(v * 100)) } } } }
     SetCard { title: "Night light"; note: "Warmer colours in the evening are easier on the eyes and help you sleep."

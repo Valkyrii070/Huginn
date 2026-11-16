@@ -207,6 +207,8 @@ build_compositor() {
     local src="$ROOT/compositor" crates="$WORK/cargo-home" target="$WORK/compositor-target"
     [ -f "$src/Cargo.toml" ] || return 0
     local deps="rustc cargo pkg-config libudev-dev libinput-dev libgbm-dev libseat-dev libxkbcommon-dev libegl-dev libgles-dev libdrm-dev libpixman-1-dev libdisplay-info-dev libwayland-dev"
+    # and for screen sharing's portal backend, built from third_party/ (see below)
+    deps="$deps gcc meson ninja-build libpipewire-0.3-dev libinih-dev libsystemd-dev wayland-protocols"
     in_chroot sh -c "dpkg-query -W -f='\${Package}\n' | sort > /tmp/hc-before.txt"
     if ! in_chroot env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $deps > "$WORK/comp-deps.log" 2>&1; then
         warn "Rust or the compositor's headers didn't install (see $WORK/comp-deps.log): no \"own compositor\" session"
@@ -238,9 +240,24 @@ build_compositor() {
             tail -25 "$WORK/comp-build.log" || true
         fi
         umount "$CHROOT/tmp/hc/crates" "$CHROOT/tmp/hc/target"
+        # Screen sharing: xdg-desktop-portal-wlr 0.9.0 (third_party/, MIT), newer than Ubuntu's 0.8.1, whose frames
+        # could outlive their buffers and drop the stream; Ubuntu's binary is diverted, its package stays for the rest.
+        local xdpw="$ROOT/third_party/xdg-desktop-portal-wlr"
+        if [ -f "$xdpw/meson.build" ] && [ -x "$CHROOT/usr/libexec/xdg-desktop-portal-wlr" ]; then
+            rsync -a --delete "$xdpw/" "$CHROOT/tmp/hc/xdpw/"
+            if in_chroot sh -c "cd /tmp/hc/xdpw && meson setup build --prefix=/usr -Dman-pages=disabled -Dsystemd=disabled && ninja -C build" \
+                   > "$WORK/xdpw-build.log" 2>&1; then
+                in_chroot dpkg-divert --local --rename --divert /usr/libexec/xdg-desktop-portal-wlr.ubuntu --add /usr/libexec/xdg-desktop-portal-wlr >/dev/null
+                install -m 755 "$CHROOT/tmp/hc/xdpw/build/xdg-desktop-portal-wlr" "$CHROOT/usr/libexec/xdg-desktop-portal-wlr"
+                install -D -m 644 "$xdpw/LICENSE" "$CHROOT/usr/share/doc/huginn-xdg-desktop-portal-wlr/LICENSE"
+            else
+                warn "xdg-desktop-portal-wlr didn't build (see $WORK/xdpw-build.log): Ubuntu's stays"
+                tail -15 "$WORK/xdpw-build.log" || true
+            fi
+        fi
     fi
     in_chroot sh -c "dpkg-query -W -f='\${Package}\n' | sort > /tmp/hc-after.txt; comm -13 /tmp/hc-before.txt /tmp/hc-after.txt > /tmp/hc-new.txt"
-    in_chroot sh -c 'grep -E -- "-dev\$|^(rustc|rustc-[0-9.]+|cargo|cargo-[0-9.]+|libstd-rust-[0-9.]+(-dev)?|gcc|gcc-[0-9]+|cpp|cpp-[0-9]+|pkg-config|pkgconf|pkgconf-bin|libwayland-bin|libc-dev-bin)\$" /tmp/hc-new.txt | xargs -r env DEBIAN_FRONTEND=noninteractive apt-get purge -y' > "$WORK/comp-purge.log" 2>&1 || true
+    in_chroot sh -c 'grep -E -- "-dev\$|^(rustc|rustc-[0-9.]+|cargo|cargo-[0-9.]+|libstd-rust-[0-9.]+(-dev)?|gcc|gcc-[0-9]+|cpp|cpp-[0-9]+|pkg-config|pkgconf|pkgconf-bin|libwayland-bin|libc-dev-bin|meson|ninja-build|wayland-protocols)\$" /tmp/hc-new.txt | xargs -r env DEBIAN_FRONTEND=noninteractive apt-get purge -y' > "$WORK/comp-purge.log" 2>&1 || true
     in_chroot env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge >> "$WORK/comp-purge.log" 2>&1 || true
     rm -rf "$CHROOT/tmp/hc" "$CHROOT"/tmp/hc-*.txt
     # Without it, the session menu mustn't offer a session that can't start.

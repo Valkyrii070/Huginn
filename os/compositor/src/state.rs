@@ -189,6 +189,9 @@ pub struct HuginnState<BackendData: Backend + 'static> {
     pub xwm: Option<X11Wm>,
     #[cfg(feature = "xwayland")]
     pub xdisplay: Option<u32>,
+    /// XWayland's own Wayland client: its scale (displays.rs, sharp X11 apps)
+    #[cfg(feature = "xwayland")]
+    pub xwayland_client: Option<Client>,
 
     #[cfg(feature = "debug")]
     pub renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>>,
@@ -867,6 +870,8 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
             xwm: None,
             #[cfg(feature = "xwayland")]
             xdisplay: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_client: None,
             #[cfg(feature = "debug")]
             renderdoc: renderdoc::RenderDoc::new().ok(),
             show_window_preview: false,
@@ -878,7 +883,6 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
     pub fn start_xwayland(&mut self) {
         use std::process::Stdio;
 
-        use smithay::wayland::compositor::CompositorHandler;
 
         let (xwayland, client) = XWayland::spawn(
             &self.display_handle,
@@ -900,12 +904,10 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
                     x11_socket,
                     display_number,
                 } => {
-                    let xwayland_scale = std::env::var("HUGINN_XWAYLAND_SCALE")
-                        .ok()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(1.);
-                    data.client_compositor_state(&client)
-                        .set_client_scale(xwayland_scale);
+                    // X11 apps at the screens' scale, drawing themselves bigger (displays.rs)
+                    data.xwayland_client = Some(client.clone());
+                    data.xdisplay = Some(display_number);
+                    data.xwayland_rescale();
                     let mut wm =
                         X11Wm::start_wm(data.handle.clone(), &display_handle, x11_socket, client.clone())
                             .expect("Failed to attach X11 Window Manager");

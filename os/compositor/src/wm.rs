@@ -838,6 +838,12 @@ impl<B: Backend + 'static> HuginnState<B> {
         if let Some(r) = v.get("remember").and_then(|x| x.as_bool()) {
             crate::places::REMEMBER.store(r, std::sync::atomic::Ordering::Relaxed);
         }
+        if let Some(x11) = v.get("x11sharp").and_then(|x| x.as_bool()) {
+            let was = crate::displays::SHARP_X11.swap(x11, std::sync::atomic::Ordering::Relaxed);
+            if was != x11 {
+                self.xwayland_rescale();
+            }
+        }
         if let Some(s) = v.get("vrr").and_then(|x| x.as_str()) {
             crate::look::NO_VRR.store(s == "off", std::sync::atomic::Ordering::Relaxed);
         }

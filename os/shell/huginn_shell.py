@@ -162,9 +162,9 @@ class Settings(QObject):
                 "dockSize": "44", "hideStyle": "drop", "dockClickHides": "true", "overviewOpen": "glide", "hotCorner": "false",
                 "spacesAllScreens": "true", "inAppMotion": "grow", "fillButtonLayouts": "true", "snapGaps": "true", "keepSnapped": "true",
                 # windows and screens on Huginn's own compositor
-                "reopenApps": "true", "rememberPlaces": "true", "adaptiveSync": "auto"}
+                "reopenApps": "true", "rememberPlaces": "true", "adaptiveSync": "auto", "sharpX11": "true"}
     SWITCHES = ("clock24", "barDate", "batteryPercent", "dockHide", "dockDots", "autoUpdate", "liveWallpaper", "contrast", "reduceTransparency", "reduceMotion",
-                "dockClickHides", "hotCorner", "spacesAllScreens", "fillButtonLayouts", "snapGaps", "keepSnapped", "reopenApps", "rememberPlaces")
+                "dockClickHides", "hotCorner", "spacesAllScreens", "fillButtonLayouts", "snapGaps", "keepSnapped", "reopenApps", "rememberPlaces", "sharpX11")
     SCALES = ("1", "1.25", "1.5", "1.75", "2")
 
     def __init__(self, path: Path, realms: list, persist: bool = True):
@@ -224,6 +224,7 @@ class Settings(QObject):
     reopenApps = Property(bool, lambda self: self._values["reopenApps"] == "true", notify=changed)
     rememberPlaces = Property(bool, lambda self: self._values["rememberPlaces"] == "true", notify=changed)
     adaptiveSync = Property(str, lambda self: self._values["adaptiveSync"], notify=changed)
+    sharpX11 = Property(bool, lambda self: self._values["sharpX11"] == "true", notify=changed)
 
     def override(self, key: str, value: str) -> None:
         """Set a value for this run only (command-line flags)."""

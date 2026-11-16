@@ -1122,8 +1122,13 @@ over when the side island would reach them (`GlassWindow.middleX`).
   with three or more for the start menu, spread for the Overview.
 - **Adaptive sync** (FreeSync, G-Sync compatible) can be turned off in Settings › Desktop & Dock; it's on while a
   game or video fills the screen. Screens are driven at 10 bits per colour where they can be.
-- Not there yet, and why: tearing for games (Smithay can't flip asynchronously yet), sharp X11 apps at fractional
-  scales (Smithay's XWayland has no scale of its own yet) and HDR (no colour pipeline yet) wait on Smithay.
+- **Sharp older apps** (Settings › Displays): XWayland runs at the largest screen scale and X11 apps are told to
+  draw bigger (Xft.dpi, through xrdb) instead of being stretched; apps that ignore Xft.dpi look small, so it can be
+  turned off.
+- **Screen sharing that doesn't drop**: xdg-desktop-portal-wlr 0.9.0 is built from `third_party/` (MIT) in place of
+  Ubuntu's 0.8.1, whose frames could outlive their buffers when a viewer restarted the stream.
+- Not there yet, and why: tearing for games (Smithay can't flip asynchronously yet) and HDR (no colour pipeline
+  yet) wait on Smithay.
 
 ## Huginn, the browser
 
