@@ -1084,6 +1084,10 @@ over when the side island would reach them (`GlassWindow.middleX`).
   changes (`displays.rs`), so Settings speaks to it as it does to KWin. Each screen's settings are kept in
   `~/.config/huginn/displays.json` by make, model and serial number, and come back when it's plugged in again.
   Turning a screen off and choosing the main screen are still to come there.
+- **Settings › Keyboard & Mouse** there too: keyboard layouts and options and key repeat come from the files KWin
+  reads (kxkbrc, kcminputrc), read again when Settings changes them; mice and touchpads (tap to click, natural
+  scrolling, left-handed, speed, ignore while typing) are listed and changed over the bus and kept by device name in
+  `~/.config/huginn/input.json` (`input.rs`).
 - **Night light** there too: the session daemon reads Settings' night light (kwinrc's [NightColor], as KWin does)
   and sets every screen's gamma through the compositor, easing in and out over half an hour.
 - Icons: the pictures inside the smoked glass are solid now, as macOS and iOS draw theirs (the app's colour with

@@ -51,6 +51,12 @@ pub enum Request {
     ConfigureDisplay(String, String, mpsc::Sender<String>),
     /// Night light: the colour temperature, in kelvin (6500: off)
     NightLight(u32),
+    /// Mice and touchpads (input.rs): JSON
+    Pointers(mpsc::Sender<String>),
+    /// One setting on one of them: device, setting, value (JSON): "" when done, else why not
+    SetPointer(String, String, String, mpsc::Sender<String>),
+    /// Settings changed the keyboard's layouts or key repeat
+    ReloadInput,
 }
 
 /// What the compositor tells others over the bus.
@@ -186,6 +192,31 @@ impl Compositor {
     /// from Settings' schedule.
     fn night_light(&self, kelvin: u32) {
         let _ = self.to_loop.send(Request::NightLight(kelvin));
+    }
+
+    /// Mice and touchpads, as JSON: [{"sys", "name", "touchpad", "tap", "natural", "left", "speed", "dwt", "canDwt",
+    /// "canTap"}] (Settings › Keyboard & Mouse).
+    fn pointers(&self) -> String {
+        let (tx, rx) = mpsc::channel();
+        if self.to_loop.send(Request::Pointers(tx)).is_err() {
+            return String::new();
+        }
+        rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default()
+    }
+
+    /// One setting on one mouse or touchpad ("tap", "natural", "left", "speed", "dwt"; the value as JSON): "" when
+    /// done, else why not.
+    fn set_pointer(&self, sys: &str, setting: &str, value: &str) -> String {
+        let (tx, rx) = mpsc::channel();
+        if self.to_loop.send(Request::SetPointer(sys.into(), setting.into(), value.into(), tx)).is_err() {
+            return "The compositor didn't answer.".into();
+        }
+        rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| "The compositor didn't answer.".into())
+    }
+
+    /// Settings changed the keyboard (kxkbrc, kcminputrc): read it again.
+    fn reload_input(&self) {
+        let _ = self.to_loop.send(Request::ReloadInput);
     }
 
     /// The windows, as JSON: {"current": space, "spaces": [names], "windows": [{"id", "app", "title", "minimised",

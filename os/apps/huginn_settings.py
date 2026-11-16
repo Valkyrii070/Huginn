@@ -6,7 +6,7 @@ tool would make, and a change made elsewhere shows up here:
     Wi-Fi & Network      NetworkManager (nmcli)              Bluetooth          BlueZ (bluetoothctl)
     Displays             kscreen-doctor, or Huginn's compositor   Night light        kwinrc (KWin, or huginn_sessiond)
     Sound                PipeWire through pactl               Battery & Power    UPower, power-profiles-daemon, Huginn's session daemon
-    Keyboard & Mouse     KWin's input devices (D-Bus), kcminputrc, kxkbrc
+    Keyboard & Mouse     KWin's input devices or Huginn's compositor (D-Bus), kcminputrc, kxkbrc
     Date & Time          systemd's timedated (timedatectl)    Language           plasma-localerc (your account)
     Users                AccountsService (D-Bus)              Default Apps       mimeapps.list, ~/.config/autostart
     Privacy & Security   ufw, Flatpak's permission store, kscreenlockerrc, ktrashrc, recently-used files
@@ -562,6 +562,12 @@ POINTER_PROPS = ("name", "touchpad", "pointer", "keyboard", "tapToClick", "natur
 
 
 def kwin_pointers() -> list:
+    own = own_compositor("Pointers")                  # Huginn's own compositor lists them in the same shape
+    if own:
+        try:
+            return sorted(json.loads(own), key=lambda p: (not p["touchpad"], p["name"].lower()))
+        except (ValueError, KeyError, TypeError):
+            return []
     rows = busctl("user", "get-property", "org.kde.KWin", "/org/kde/KWin/InputDevice", "org.kde.KWin.InputDeviceManager", "devicesSysNames")
     if not rows:
         return []
@@ -1603,6 +1609,11 @@ class SystemSettings(QObject):
         text = ("true" if value else "false") if kind == "b" else f"{max(-1.0, min(1.0, float(value))):.2f}"
 
         def work():
+            own = own_compositor("SetPointer", (sysname, prop, json.dumps(value)), "(sss)")
+            if own is not None:                         # Huginn's own compositor
+                if own:
+                    raise Failed(own)
+                return ""
             if busctl("user", "set-property", "org.kde.KWin", f"/org/kde/KWin/InputDevice/{sysname}", "org.kde.KWin.InputDevice", dbus_name, kind, text) is None:
                 raise Failed("KWin didn't take the change: " + (busctl.last or "it isn't running"))
             return ""
@@ -1636,6 +1647,8 @@ class SystemSettings(QObject):
                 kconfig_write(xkb, ["Layout"], "Options", ",".join(options))
                 kconfig_write(xkb, ["Layout"], "ResetOldOptions", "true")
                 RUN(["dbus-send", "--session", "--type=signal", "/Layouts", "org.kde.keyboard.reloadConfig"], None, 5)
+            if own_compositor("ReloadInput") is not None:   # Huginn's own compositor reads the same files
+                return ""
             dbus_call("session", "org.kde.KWin", "/KWin", "org.kde.KWin.reconfigure")
             return ""
 

@@ -162,6 +162,8 @@ pub struct UdevData {
     pointer_image: crate::cursor::Cursor,
     debug_flags: DebugFlags,
     keyboards: Vec<smithay::reexports::input::Device>,
+    /// mice and touchpads, for Settings (input.rs)
+    pointers: Vec<smithay::reexports::input::Device>,
 }
 
 impl UdevData {
@@ -255,6 +257,14 @@ impl Backend for UdevData {
             .map_err(|e| format!("The screen didn't take that mode ({e})."))
     }
 
+    fn pointers(&mut self) -> Vec<serde_json::Value> {
+        self.pointers.iter_mut().map(crate::input::describe).collect()
+    }
+
+    fn set_pointer(&mut self, sys: &str, prop: &str, value: &str) -> String {
+        crate::input::change(&mut self.pointers, sys, prop, value)
+    }
+
     fn set_warmth(&mut self, rgb: [f64; 3]) {
         for device in self.backends.values() {
             let drm = device.drm_output_manager.device();
@@ -335,6 +345,7 @@ pub fn run_udev() {
         fps_texture: None,
         debug_flags: DebugFlags::empty(),
         keyboards: Vec::new(),
+        pointers: Vec::new(),
     };
     let mut state = HuginnState::init(display, event_loop.handle(), data, true);
 
@@ -372,10 +383,13 @@ pub fn run_udev() {
                     }
                     data.backend_data.keyboards.push(device.clone());
                 }
-            } else if let InputEvent::DeviceRemoved { ref device } = event
-                && device.has_capability(DeviceCapability::Keyboard)
-            {
+                if device.has_capability(DeviceCapability::Pointer) {
+                    crate::input::restore(device);
+                    data.backend_data.pointers.push(device.clone());
+                }
+            } else if let InputEvent::DeviceRemoved { ref device } = event {
                 data.backend_data.keyboards.retain(|item| item != device);
+                data.backend_data.pointers.retain(|item| item != device);
             }
 
             data.process_input_event(&dh, event)

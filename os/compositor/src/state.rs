@@ -761,15 +761,17 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
 
         let pointer = seat.add_pointer();
-        let (layout, variant, options) = system_keyboard();
+        // Settings' layouts (kxkbrc) if any, else the system's; Settings' key repeat (kcminputrc)
+        let (layout, variant, options) = crate::input::layouts().unwrap_or_else(system_keyboard);
+        let (rate, delay) = crate::input::repeat();
         let xkb = XkbConfig {
             layout: &layout,
             variant: &variant,
             options: options.clone(),
             ..XkbConfig::default()
         };
-        seat.add_keyboard(xkb, 400, 30)
-            .or_else(|_| seat.add_keyboard(XkbConfig::default(), 400, 30))
+        seat.add_keyboard(xkb, delay, rate)
+            .or_else(|_| seat.add_keyboard(XkbConfig::default(), delay, rate))
             .expect("Failed to initialize the keyboard");
 
         let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
@@ -1273,4 +1275,12 @@ pub trait Backend {
     }
     /// Night light: how much red, green and blue every screen shows (1.0 each: off).
     fn set_warmth(&mut self, _rgb: [f64; 3]) {}
+    /// Mice and touchpads, as Settings lists them (input.rs).
+    fn pointers(&mut self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+    /// One setting on one mouse or touchpad: "" when done, else why not.
+    fn set_pointer(&mut self, _sys: &str, _prop: &str, _value: &str) -> String {
+        "Mice and touchpads are set on a real computer.".into()
+    }
 }

@@ -183,6 +183,13 @@ impl<B: Backend + 'static> HuginnState<B> {
             Request::OverviewDo(action) => self.overview_do(&action),
             Request::SpaceDo(action) => self.space_do(&action),
             Request::DockLayout(json) => self.dock_layout(&json),
+            Request::Pointers(tx) => {
+                let _ = tx.send(serde_json::Value::Array(self.backend_data.pointers()).to_string());
+            }
+            Request::SetPointer(sys, prop, value, tx) => {
+                let _ = tx.send(self.backend_data.set_pointer(&sys, &prop, &value));
+            }
+            Request::ReloadInput => self.reload_input(),
             Request::Displays(tx) => {
                 let _ = tx.send(self.displays_json());
             }
