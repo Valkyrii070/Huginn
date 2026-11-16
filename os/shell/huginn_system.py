@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from gi.repository import Gio, GLib
-from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Property, QFileSystemWatcher, QObject, QTimer, Signal, Slot
 
 # KWin script: the window list for the shell (the same as huginnactive's main.js, for a shell started after KWin)
 WINDOWS_JS = """var lastWindows = "";
@@ -162,10 +162,21 @@ class System(QObject):
             app.primaryScreenChanged.connect(lambda *_: self.primaryScreenChanged.emit())
             app.screenAdded.connect(lambda *_: self.primaryScreenChanged.emit())
             app.screenRemoved.connect(lambda *_: QTimer.singleShot(0, self.primaryScreenChanged.emit))
+            # the main screen chosen in Settings › Displays (Huginn's own compositor keeps it in displays.json)
+            folder = Path.home() / ".config" / "huginn"
+            folder.mkdir(parents=True, exist_ok=True)
+            self._displays_watch = QFileSystemWatcher([str(folder)], self)
+
+            def displays_changed(*_):
+                if (folder / "displays.json").exists() and str(folder / "displays.json") not in self._displays_watch.files():
+                    self._displays_watch.addPath(str(folder / "displays.json"))
+                QTimer.singleShot(200, self.primaryScreenChanged.emit)
+            self._displays_watch.directoryChanged.connect(displays_changed)
+            self._displays_watch.fileChanged.connect(displays_changed)
+            displays_changed()
         self._pump = QTimer(self, interval=40, timeout=lambda: GLib.MainContext.default().iteration(False))
         if not qt_runs_glib():
             self._pump.start()
-        from PySide6.QtCore import QFileSystemWatcher
         HISTORY.parent.mkdir(parents=True, exist_ok=True)
         self._notes_watch = QFileSystemWatcher([str(HISTORY.parent)], self)        # a notification came: the dot, the Control Centre
         self._notes_watch.directoryChanged.connect(lambda *_: self._later(self._reread_notes))
@@ -895,8 +906,19 @@ callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Activated
     powerCaps = Property("QVariantMap", lambda self: self._power, notify=changed)
 
     def _primary(self) -> str:
+        """The main screen (the top bar and dock's): the one chosen in Settings › Displays on Huginn's own compositor
+        (~/.config/huginn/displays.json, "_main"), else the one Qt calls primary."""
         from PySide6.QtGui import QGuiApplication
-        screen = QGuiApplication.primaryScreen() if QGuiApplication.instance() else None
+        if not QGuiApplication.instance():
+            return ""
+        names = [s.name() for s in QGuiApplication.screens()]
+        try:
+            main = json.loads((Path.home() / ".config" / "huginn" / "displays.json").read_text(encoding="utf-8")).get("_main", "")
+        except (OSError, ValueError, AttributeError):
+            main = ""
+        if main in names and os.environ.get("XDG_CURRENT_DESKTOP", "").startswith("Huginn-Own"):
+            return main
+        screen = QGuiApplication.primaryScreen()
         return screen.name() if screen else ""
     primaryScreenChanged = Signal()
     primaryScreen = Property(str, _primary, notify=primaryScreenChanged)

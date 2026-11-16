@@ -59,6 +59,8 @@ pub struct Huginn {
     pub minimised: Vec<(WindowElement, Point<i32, Logical>)>,
     /// Super is down and nothing else has been pressed since (on its release: the start menu).
     pub super_alone: bool,
+    /// Screens turned off in Settings › Displays (displays.rs): kept, dark, out of the desktop
+    pub off_outputs: Vec<smithay::output::Output>,
     /// Sticky keys and bounce keys (access.rs)
     pub keys: crate::access::Keys,
     /// The colour filter in use (access.rs)

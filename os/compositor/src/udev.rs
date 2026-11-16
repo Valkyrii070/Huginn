@@ -1235,6 +1235,7 @@ impl HuginnState<UdevData> {
     }
 
     fn connector_disconnected(&mut self, node: DrmNode, connector: connector::Info, crtc: crtc::Handle) {
+        self.huginn.off_outputs.retain(|o| o.user_data().get::<UdevOutputId>() != Some(&UdevOutputId { device_id: node, crtc }));
         let device = if let Some(device) = self.backend_data.backends.get_mut(&node) {
             device
         } else {
@@ -1564,20 +1565,19 @@ impl HuginnState<UdevData> {
             return;
         }
 
-        let output = if let Some(output) = self.space.outputs().find(|o| {
-            o.user_data().get::<UdevOutputId>()
-                == Some(&UdevOutputId {
-                    device_id: node,
-                    crtc,
-                })
-        }) {
+        let this = |o: &&Output| o.user_data().get::<UdevOutputId>() == Some(&UdevOutputId { device_id: node, crtc });
+        // a screen turned off in Settings › Displays is kept dark, and looked at again now and then
+        let off = self.huginn.off_outputs.iter().any(|o| this(&o));
+        let output = if let Some(output) = self.space.outputs().find(this).or_else(|| self.huginn.off_outputs.iter().find(this)) {
             output.clone()
         } else {
             // somehow we got called with an invalid output
             return;
         };
 
-        self.pre_repaint(&output, frame_target);
+        if !off {
+            self.pre_repaint(&output, frame_target);
+        }
         let view = self.scene_view(&output);
 
         let device = if let Some(device) = self.backend_data.backends.get_mut(&node) {
@@ -1594,7 +1594,7 @@ impl HuginnState<UdevData> {
 
         // The screen-off timer: the screen goes dark (DPMS off) and nothing is drawn; look again every quarter
         // second for it to come back on (any key or movement does that).
-        if self.huginn.blank {
+        if self.huginn.blank || off {
             if !surface.blanked {
                 surface.blanked = true;
                 if let Err(err) = surface.drm_output.with_compositor(|c| c.clear()) {

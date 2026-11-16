@@ -1078,12 +1078,13 @@ over when the side island would reach them (`GlassWindow.middleX`).
 - **Screen sharing and recording for apps** (video calls, OBS, the browser): the compositor speaks
   ext-image-copy-capture, and xdg-desktop-portal-wlr turns that into a PipeWire stream. The own-compositor session
   says `XDG_CURRENT_DESKTOP=Huginn-Own:Huginn:KDE`, so the portal reads `huginn-own-portals.conf`, which sends
-  screen sharing there. It shares the first screen; a picker for several screens is still to come.
+  screen sharing there. With more than one screen, Huginn asks which one to share (`apps/huginn_pick_screen.py`, the portal's chooser).
 - **Settings › Displays on Huginn's own compositor**: resolution, refresh rate, size of things (scale), rotation and
   where each screen sits. The compositor lists its screens on the bus in kscreen-doctor's JSON and takes the same
   changes (`displays.rs`), so Settings speaks to it as it does to KWin. Each screen's settings are kept in
   `~/.config/huginn/displays.json` by make, model and serial number, and come back when it's plugged in again.
-  Turning a screen off and choosing the main screen are still to come there.
+  Turning a screen off keeps it dark and out of the desktop until it's turned on again (or plugged in again); the
+  main screen, where the top bar and dock go, is kept in the same file for the shell.
 - **Settings › Keyboard & Mouse** there too: keyboard layouts and options and key repeat come from the files KWin
   reads (kxkbrc, kcminputrc), read again when Settings changes them; mice and touchpads (tap to click, natural
   scrolling, left-handed, speed, ignore while typing) are listed and changed over the bus and kept by device name in

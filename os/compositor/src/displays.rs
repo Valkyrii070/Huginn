@@ -47,6 +47,11 @@ pub fn key(output: &Output) -> String {
     }
 }
 
+/// The main screen (the top bar and dock's), by its connector name, if one was chosen.
+pub fn main_name() -> Option<String> {
+    load().get("_main").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// What was saved for this screen, if anything.
 pub fn saved(output: &Output) -> Option<Value> {
     load().get(key(output)).cloned()
@@ -69,7 +74,6 @@ pub fn pick(modes: &[Mode], (w, h, mhz): (i32, i32, i32)) -> Option<Mode> {
 }
 
 fn remember(output: &Output) {
-    let Some(path) = file() else { return };
     let mut all = load();
     let mode = output.current_mode();
     let loc = output.current_location();
@@ -78,10 +82,15 @@ fn remember(output: &Output) {
         "w": mode.map(|m| m.size.w), "h": mode.map(|m| m.size.h), "mhz": mode.map(|m| m.refresh),
         "scale": output.current_scale().fractional_scale(), "rotation": rot, "x": loc.x, "y": loc.y,
     });
+    save(&all);
+}
+
+fn save(all: &Value) {
+    let Some(path) = file() else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default());
+    let _ = std::fs::write(path, serde_json::to_string_pretty(all).unwrap_or_default());
 }
 
 /// Night light: how much of red, green and blue a colour temperature leaves (6500 K: all of them).
@@ -116,13 +125,16 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
     }
 
-    /// The screens, as `kscreen-doctor -j` lists them.
+    /// The screens, as `kscreen-doctor -j` lists them (those turned off too).
     pub fn displays_json(&self) -> String {
+        let main = main_name().filter(|m| self.space.outputs().any(|o| &o.name() == m));
         let outputs: Vec<Value> = self
             .space
             .outputs()
+            .map(|o| (o, true))
+            .chain(self.huginn.off_outputs.iter().map(|o| (o, false)))
             .enumerate()
-            .map(|(i, o)| {
+            .map(|(i, (o, on))| {
                 let current = o.current_mode();
                 let mut modes = o.modes();
                 if let Some(c) = current {
@@ -133,8 +145,8 @@ impl<B: Backend + 'static> HuginnState<B> {
                 let id = |m: &Mode| format!("{}x{}@{}", m.size.w, m.size.h, m.refresh);
                 let loc = o.current_location();
                 json!({
-                    "id": i + 1, "name": o.name(), "connected": true, "enabled": true,
-                    "priority": if i == 0 { 1 } else { 2 },
+                    "id": i + 1, "name": o.name(), "connected": true, "enabled": on,
+                    "priority": if main.as_ref().map_or(i == 0, |m| *m == o.name()) { 1 } else { 2 },
                     "modes": modes.iter().map(|m| json!({"id": id(m), "size": {"width": m.size.w, "height": m.size.h},
                                                           "refreshRate": m.refresh as f64 / 1000.0})).collect::<Vec<_>>(),
                     "currentModeId": current.map(|m| id(&m)).unwrap_or_default(),
@@ -149,10 +161,18 @@ impl<B: Backend + 'static> HuginnState<B> {
 
     /// One change to one screen: "" when done, else why not.
     pub fn configure_display(&mut self, name: &str, change: &str) -> String {
-        let Some(output) = self.space.outputs().find(|o| o.name() == name).cloned() else {
-            return format!("There's no screen called {name}.");
-        };
         let (what, value) = change.split_once('.').unwrap_or((change, ""));
+        if what == "enable" {
+            let Some(i) = self.huginn.off_outputs.iter().position(|o| o.name() == name) else { return String::new() };
+            let output = self.huginn.off_outputs.remove(i);
+            self.space.map_output(&output, output.current_location());
+            self.backend_data.reset_buffers(&output);
+            crate::shell::fixup_positions(&mut self.space, self.pointer.current_location());
+            return String::new();
+        }
+        let Some(output) = self.space.outputs().find(|o| o.name() == name).cloned() else {
+            return format!("There's no screen called {name}, or it's off.");
+        };
         match what {
             "mode" => {
                 let mut bits = value.split(['x', '@']).map(|b| b.parse::<i32>().unwrap_or(0));
@@ -185,9 +205,23 @@ impl<B: Backend + 'static> HuginnState<B> {
                 output.change_current_state(None, None, None, Some(loc));
                 self.space.map_output(&output, loc);
             }
-            // the first screen is the main one; turning a screen off is still to come
-            "priority" => return String::new(),
-            "enable" | "disable" => return "Turning a screen on and off isn't ready yet on Huginn's own compositor.".into(),
+            // the main screen: where the top bar and dock are (the shell reads it from displays.json)
+            "priority" => {
+                let mut all = load();
+                all["_main"] = json!(name);
+                save(&all);
+                return String::new();
+            }
+            "disable" => {
+                if self.space.outputs().count() <= 1 {
+                    return "That's the only screen that's on, so it stays on.".into();
+                }
+                self.space.unmap_output(&output);
+                self.huginn.off_outputs.push(output);
+                crate::shell::fixup_positions(&mut self.space, self.pointer.current_location());
+                self.refit_windows();
+                return String::new();
+            }
             _ => return format!("Not something a screen can do: {change}."),
         }
         remember(&output);

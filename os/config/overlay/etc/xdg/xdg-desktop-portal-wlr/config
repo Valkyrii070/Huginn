@@ -1,5 +1,6 @@
-# Screen sharing on Huginn's own compositor (xdg-desktop-portal-wlr). Asked to share a screen, it shares the
-# first one; picking among several screens is still to come.
+# Screen sharing on Huginn's own compositor (xdg-desktop-portal-wlr): with more than one screen, Huginn asks which
+# one to share (apps/huginn_pick_screen.py).
 [screencast]
-chooser_type=none
+chooser_type=dmenu
+chooser_cmd=python3 /usr/share/huginn-apps/huginn_pick_screen.py
 max_fps=60
