@@ -653,6 +653,18 @@ class Session(QObject):
         self._night_watch = QFileSystemWatcher([str(Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"))], self)
         self._night_watch.directoryChanged.connect(lambda *_: QTimer.singleShot(300, self.night_light))
         QTimer.singleShot(2500, self.night_light)
+        QTimer.singleShot(4000, self.keyboard_on_screen)
+
+    def keyboard_on_screen(self) -> None:
+        """Settings' on-screen keyboard, on Huginn's own compositor: Squeekboard (KWin starts its own)."""
+        if not getattr(self, "_compositor", False) or not shutil.which("squeekboard"):
+            return
+        try:
+            text = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "kwinrc").read_text(encoding="utf-8")
+        except OSError:
+            return
+        if re.search(r"^InputMethod=\S", text, re.M):
+            subprocess.Popen(["squeekboard"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     def night_light(self) -> None:
         """Settings › Displays' night light ([NightColor] in kwinrc, which KWin reads too), as a colour temperature for

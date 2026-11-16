@@ -83,6 +83,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
             KeyAction::Minimise => self.window_action("minimise"),
             KeyAction::Switch(forward) => self.switch_step(forward),
             KeyAction::Screenshot(what) => self.say(crate::dbus::Outgoing::Screenshot(what.into())),
+            KeyAction::Zoom(step) => self.zoom_by(step),
             KeyAction::Hardware(name) => self.say(crate::dbus::Outgoing::Key(name.into())),
         }
     }
@@ -90,8 +91,17 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     /// A key, through sticky keys and bounce keys first (access.rs).
     fn keyboard_key_to_action<B: InputBackend>(&mut self, evt: B::KeyboardKeyEvent) -> KeyAction {
         let pressed = matches!(evt.state(), KeyState::Pressed);
-        let release = match self.huginn.keys.key(evt.key_code(), pressed) {
+        let code = evt.key_code();
+        let release = match self.huginn.keys.key(code, pressed) {
             crate::access::Key::Drop => return KeyAction::None,
+            crate::access::Key::Hold(wait) => {
+                self.slow_key_later(code, wait);
+                return KeyAction::None;
+            }
+            crate::access::Key::Mouse(down) => {
+                self.mouse_key(code, down);
+                return KeyAction::None;
+            }
             crate::access::Key::Pass => Vec::new(),
             crate::access::Key::PassThenRelease(keys) => keys,
         };
@@ -392,7 +402,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
         );
     }
 
-    fn update_keyboard_focus(&mut self, location: Point<f64, Logical>, serial: Serial) {
+    pub(crate) fn update_keyboard_focus(&mut self, location: Point<f64, Logical>, serial: Serial) {
         let keyboard = self.seat.get_keyboard().unwrap();
         let touch = self.seat.get_touch();
         let input_method = self.seat.input_method();
@@ -1206,6 +1216,8 @@ enum KeyAction {
     Switch(bool),
     /// Print ("screen"), Shift+Print and Super+Shift+S ("choose")
     Screenshot(&'static str),
+    /// Super+= and Super+- (zoom in and out), Super+0 (the whole screen again)
+    Zoom(i32),
     /// Volume, brightness, media and power keys, for the session daemon
     Hardware(&'static str),
     /// Do nothing more
@@ -1243,6 +1255,12 @@ fn process_keyboard_shortcut(modifiers: ModifiersState, keysym: Keysym) -> Optio
         Some(KeyAction::VtSwitch((keysym.raw() - xkb::KEY_XF86Switch_VT_1 + 1) as i32))
     } else if let Some(name) = hardware_key(keysym) {
         Some(KeyAction::Hardware(name))
+    } else if modifiers.logo && matches!(keysym, Keysym::equal | Keysym::plus | Keysym::KP_Add) {
+        Some(KeyAction::Zoom(1))
+    } else if modifiers.logo && matches!(keysym, Keysym::minus | Keysym::KP_Subtract) {
+        Some(KeyAction::Zoom(-1))
+    } else if modifiers.logo && matches!(keysym, Keysym::_0 | Keysym::KP_0) {
+        Some(KeyAction::Zoom(0))
     } else if modifiers.logo && keysym == Keysym::space {
         Some(KeyAction::Search)
     } else if modifiers.logo && (keysym == Keysym::l || keysym == Keysym::L) {

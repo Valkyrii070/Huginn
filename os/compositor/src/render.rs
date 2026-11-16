@@ -64,6 +64,7 @@ smithay::backend::renderer::element::render_elements! {
     Moved=RescaleRenderElement<WindowRenderElement<R>>,
     Solid=SolidColorRenderElement,
     Frosted=Frosted<WaylandSurfaceRenderElement<R>>,
+    Zoom=crate::look::ZoomElement,
 }
 
 impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
@@ -78,6 +79,7 @@ impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
             Self::Moved(arg0) => f.debug_tuple("Moved").field(arg0).finish(),
             Self::Solid(arg0) => f.debug_tuple("Solid").field(arg0).finish(),
             Self::Frosted(arg0) => f.debug_tuple("Frosted").field(arg0).finish(),
+            Self::Zoom(arg0) => f.debug_tuple("Zoom").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }
@@ -305,21 +307,27 @@ where
         let window_render_elements: Vec<WindowRenderElement<R>> =
             AsRenderElements::<R>::render_elements(&window, renderer, (0, 0).into(), scale, 1.0);
 
-        let elements = custom_elements
-            .into_iter()
-            .map(OutputRenderElements::from)
-            .chain(
-                window_render_elements
-                    .into_iter()
-                    .map(|e| OutputRenderElements::Window(Wrap::from(e))),
-            )
-            .collect::<Vec<_>>();
+        let mut elements = custom_elements.into_iter().map(OutputRenderElements::from).collect::<Vec<_>>();
+        if view.zoom > 1.0 {
+            let mode = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
+            elements.push(OutputRenderElements::Zoom(crate::look::ZoomElement::new(Rectangle::from_size(mode), view.zoom, view.zoom_at)));
+        }
+        elements.extend(window_render_elements.into_iter().map(|e| OutputRenderElements::Window(Wrap::from(e))));
         (elements, CLEAR_COLOR_FULLSCREEN)
     } else {
         let mut output_render_elements = custom_elements
             .into_iter()
             .map(OutputRenderElements::from)
             .collect::<Vec<_>>();
+        // zoom (access.rs): over everything but the pointer
+        if view.zoom > 1.0 {
+            let mode = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
+            output_render_elements.push(OutputRenderElements::Zoom(crate::look::ZoomElement::new(
+                Rectangle::from_size(mode),
+                view.zoom,
+                view.zoom_at,
+            )));
+        }
 
         if show_window_preview && !view.active() && space.elements_for_output(output).count() > 0 {
             output_render_elements.extend(space_preview_elements(renderer, space, output));

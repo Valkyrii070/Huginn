@@ -162,6 +162,9 @@ pub struct SceneView {
     pub moved: Vec<(WindowElement, Rectangle<f64, Logical>, f64, f64, f32)>,
     /// Light over a rect (the hiding window turning to light).
     pub light: Vec<(Rectangle<f64, Logical>, [f32; 4])>,
+    /// Zoom (access.rs): how far, and the pointer in the screen's pixels (only the screen it's on is zoomed)
+    pub zoom: f64,
+    pub zoom_at: Point<f64, smithay::utils::Physical>,
 }
 
 impl SceneView {
@@ -847,6 +850,15 @@ impl<B: Backend + 'static> HuginnState<B> {
     // ------------------------------------------------------------------------------------------- what to draw
     pub fn scene_view(&mut self, output: &Output) -> SceneView {
         let mut view = SceneView::default();
+        // zoom, on the screen the pointer is on
+        if self.huginn.zoom > 1.0 {
+            let geo = self.space.output_geometry(output).unwrap_or_default();
+            let at = self.pointer.current_location();
+            if geo.to_f64().contains(at) {
+                view.zoom = self.huginn.zoom;
+                view.zoom_at = (at - geo.loc.to_f64()).to_physical(output.current_scale().fractional_scale());
+            }
+        }
         // the Overview
         let done = match &self.huginn.wm.overview {
             Some(o) if &o.output == output => {

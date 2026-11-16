@@ -65,6 +65,9 @@ pub struct Huginn {
     pub keys: crate::access::Keys,
     /// The colour filter in use (access.rs)
     pub filter: crate::access::Filter,
+    /// Accessibility settings as last read, and how far the screen under the pointer is zoomed (1: not at all)
+    pub access: crate::access::Settings,
+    pub zoom: f64,
     /// Alt+Tab in progress: the windows in the order they were in when it began, and where we are.
     pub switching: Option<(Vec<WindowElement>, usize)>,
     /// The session to start once the compositor is listening, and whether it was.

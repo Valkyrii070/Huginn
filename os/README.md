@@ -1091,8 +1091,9 @@ over when the side island would reach them (`GlassWindow.middleX`).
   `~/.config/huginn/input.json` (`input.rs`).
 - **Accessibility** there too (`access.rs`, from the settings KWin and KAccess read): colour filters for colour
   blindness through each screen's colour matrix (where the graphics card has one), inverted colours through its
-  gamma, sticky keys and bounce keys, and Reduce Motion (no sliding windows or Overview). Zoom, slow keys, mouse
-  keys and the on-screen keyboard are still to come on Huginn's own compositor; Settings says so.
+  gamma, sticky, bounce and slow keys, mouse keys (the number pad moves the pointer, 5 clicks), zoom (Super+= and
+  Super+-, Super+0 for the whole screen again; what's under the pointer stays put), the on-screen keyboard
+  (Squeekboard), and Reduce Motion (no sliding windows or Overview, no fading in).
 - **Night light** there too: the session daemon reads Settings' night light (kwinrc's [NightColor], as KWin does)
   and sets every screen's gamma through the compositor, easing in and out over half an hour.
 - New windows fade in (160 ms; not with Reduce Motion).

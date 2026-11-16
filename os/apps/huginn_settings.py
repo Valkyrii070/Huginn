@@ -653,7 +653,7 @@ def load_a11y() -> dict:
             "slow": yes(acc, ["Keyboard"], "SlowKeys"), "slowDelay": int(num(acc, ["Keyboard"], "SlowKeysDelay", 300)),
             "bounce": yes(acc, ["Keyboard"], "BounceKeys"), "bounceDelay": int(num(acc, ["Keyboard"], "BounceKeysDelay", 500)),
             "mouseKeys": yes(acc, ["Mouse"], "MouseKeys"), "flash": yes(acc, ["Bell"], "VisibleBell"),
-            "osk": kconfig_read(kwin, ["Wayland"], "InputMethod", "") != "", "hasOsk": bool(osk_desktop()),
+            "osk": kconfig_read(kwin, ["Wayland"], "InputMethod", "") != "", "hasOsk": bool(osk_desktop() or HAVE("squeekboard")),
             "animations": num(glob, ["KDE"], "AnimationDurationFactor", 1.0) > 0.01}
 
 
@@ -1719,13 +1719,20 @@ class SystemSettings(QObject):
                 kconfig_write(acc, ["Bell"], "VisibleBell", bool(value))
                 kconfig_write(acc, ["Bell"], "SystemBell", not value)
             elif key == "osk":
-                kconfig_write(kwin, ["Wayland"], "InputMethod", osk_desktop() if value else "")
+                kconfig_write(kwin, ["Wayland"], "InputMethod", (osk_desktop() or "squeekboard") if value else "")
                 dbus_call("session", "org.kde.KWin", "/KWin", "org.kde.KWin.reconfigure")
+                if own_compositor("ReloadAccess") is not None and HAVE("squeekboard"):
+                    # Huginn's own compositor: Squeekboard (input-method-v2), shown whenever text is typed into
+                    RUN(["gsettings", "set", "org.gnome.desktop.a11y.applications", "screen-keyboard-enabled", "true" if value else "false"], None, 5)
+                    if value:
+                        subprocess.Popen(["squeekboard"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                    else:
+                        RUN(["pkill", "-x", "squeekboard"], None, 5)
             elif key == "animations":
                 kconfig_write(CONFIG / "kdeglobals", ["KDE"], "AnimationDurationFactor", "1" if value else "0")
             # Huginn's own compositor reads the same files: colour filters, sticky and bounce keys, Reduce Motion
-            if own_compositor("ReloadAccess") is not None and key in ("zoom", "zoomStep", "zoomFollow", "slow", "slowDelay", "mouseKeys", "osk"):
-                note = "That isn't ready yet on Huginn's own compositor; it works in the Huginn session."
+            if own_compositor("ReloadAccess") is not None and key == "zoomFollow":
+                note = "On Huginn's own compositor, zoom always keeps what's under the pointer where it is."
             return note
 
         def demo(st):

@@ -1,7 +1,8 @@
 //! Accessibility on Huginn's own compositor, from the settings KWin and KAccess read (Settings › Accessibility
 //! writes them): colour filters (for colour blindness, through each screen's colour matrix) and inverted colours
-//! (through its gamma), sticky keys and bounce keys, and Reduce Motion (kdeglobals' AnimationDurationFactor: no
-//! sliding windows or Overview). Read at start and again on `ReloadAccess`.
+//! (through its gamma), sticky, bounce and slow keys, mouse keys (the number pad moves the pointer), zoom
+//! (Super+= and Super+-, following the pointer) and Reduce Motion (kdeglobals' AnimationDurationFactor: no sliding
+//! windows or Overview). Read at start and again on `ReloadAccess`.
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -30,6 +31,15 @@ pub struct Filter {
 pub struct Keys {
     pub sticky: bool,
     pub bounce: Option<Duration>,
+    /// slow keys: a key counts once it's been held this long
+    pub slow: Option<Duration>,
+    /// a key being held for slow keys, and keys it let through (their release goes too)
+    slow_waiting: Option<Keycode>,
+    slow_down: Vec<Keycode>,
+    /// mouse keys: the number pad moves the pointer
+    pub mouse: bool,
+    /// the number pad's arrows held down, for mouse keys
+    pub mouse_held: Vec<Keycode>,
     /// a modifier pressed on its own, so far
     alone: Option<Keycode>,
     /// modifiers held down for the next key (their release withheld)
@@ -48,14 +58,32 @@ pub enum Key {
     Drop,
     /// as it is, then let go of these modifiers
     PassThenRelease(Vec<Keycode>),
+    /// not yet: once it's been held this long (slow keys)
+    Hold(Duration),
+    /// the pointer's (mouse keys): pressed or let go
+    Mouse(bool),
+}
+
+/// What the settings say, all together.
+#[derive(Default)]
+pub struct Settings {
+    pub filter: Filter,
+    pub sticky: bool,
+    pub bounce: Option<Duration>,
+    pub slow: Option<Duration>,
+    pub mouse: bool,
+    pub still: bool,
+    /// zoom: whether Super+= zooms, and by how much each time
+    pub zoom: bool,
+    pub zoom_step: f64,
 }
 
 fn yes(file: &str, group: &str, key: &str) -> bool {
     kconfig(file, group, key).is_some_and(|v| v == "true")
 }
 
-/// The settings as they are now: (filter, sticky keys, bounce keys, still).
-pub fn read() -> (Filter, bool, Option<Duration>, bool) {
+/// The settings as they are now.
+pub fn read() -> Settings {
     let invert = yes("kaccessrc", "Huginn", "Invert");
     let matrix = if yes("kwinrc", "Plugins", "colorblindnesscorrectionEnabled") && !invert {
         let mode = kconfig("kwinrc", "Effect-colorblindnesscorrection", "Mode").and_then(|m| m.parse().ok()).unwrap_or(0);
@@ -72,7 +100,33 @@ pub fn read() -> (Filter, bool, Option<Duration>, bool) {
     let still = kconfig("kdeglobals", "KDE", "AnimationDurationFactor")
         .and_then(|v| v.parse::<f64>().ok())
         .is_some_and(|f| f <= 0.01);
-    (Filter { matrix, invert }, yes("kaccessrc", "Keyboard", "StickyKeys"), bounce, still)
+    let ms = |key: &str, default: u64| Duration::from_millis(kconfig("kaccessrc", "Keyboard", key).and_then(|v| v.parse().ok()).unwrap_or(default));
+    Settings {
+        filter: Filter { matrix, invert },
+        sticky: yes("kaccessrc", "Keyboard", "StickyKeys"),
+        bounce,
+        slow: yes("kaccessrc", "Keyboard", "SlowKeys").then(|| ms("SlowKeysDelay", 300)),
+        mouse: yes("kaccessrc", "Mouse", "MouseKeys"),
+        still,
+        zoom: kconfig("kwinrc", "Plugins", "zoomEnabled").is_none_or(|v| v == "true"),
+        zoom_step: kconfig("kwinrc", "Effect-zoom", "ZoomFactor").and_then(|v| v.parse().ok()).unwrap_or(1.2f64).clamp(1.05, 4.0),
+    }
+}
+
+/// The number pad, for mouse keys: which way each key moves the pointer (5 clicks).
+pub fn pad(code: Keycode) -> Option<(i32, i32)> {
+    Some(match code.raw() {
+        79 => (-1, -1),
+        80 => (0, -1),
+        81 => (1, -1),
+        83 => (-1, 0),
+        84 => (0, 0),
+        85 => (1, 0),
+        87 => (-1, 1),
+        88 => (0, 1),
+        89 => (1, 1),
+        _ => return None,
+    })
 }
 
 fn mul(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
@@ -109,9 +163,14 @@ pub fn correction(mode: u32, strength: f64) -> [f64; 9] {
 const MODIFIERS: [u32; 8] = [50, 62, 37, 105, 64, 108, 133, 134]; // Shift, Control, Alt, Super, left and right (xkb)
 
 impl Keys {
-    pub fn set(&mut self, sticky: bool, bounce: Option<Duration>) {
+    pub fn set(&mut self, sticky: bool, bounce: Option<Duration>, slow: Option<Duration>, mouse: bool) {
         self.sticky = sticky;
         self.bounce = bounce;
+        self.slow = slow;
+        self.mouse = mouse;
+        if !mouse {
+            self.mouse_held.clear();
+        }
         if !sticky {
             self.latched.clear();
         }
@@ -122,7 +181,39 @@ impl Keys {
         std::mem::take(&mut self.latched)
     }
 
+    /// A key slow keys held long enough: let it through (false: it was let go first).
+    pub fn slow_ready(&mut self, code: Keycode) -> bool {
+        if self.slow_waiting == Some(code) {
+            self.slow_waiting = None;
+            self.slow_down.push(code);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn key(&mut self, code: Keycode, pressed: bool) -> Key {
+        if self.mouse && pad(code).is_some() {
+            if pressed {
+                if !self.mouse_held.contains(&code) {
+                    self.mouse_held.push(code);
+                }
+            } else {
+                self.mouse_held.retain(|c| *c != code);
+            }
+            return Key::Mouse(pressed);
+        }
+        if let Some(wait) = self.slow {
+            if pressed {
+                self.slow_waiting = Some(code);
+                return Key::Hold(wait);
+            }
+            if self.slow_waiting == Some(code) {
+                self.slow_waiting = None;
+                return Key::Drop;
+            }
+            self.slow_down.retain(|c| *c != code);
+        }
         if let Some(gap) = self.bounce {
             if pressed {
                 if let Some((last, at)) = self.last_up
@@ -169,17 +260,107 @@ impl Keys {
 impl<B: crate::state::Backend + 'static> crate::state::HuginnState<B> {
     /// Read the accessibility settings again and use them.
     pub fn reload_access(&mut self) {
-        let (filter, sticky, bounce, still) = read();
-        STILL.store(still, Ordering::Relaxed);
-        if !sticky {
+        let now = read();
+        STILL.store(now.still, Ordering::Relaxed);
+        if !now.sticky {
             let held = self.huginn.keys.take_latched();
             self.release_keys(held);
         }
-        self.huginn.keys.set(sticky, bounce);
-        if filter != self.huginn.filter {
-            self.backend_data.set_filter(&filter);
-            self.huginn.filter = filter;
+        self.huginn.keys.set(now.sticky, now.bounce, now.slow, now.mouse);
+        if now.filter != self.huginn.filter {
+            self.backend_data.set_filter(&now.filter);
+            self.huginn.filter = now.filter.clone();
         }
+        if !now.zoom {
+            self.huginn.zoom = 1.0;
+        }
+        self.huginn.access = now;
+    }
+
+    /// Super+= (1), Super+- (-1), Super+0 (0): zoom in, out, or back to the whole screen.
+    pub fn zoom_by(&mut self, step: i32) {
+        if !self.huginn.access.zoom {
+            return;
+        }
+        let k = self.huginn.access.zoom_step;
+        let z = self.huginn.zoom.max(1.0);
+        self.huginn.zoom = match step {
+            0 => 1.0,
+            s if s > 0 => (z * k).min(16.0),
+            _ => (z / k).max(1.0),
+        };
+        if self.huginn.zoom < 1.01 {
+            self.huginn.zoom = 1.0;
+        }
+    }
+
+    /// Slow keys: after `wait`, the key counts if it's still held.
+    pub fn slow_key_later(&mut self, code: Keycode, wait: Duration) {
+        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+        let _ = self.handle.insert_source(Timer::from_duration(wait), move |_, _, state| {
+            if state.huginn.keys.slow_ready(code)
+                && let Some(keyboard) = state.seat.get_keyboard()
+            {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                let time = smithay::backend::input::InputTime::now();
+                keyboard.input::<(), _>(state, code, smithay::backend::input::KeyState::Pressed, serial, time, |_, _, _| {
+                    smithay::input::keyboard::FilterResult::Forward
+                });
+            }
+            TimeoutAction::Drop
+        });
+    }
+
+    /// Mouse keys: 5 clicks; the others move the pointer while they're held, faster the longer.
+    pub fn mouse_key(&mut self, code: Keycode, pressed: bool) {
+        use smithay::{
+            input::pointer::{ButtonEvent, MotionEvent},
+            reexports::calloop::timer::{TimeoutAction, Timer},
+        };
+        if pad(code) == Some((0, 0)) {
+            let pointer = self.pointer.clone();
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            if pressed {
+                let at = pointer.current_location();
+                self.update_keyboard_focus(at, serial);
+            }
+            let state = if pressed { smithay::backend::input::ButtonState::Pressed } else { smithay::backend::input::ButtonState::Released };
+            pointer.button(self, &ButtonEvent { button: 0x110, state, serial, time: smithay::backend::input::InputTime::now() });
+            pointer.frame(self);
+            return;
+        }
+        if !pressed || self.huginn.keys.mouse_held.len() != 1 {
+            return; // already moving
+        }
+        let start = Instant::now();
+        let _ = self.handle.insert_source(Timer::immediate(), move |_, _, state| {
+            let (mut dx, mut dy) = (0, 0);
+            for c in &state.huginn.keys.mouse_held {
+                if let Some((x, y)) = pad(*c) {
+                    dx += x;
+                    dy += y;
+                }
+            }
+            if state.huginn.keys.mouse_held.is_empty() {
+                return TimeoutAction::Drop;
+            }
+            let speed = 2.0 + 14.0 * (start.elapsed().as_secs_f64() / 1.2).min(1.0);
+            let to = state.pointer.current_location()
+                + smithay::utils::Point::<f64, smithay::utils::Logical>::from((dx.signum() as f64 * speed, dy.signum() as f64 * speed));
+            // kept on the screens
+            let here = state.pointer.current_location();
+            let to = if state.space.outputs().any(|o| state.space.output_geometry(o).is_some_and(|g| g.to_f64().contains(to))) {
+                to
+            } else {
+                here
+            };
+            let under = state.surface_under(to);
+            let pointer = state.pointer.clone();
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            pointer.motion(state, under, &MotionEvent { location: to, serial, time: smithay::backend::input::InputTime::now() });
+            pointer.frame(state);
+            TimeoutAction::ToDuration(Duration::from_millis(16))
+        });
     }
 
     /// Let go of keys the client still thinks are down (sticky keys' modifiers).

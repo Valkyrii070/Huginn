@@ -1147,3 +1147,92 @@ impl<R: Look, E: RenderElement<R>> RenderElement<R> for Frosted<E> {
         None
     }
 }
+
+/// Zoom (access.rs): drawn over everything but the pointer, it takes a part of what's on the screen and spreads it
+/// over the whole screen. A new element every frame, so everything under it is drawn again every frame.
+#[derive(Debug)]
+pub struct ZoomElement {
+    id: Id,
+    commit: CommitCounter,
+    /// the whole screen, and the part of it shown (physical pixels)
+    whole: Rectangle<i32, Physical>,
+    part: Rectangle<f64, Physical>,
+}
+
+impl ZoomElement {
+    /// `at`: the pointer, in the screen's pixels (it stays where it is on the screen, and so does what's under it)
+    pub fn new(whole: Rectangle<i32, Physical>, zoom: f64, at: Point<f64, Physical>) -> Self {
+        let (w, h) = (whole.size.w as f64 / zoom, whole.size.h as f64 / zoom);
+        let x = (at.x - at.x / zoom).clamp(0.0, whole.size.w as f64 - w);
+        let y = (at.y - at.y / zoom).clamp(0.0, whole.size.h as f64 - h);
+        Self { id: Id::new(), commit: CommitCounter::default(), whole, part: Rectangle::new((x, y).into(), (w, h).into()) }
+    }
+}
+
+impl Element for ZoomElement {
+    fn id(&self) -> &Id {
+        &self.id
+    }
+    fn current_commit(&self) -> CommitCounter {
+        self.commit
+    }
+    fn src(&self) -> Rectangle<f64, BufferCoords> {
+        Rectangle::from_size((self.whole.size.w as f64, self.whole.size.h as f64).into())
+    }
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.whole
+    }
+    fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        OpaqueRegions::default()
+    }
+    fn kind(&self) -> Kind {
+        Kind::Unspecified
+    }
+}
+
+impl<R: Look> RenderElement<R> for ZoomElement {
+    fn draw(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        _src: Rectangle<f64, BufferCoords>,
+        _dst: Rectangle<i32, Physical>,
+        _damage: &[Rectangle<i32, Physical>],
+        _opaque_regions: &[Rectangle<i32, Physical>],
+        _cache: Option<&UserDataMap>,
+    ) -> Result<(), R::Error> {
+        let gles = R::gles_frame(frame);
+        if !gles.capabilities().contains(&Capability::Blit) {
+            return Ok(());
+        }
+        let (Some(to), Some(from)) = (to_gl(gles, self.whole.to_f64()), to_gl(gles, self.part)) else {
+            return Ok(());
+        };
+        gles.with_context(|gl| unsafe {
+            let mut fbo = 0;
+            gl.GetIntegerv(ffi::FRAMEBUFFER_BINDING, &mut fbo);
+            let scissor = gl.IsEnabled(ffi::SCISSOR_TEST) == ffi::TRUE;
+            gl.Disable(ffi::SCISSOR_TEST);
+            let (fx, fy, fw, fh) = (from[0] as i32, from[1] as i32, from[2].ceil() as i32, from[3].ceil() as i32);
+            let copy = level(gl, fw.max(1), fh.max(1));
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, fbo as u32);
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, copy.fbo);
+            gl.BlitFramebuffer(fx, fy, fx + fw, fy + fh, 0, 0, fw, fh, ffi::COLOR_BUFFER_BIT, ffi::NEAREST);
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, copy.fbo);
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, fbo as u32);
+            let (tx, ty, tw, th) = (to[0] as i32, to[1] as i32, to[2] as i32, to[3] as i32);
+            gl.BlitFramebuffer(0, 0, fw, fh, tx, ty, tx + tw, ty + th, ffi::COLOR_BUFFER_BIT, ffi::LINEAR);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo as u32);
+            gl.DeleteFramebuffers(1, &copy.fbo);
+            gl.DeleteTextures(1, &copy.tex);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+            if scissor {
+                gl.Enable(ffi::SCISSOR_TEST);
+            }
+        })
+        .map_err(R::gles_error)
+    }
+
+    fn underlying_storage(&self, _renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
+        None
+    }
+}

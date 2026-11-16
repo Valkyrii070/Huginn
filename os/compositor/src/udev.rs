@@ -1842,7 +1842,8 @@ fn render_surface<'a>(
         surface.vrr_on = want_vrr && ok;
     }
 
-    let frame_mode = if surface.disable_direct_scanout {
+    // zoom draws from what's in the framebuffer, so nothing may go straight to the screen
+    let frame_mode = if surface.disable_direct_scanout || view.zoom > 1.0 {
         FrameFlags::empty()
     } else {
         FrameFlags::DEFAULT
