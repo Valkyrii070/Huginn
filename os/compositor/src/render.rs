@@ -26,6 +26,7 @@ use smithay::{
 use crate::drawing::FpsElement;
 use crate::{
     drawing::{CLEAR_COLOR, CLEAR_COLOR_FULLSCREEN, PointerRenderElement},
+    look::{Frosted, Look},
     shell::{FullscreenSurface, WindowElement, WindowRenderElement},
 };
 
@@ -55,16 +56,17 @@ impl<R: Renderer> std::fmt::Debug for CustomRenderElements<R> {
 }
 
 smithay::backend::renderer::element::render_elements! {
-    pub OutputRenderElements<R, E> where R: ImportAll + ImportMem;
+    pub OutputRenderElements<R, E> where R: Look;
     Space=SpaceRenderElements<R, E>,
     Window=Wrap<E>,
     Custom=CustomRenderElements<R>,
     Preview=CropRenderElement<RelocateRenderElement<RescaleRenderElement<WindowRenderElement<R>>>>,
     Moved=RescaleRenderElement<WindowRenderElement<R>>,
     Solid=SolidColorRenderElement,
+    Frosted=Frosted<WaylandSurfaceRenderElement<R>>,
 }
 
-impl<R: Renderer + ImportAll + ImportMem, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
+impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
     for OutputRenderElements<R, E>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,6 +77,7 @@ impl<R: Renderer + ImportAll + ImportMem, E: RenderElement<R> + std::fmt::Debug>
             Self::Preview(arg0) => f.debug_tuple("Preview").field(arg0).finish(),
             Self::Moved(arg0) => f.debug_tuple("Moved").field(arg0).finish(),
             Self::Solid(arg0) => f.debug_tuple("Solid").field(arg0).finish(),
+            Self::Frosted(arg0) => f.debug_tuple("Frosted").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }
@@ -86,8 +89,8 @@ pub fn space_preview_elements<'a, R, C>(
     output: &'a Output,
 ) -> impl Iterator<Item = C> + 'a
 where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + 'static,
+    R: Look,
+    R::TextureId: Clone + Send + 'static,
     C: From<CropRenderElement<RelocateRenderElement<RescaleRenderElement<WindowRenderElement<R>>>>> + 'a,
 {
     let constrain_behavior = ConstrainBehavior {
@@ -143,8 +146,8 @@ where
         })
 }
 
-/// While something moves (the Overview, a window hiding into the dock), the scene drawn by hand: the shell's upper
-/// layers, then the windows (the moved ones where they are now), the dim, then the lower layers.
+/// The scene, front to back: the shell's upper layers (its glass frosted), the windows (while something moves — the
+/// Overview, a window hiding into the dock — the moved ones where they are now, and the dim), then the lower layers.
 fn scene_elements<R>(
     output: &Output,
     space: &Space<WindowElement>,
@@ -152,8 +155,8 @@ fn scene_elements<R>(
     view: &crate::wm::SceneView,
 ) -> Vec<OutputRenderElements<R, WindowRenderElement<R>>>
 where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + 'static,
+    R: Look,
+    R::TextureId: Clone + Send + 'static,
 {
     let scale = output.current_scale().fractional_scale();
     let geo = space.output_geometry(output).unwrap_or_default();
@@ -163,10 +166,17 @@ where
         for level in levels {
             for layer in map.layers_on(*level).rev() {
                 let loc = map.layer_geometry(layer).unwrap_or_default().loc.to_physical_precise_round(scale);
+                let glass = crate::look::frosted(layer.namespace());
                 out.extend(
                     AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(layer, renderer, loc, scale.into(), 1.0)
                         .into_iter()
-                        .map(|e| OutputRenderElements::Custom(CustomRenderElements::Surface(e))),
+                        .map(|e| {
+                            if glass {
+                                OutputRenderElements::Frosted(Frosted::new(e))
+                            } else {
+                                OutputRenderElements::Custom(CustomRenderElements::Surface(e))
+                            }
+                        }),
                 );
             }
         }
@@ -202,7 +212,7 @@ where
         let Some(loc) = space.element_location(w) else {
             continue;
         };
-        let at = (loc - geo.loc).to_physical_precise_round(scale);
+        let at = (loc - w.geometry().loc - geo.loc).to_physical_precise_round(scale);
         out.extend(
             AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(w, renderer, at, scale.into(), 1.0)
                 .into_iter()
@@ -233,8 +243,8 @@ pub fn output_elements<R>(
     view: &crate::wm::SceneView,
 ) -> (Vec<OutputRenderElements<R, WindowRenderElement<R>>>, Color32F)
 where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + 'static,
+    R: Look,
+    R::TextureId: Clone + Send + 'static,
 {
     if let Some(lock) = lock {
         let scale = output.current_scale().fractional_scale().into();
@@ -285,23 +295,11 @@ where
             .map(OutputRenderElements::from)
             .collect::<Vec<_>>();
 
-        if view.active() {
-            output_render_elements.extend(scene_elements(output, space, renderer, view));
-            return (output_render_elements, CLEAR_COLOR);
-        }
-        if show_window_preview && space.elements_for_output(output).count() > 0 {
+        if show_window_preview && !view.active() && space.elements_for_output(output).count() > 0 {
             output_render_elements.extend(space_preview_elements(renderer, space, output));
         }
-
-        let space_elements = smithay::desktop::space::space_render_elements::<_, WindowElement, _>(
-            renderer,
-            [space],
-            output,
-            1.0,
-        )
-        .expect("output without mode?");
-        output_render_elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
-
+        // drawn by hand (not Smithay's space_render_elements), so the shell's glass can be frosted
+        output_render_elements.extend(scene_elements(output, space, renderer, view));
         (output_render_elements, CLEAR_COLOR)
     }
 }
@@ -320,8 +318,8 @@ pub fn render_output<'a, 'd, R>(
     view: &crate::wm::SceneView,
 ) -> Result<RenderOutputResult<'d>, OutputDamageTrackerError<R::Error>>
 where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + 'static,
+    R: Look,
+    R::TextureId: Clone + Send + 'static,
 {
     let (elements, clear_color) =
         output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);

@@ -618,6 +618,20 @@ impl<B: Backend + 'static> HuginnState<B> {
         if let Some(snap) = snap {
             self.snap_window(window, snap, true);
         }
+        self.tell_x11_where(window);
+    }
+
+    /// An X11 window's own idea of where it is: X apps place their menus and the like from it. Its content's
+    /// top-left (below Huginn's title island, if it has one) and its own size.
+    pub fn tell_x11_where(&mut self, window: &WindowElement) {
+        #[cfg(feature = "xwayland")]
+        if let Some(x) = window.0.x11_surface()
+            && let Some(loc) = self.space.element_location(window)
+        {
+            let header = if window.decoration_state().is_ssd { crate::shell::ssd::HEADER_BAR_HEIGHT } else { 0 };
+            let size = smithay::desktop::space::SpaceElement::geometry(&window.0).size;
+            let _ = x.configure(Some(Rectangle::new((loc.x, loc.y + header).into(), size)));
+        }
     }
 
     /// A window starts being dragged: if it was snapped, it gets its own size back.
@@ -790,6 +804,13 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
         if let Some(g) = v.get("gaps").and_then(|s| s.as_bool()) {
             self.huginn.wm.gaps = g;
+        }
+        // the look: dark or light title islands, and frost behind the glass unless transparency is turned down
+        if let Some(d) = v.get("dark").and_then(|s| s.as_bool()) {
+            crate::look::DARK.store(d, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(f) = v.get("frost").and_then(|s| s.as_bool()) {
+            crate::look::FROST.store(f, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

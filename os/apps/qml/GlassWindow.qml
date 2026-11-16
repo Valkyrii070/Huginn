@@ -26,6 +26,16 @@ Window {
     property bool maximised: visibility === Window.Maximized
     readonly property real r: maximised || visibility === Window.FullScreen ? 0.01 : corner
     property color tintColor: Theme.t.accent   // Help borrows the colour of the app it is talking about
+    // Where something `w` wide sits to be in the middle (a start screen's picture and button), in the window's own
+    // coordinates: the middle of the whole window, unless that would run into the island down the left (`rail`, or the
+    // sidebar); then the middle of the room beside it. `top` and `h`: where it is up and down, for whether they meet.
+    function middleX(w, top, h, rail) {
+        var r = rail || sideRail, mid = (width - w) / 2
+        if (!r || !r.visible || r.width <= 0 || r.height <= 0) return mid
+        var right = r.x + r.width + 20
+        if (mid >= right || top > r.y + r.height + 16 || top + h < r.y - 16) return mid
+        return right + Math.max(0, (width - right - w) / 2)
+    }
     width: 1100; height: 720; minimumWidth: 720; minimumHeight: 460
     visible: true; color: "transparent"
     flags: Qt.Window | Qt.FramelessWindowHint

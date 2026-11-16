@@ -110,7 +110,7 @@ GlassWindow {
         onWidthChanged: fit.restart() }
     Timer { id: fit; interval: 120; onTriggered: if (doc.status === PdfDocument.Ready) view.scaleToWidth(view.width - 30, view.height) }
     Connections { target: doc; function onStatusChanged() { if (doc.status === PdfDocument.Ready) fit.restart() } }
-    Column { visible: !win.isText && !(win.isPdf && doc.status === PdfDocument.Ready); anchors.centerIn: parent; spacing: 8; width: 400
+    Column { visible: !win.isText && !(win.isPdf && doc.status === PdfDocument.Ready); anchors.verticalCenter: parent.verticalCenter; x: win.middleX(width, parent.y + y, height) - parent.x; spacing: 8; width: 400
         Item { width: 230; height: 170; anchors.horizontalCenter: parent.horizontalCenter      // a PDF and a text file, side by side on the desk
             Rectangle { x: 8; y: 14; width: 108; height: 142; radius: 6; rotation: -6; color: Theme.t.dark ? "#F4F1EA" : "#FFFFFF"; border.width: 1; border.color: Theme.t.islandLine
                 Rectangle { x: 12; y: 14; width: 34; height: 16; radius: 4; color: Theme.t.accent; Label { anchors.centerIn: parent; text: "PDF"; color: Theme.t.onAccent; font.pixelSize: 9; font.weight: Font.Bold } }

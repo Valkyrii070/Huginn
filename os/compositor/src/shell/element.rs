@@ -4,14 +4,17 @@ use smithay::{
     backend::{
         input::InputTime,
         renderer::{
-            ImportAll, ImportMem, Renderer, Texture,
+            Renderer, Texture,
             element::{
-                AsRenderElements, solid::SolidColorRenderElement, surface::WaylandSurfaceRenderElement,
+                AsRenderElements, Kind,
+                memory::MemoryRenderBufferRenderElement,
+                solid::SolidColorRenderElement,
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             },
         },
     },
     desktop::{
-        Window, WindowSurface, WindowSurfaceType, space::SpaceElement, utils::OutputPresentationFeedback,
+        PopupManager, Window, WindowSurface, WindowSurfaceType, space::SpaceElement, utils::OutputPresentationFeedback,
     },
     input::{
         Seat,
@@ -25,7 +28,7 @@ use smithay::{
     },
     output::Output,
     reexports::{
-        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+        wayland_protocols::{wp::presentation_time::server::wp_presentation_feedback, xdg::shell::server::xdg_toplevel},
         wayland_server::protocol::wl_surface::WlSurface,
     },
     render_elements,
@@ -34,7 +37,12 @@ use smithay::{
 };
 
 use super::ssd::HEADER_BAR_HEIGHT;
-use crate::{HuginnState, focus::PointerFocusTarget, state::Backend};
+use crate::{
+    HuginnState,
+    focus::PointerFocusTarget,
+    look::{Look, Rounded, Shadow, ShaderElement, WindowLook},
+    state::Backend,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowElement(pub Window);
@@ -503,9 +511,12 @@ impl SpaceElement for WindowElement {
 }
 
 render_elements!(
-    pub WindowRenderElement<R> where R: ImportAll + ImportMem;
+    pub WindowRenderElement<R> where R: Look;
     Window=WaylandSurfaceRenderElement<R>,
     Decoration=SolidColorRenderElement,
+    Rounded=Rounded<WaylandSurfaceRenderElement<R>>,
+    Shader=ShaderElement,
+    Text=MemoryRenderBufferRenderElement<R>,
 );
 
 impl<R: Renderer> std::fmt::Debug for WindowRenderElement<R> {
@@ -513,52 +524,169 @@ impl<R: Renderer> std::fmt::Debug for WindowRenderElement<R> {
         match self {
             Self::Window(arg0) => f.debug_tuple("Window").field(arg0).finish(),
             Self::Decoration(arg0) => f.debug_tuple("Decoration").field(arg0).finish(),
+            Self::Rounded(arg0) => f.debug_tuple("Rounded").field(arg0).finish(),
+            Self::Shader(arg0) => f.debug_tuple("Shader").field(arg0).finish(),
+            Self::Text(arg0) => f.debug_tuple("Text").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }
 }
 
+impl WindowElement {
+    /// (in front, plain): plain is maximised or full screen — no corners, no shadow.
+    fn look_flags(&self) -> (bool, bool) {
+        match self.0.underlying_surface() {
+            WindowSurface::Wayland(t) => t.with_committed_state(|s| {
+                s.map(|s| {
+                    (
+                        s.states.contains(xdg_toplevel::State::Activated),
+                        s.states.contains(xdg_toplevel::State::Maximized) || s.states.contains(xdg_toplevel::State::Fullscreen),
+                    )
+                })
+                .unwrap_or((false, false))
+            }),
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(x) => (x.is_activated(), x.is_maximized() || x.is_fullscreen()),
+        }
+    }
+
+    fn look(&self) -> std::cell::RefMut<'_, WindowLook> {
+        self.0.user_data().insert_if_missing(|| std::cell::RefCell::new(WindowLook::default()));
+        self.0.user_data().get::<std::cell::RefCell<WindowLook>>().unwrap().borrow_mut()
+    }
+}
+
 impl<R> AsRenderElements<R> for WindowElement
 where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + Texture + 'static,
+    R: Look,
+    R::TextureId: Clone + Texture + Send + 'static,
 {
     type RenderElement = WindowRenderElement<R>;
 
+    /// A window, front to back: its popups, its title island (if Huginn draws it), the window itself cut to its
+    /// rounded outline, and its shadow. Maximised and full-screen windows are drawn plain.
     fn render_elements<C: From<Self::RenderElement>>(
         &self,
         renderer: &mut R,
-        mut location: Point<i32, Physical>,
+        location: Point<i32, Physical>,
         scale: Scale<f64>,
         alpha: f32,
     ) -> Vec<C> {
         let window_bbox = SpaceElement::bbox(&self.0);
+        let ssd = self.decoration_state().is_ssd && !window_bbox.is_empty();
+        let inner = SpaceElement::geometry(&self.0);
+        let header = if ssd { (scale.y * HEADER_BAR_HEIGHT as f64).round() as i32 } else { 0 };
+        let at = location + Point::from((0, header));
+        let (active, plain) = self.look_flags();
+        let programs = crate::look::programs(renderer.gles());
+        let mut out: Vec<WindowRenderElement<R>> = Vec::new();
 
-        if self.decoration_state().is_ssd && !window_bbox.is_empty() {
-            let window_geo = SpaceElement::geometry(&self.0);
+        // the popups (menus and the like reach outside the window, so they're not cut)
+        let surfaces: Vec<WaylandSurfaceRenderElement<R>> = match self.0.underlying_surface() {
+            WindowSurface::Wayland(t) => {
+                let surface = t.wl_surface();
+                for (popup, offset) in PopupManager::popups_for_surface(surface) {
+                    let offset = (self.0.geometry().loc + offset - popup.geometry().loc).to_physical_precise_round(scale);
+                    out.extend(
+                        render_elements_from_surface_tree::<R, WaylandSurfaceRenderElement<R>>(
+                            renderer,
+                            popup.wl_surface(),
+                            at + offset,
+                            scale,
+                            alpha,
+                            Kind::Unspecified,
+                        )
+                        .into_iter()
+                        .map(WindowRenderElement::Window),
+                    );
+                }
+                render_elements_from_surface_tree(renderer, surface, at, scale, alpha, Kind::Unspecified)
+            }
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(x) => AsRenderElements::<R>::render_elements(x, renderer, at, scale, alpha),
+        };
 
-            let mut state = self.decoration_state();
-            let width = window_geo.size.w;
-            state.header_bar.redraw(width as u32);
-            let mut vec = AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(
-                &state.header_bar,
-                renderer,
-                location,
-                scale,
-                alpha,
-            );
+        let window = Rectangle::new(at + inner.loc.to_physical_precise_round(scale), inner.size.to_physical_precise_round(scale));
+        let Some(programs) = programs.filter(|_| !plain && !inner.is_empty()) else {
+            // plain: the old header (if any) and the window as it is
+            if ssd {
+                let mut state = self.decoration_state();
+                state.header_bar.redraw(inner.size.w as u32);
+                out.extend(AsRenderElements::<R>::render_elements::<WindowRenderElement<R>>(
+                    &state.header_bar,
+                    renderer,
+                    location,
+                    scale,
+                    alpha,
+                ));
+            }
+            out.extend(surfaces.into_iter().map(WindowRenderElement::Window));
+            return out.into_iter().map(C::from).collect();
+        };
 
-            location.y += (scale.y * HEADER_BAR_HEIGHT as f64) as i32;
-
-            let window_elements =
-                AsRenderElements::render_elements(&self.0, renderer, location, scale, alpha);
-            vec.extend(window_elements);
-            vec.into_iter().map(C::from).collect()
-        } else {
-            AsRenderElements::render_elements(&self.0, renderer, location, scale, alpha)
-                .into_iter()
-                .map(C::from)
-                .collect()
+        let radius = crate::look::RADIUS * scale.x;
+        let full = Rectangle::new((window.loc.x, window.loc.y - header).into(), (window.size.w, window.size.h + header).into());
+        let mut look = self.look();
+        if ssd {
+            // the title island: the lights, then the title beside them
+            let hover = {
+                let state = self.decoration_state();
+                state.header_bar.pointer_loc.and_then(|p| super::ssd::light_at(p.x)).unwrap_or(-1)
+            };
+            let bar = Rectangle::new(full.loc, (full.size.w, header).into());
+            let (title, app) = window_names(self);
+            let text = if title.is_empty() { app } else { title };
+            let max_w = inner.size.w - super::ssd::TITLE_X - 14;
+            if max_w > 24
+                && let Some((buf, size, bs)) = look.title(&text, scale.x, max_w)
+            {
+                let h = (size.1 as f64 / bs as f64 * scale.y).round() as i32;
+                let x = bar.loc.x as f64 + super::ssd::TITLE_X as f64 * scale.x;
+                let y = bar.loc.y as f64 + ((header - h) as f64 / 2.0).round();
+                if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    (x.round(), y),
+                    &buf,
+                    Some(if active { alpha } else { alpha * 0.6 }),
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    out.push(WindowRenderElement::Text(e));
+                }
+            }
+            out.push(WindowRenderElement::Shader(look.deco(&programs, bar, scale.x, active, hover, alpha)));
         }
+        // the window, cut to the outline (with a title island, only its bottom corners: the island has the top ones)
+        let r = radius.ceil() as i32;
+        let clip = if ssd {
+            Rectangle::new((window.loc.x, window.loc.y - r).into(), (window.size.w, window.size.h + r).into())
+        } else {
+            window
+        };
+        out.extend(surfaces.into_iter().map(|e| WindowRenderElement::Rounded(Rounded::new(e, clip, radius, scale))));
+        out.push(WindowRenderElement::Shader(look.shadow(&programs, Shadow { rect: full, radius, active, scale: scale.x }, alpha)));
+        out.into_iter().map(C::from).collect()
     }
+}
+
+/// (title, app id) of a window.
+pub fn window_names(window: &WindowElement) -> (String, String) {
+    #[cfg(feature = "xwayland")]
+    if let Some(x) = window.0.x11_surface() {
+        return (x.title(), x.class());
+    }
+    window
+        .0
+        .toplevel()
+        .and_then(|t| {
+            smithay::wayland::compositor::with_states(t.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                    .and_then(|d| d.lock().ok())
+                    .map(|d| (d.title.clone().unwrap_or_default(), d.app_id.clone().unwrap_or_default()))
+            })
+        })
+        .unwrap_or_default()
 }

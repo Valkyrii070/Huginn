@@ -47,7 +47,7 @@ GlassWindow {
             Seg { icon: "plus"; text: "New Note"; on: true; onClicked: { Backend.create(); editor.forceActiveFocus() } }
         },
         Rail {   // the notes: the main island
-            x: 12; y: 64; width: 250; maxHeight: win.height - 64 - 14
+            id: notesRail; x: 12; y: 64; width: 250; maxHeight: win.height - 64 - 14
             Repeater { model: Backend.notes.filter(function (n) { return (n.title + n.preview).toLowerCase().indexOf(win.filter.toLowerCase()) >= 0 })
                 Pressable { required property var modelData; readonly property bool open: Backend.current === modelData.path
                     width: parent.width; height: 54; radius: 11; color: open ? Theme.t.accent : (hovered ? Theme.t.hover : "transparent"); onClicked: Backend.open(modelData.path)
@@ -68,7 +68,7 @@ GlassWindow {
                 text: win.notice || ((Backend.saved ? "Saved" : "Saving…") + "  ·  " + (Backend.checks !== "" ? Backend.checks + "  ·  " : "") + Backend.words + (Backend.words === 1 ? " word" : " words")) }
         }
     ]
-    Column { visible: Backend.current === ""; x: 274 + (win.width - 274 - width) / 2; anchors.verticalCenter: parent.verticalCenter; spacing: 10
+    Column { visible: Backend.current === ""; x: win.middleX(width, parent.y + y, height, notesRail) - parent.x; anchors.verticalCenter: parent.verticalCenter; spacing: 10
         Item { width: 200; height: 176; anchors.horizontalCenter: parent.horizontalCenter      // a torn-off note with a ticked line and a pencil lying across it
             Rectangle { x: 20; y: 10; width: 150; height: 160; radius: 4; rotation: -4; color: Theme.t.dark ? "#F2E6A8" : "#FFF3B0"; border.width: 1; border.color: "#33000000"
                 Rectangle { width: parent.width; height: 20; color: "#22000000" }

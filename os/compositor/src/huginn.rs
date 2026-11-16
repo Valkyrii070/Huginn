@@ -542,12 +542,7 @@ impl<B: Backend + 'static> HuginnState<B> {
         // its own top-left corner, not its shadow's
         let offset = window.geometry().loc;
         self.space.map_element(window.clone(), loc - offset, true);
-        #[cfg(feature = "xwayland")]
-        if let Some(xsurface) = window.0.x11_surface()
-            && let Some(bbox) = self.space.element_bbox(window)
-        {
-            let _ = xsurface.configure(Some(bbox));
-        }
+        self.tell_x11_where(window);
         // a new window comes to the front with the keyboard (not over the lock screen)
         if !self.is_locked() {
             self.activate_window(window);

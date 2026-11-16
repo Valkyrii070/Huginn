@@ -121,6 +121,23 @@ type UdevRenderer<'a> = MultiRenderer<
     GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
 >;
 
+// Huginn's look draws with GLES shaders: the rendering GPU's own renderer and frame, underneath the multi-GPU ones.
+impl crate::look::Look for UdevRenderer<'_> {
+    fn gles(&mut self) -> &mut GlesRenderer {
+        self.as_mut()
+    }
+    fn gles_frame<'a, 'f, 'b>(frame: &'a mut Self::Frame<'f, 'b>) -> &'a mut smithay::backend::renderer::gles::GlesFrame<'f, 'b>
+    where
+        'b: 'f,
+        Self: 'f,
+    {
+        frame.as_mut()
+    }
+    fn gles_error(err: smithay::backend::renderer::gles::GlesError) -> Self::Error {
+        smithay::backend::renderer::multigpu::Error::Render(err)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct UdevOutputId {
     device_id: DrmNode,

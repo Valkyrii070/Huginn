@@ -29,7 +29,7 @@ GlassWindow {
           ExportMenu {
             choices: [["pdf", "PDF", "For sending and printing"], ["docx", "Word", "A .docx file for Microsoft Word and others"], ["odt", "OpenDocument", "An .odt file"], ["md", "Markdown", "Plain text with simple marks"]]
             onChosen: function (key) { var p = Backend.export(key); if (p) { win.exported = p; win.notice = ""; hide.restart() } } } },
-        Rail { x: 12; y: 64; width: 232; maxHeight: win.height - 64 - 14
+        Rail { id: docRail; x: 12; y: 64; width: 232; maxHeight: win.height - 64 - 14
             DocList { newLabel: "New Document"; icon: "doc"; empty: "Documents you write appear here. Word files in your Documents folder do too." } },
         Island {   // formatting: the main island
             id: bar; visible: Backend.current !== ""; x: 256 + (win.width - 256 - width) / 2; anchors { bottom: parent.bottom; bottomMargin: 14 }
@@ -64,7 +64,7 @@ GlassWindow {
             Label { id: tt; anchors.centerIn: parent; text: t.tip; font.pixelSize: 11 } } }
     component Gap: Item { width: 9; height: 30; anchors.verticalCenter: parent ? parent.verticalCenter : undefined; Rectangle { anchors.centerIn: parent; width: 1; height: 16; color: Theme.t.islandLine } }
 
-    Column { visible: Backend.current === ""; x: 256 + (win.width - 256 - width) / 2; anchors.verticalCenter: parent.verticalCenter; spacing: 10
+    Column { visible: Backend.current === ""; x: win.middleX(width, parent.y + y, height, docRail) - parent.x; anchors.verticalCenter: parent.verticalCenter; spacing: 10
         Item { width: 190; height: 214; anchors.horizontalCenter: parent.horizontalCenter      // a sheet of paper with the first lines already on it
             Rectangle { x: 30; y: 14; width: 150; height: 196; radius: 6; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine; rotation: 5; opacity: 0.6 }
             Rectangle { x: 20; y: 6; width: 150; height: 196; radius: 6; color: Theme.t.dark ? "#F4F1EA" : "#FFFFFF"; border.width: 1; border.color: Theme.t.islandLine

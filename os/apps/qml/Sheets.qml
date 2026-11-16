@@ -41,7 +41,7 @@ GlassWindow {
             visible: Backend.current !== "" && summary.text !== ""; anchors { right: parent.right; rightMargin: 14; bottom: parent.bottom; bottomMargin: 14 }
             Label { id: summary; leftPadding: 10; rightPadding: 10; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter } }
     ]
-    Column { visible: Backend.current === ""; anchors.centerIn: parent; spacing: 10
+    Column { visible: Backend.current === ""; anchors.verticalCenter: parent.verticalCenter; x: win.middleX(width, parent.y + y, height) - parent.x; spacing: 10
         Item { width: 264; height: 150; anchors.horizontalCenter: parent.horizontalCenter      // a corner of a sheet: one cell chosen, a small chart growing out of it
             Rectangle { anchors.fill: parent; radius: 12; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine; clip: true
                 Repeater { model: 5; Rectangle { required property int index; x: 0; y: 30 * index; width: 264; height: 1; color: Theme.t.islandLine } }

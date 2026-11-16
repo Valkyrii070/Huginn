@@ -922,7 +922,8 @@ its own: `compositor/`, in Rust, built on [Smithay](https://github.com/Smithay/s
 branch; it started as a copy of Smithay's example compositor, Anvil, MIT: `LICENSE-Smithay.txt`). It's done in rounds:
 1. **The core** (this round): drawing on the GPU, inputs, windows, X11 apps, locking, and everything the shell and
    the session daemon already asked of a compositor.
-2. **Huginn's look**: glass and blur, rounded corners, islands, the dock's Ring and streak, snapping.
+2. **Huginn's look**: glass and blur, rounded corners, islands, the dock's Ring and streak, snapping (done:
+   see "The desktop, round 2" and "Huginn's compositor, round 2").
 3. **What KWin did besides**: screen sharing and screenshots for apps, screen and input settings, night light,
    accessibility.
 4. **The default**: it becomes the "Huginn" session and KWin goes.
@@ -964,8 +965,9 @@ What round 1 does:
 - Tested on DRM in a VM (QEMU without KVM or 3D, from the built ISO, started from a text console): the screen, the
   keyboard and mouse, the shell and the installer, Super and the launcher, locking with Super+L and unlocking with
   `loginctl unlock-sessions`, switching consoles and back. Found and fixed there: no GPU driver made it stop, and it
-  kept trying to draw while on another console. Still open: in that VM (where the shell took minutes to start) the
-  bar, dock and widgets stayed hidden until the mouse moved or a key was pressed; not seen nested, even under load.
+  kept trying to draw while on another console. Seen then in that VM (where the shell took minutes to start): the
+  bar, dock and widgets stayed hidden until the mouse moved or a key was pressed. Checked again with the 2026-11-16
+  ISO, touching nothing: they come by themselves in both sessions, just slowly under emulation (about five minutes).
 
 ## The desktop, round 2 (2026-11-15): the dock, Today, menus, the Overview, the tour
 
@@ -1020,9 +1022,42 @@ Overview, windows folding into the dock). The KWin session does what KWin allows
   alone), the tour (pages, realm changing live, the line of light, Try it moving on), the Overview, spaces, hiding
   into the dock, Super+arrows, Super+drag with the lit preview, Snap Assist (and it going away with Alt+Tab), the fill
   button's layouts, Alt+Tab, notifications piling, Photos growing a picture out of its tile, and the Settings page.
-  Not testable here: the KWin paths (no KWin in the test root). Still open: the VM where the bar and dock stayed
-  hidden until the first input (to check with the next ISO), dragging the line between two snapped windows to size
-  both, live thumbnails in the windows island, and pausing a download from the stack.
+  Not testable here: the KWin paths (no KWin in the test root). Still open: dragging the line between two snapped
+  windows to size both, live thumbnails in the windows island, and pausing a download from the stack.
+
+## Huginn's compositor, round 2: the look (2026-11-15)
+
+The second half of round 2 (the first half, snapping, spaces and the Overview, is in "The desktop, round 2"):
+Huginn's compositor now draws the look itself (`compositor/src/look.rs`). Everything is GLES shaders, compiled
+once per GPU; if a GPU can't compile them, windows are drawn plain as before.
+
+- **Shadows**: a soft shadow under every window (the Gaussian of a rounded box, worked out in the shader, nothing
+  drawn under the window itself), deeper under the window in front. None for maximised or full-screen windows.
+- **Rounded corners**: every window is cut to a 14-pixel rounded outline (the same as Huginn's own windows draw),
+  while its own texture is drawn. The outline is worked out where the window is actually drawn, so it holds while
+  windows move and scale in the Overview or fold into the dock. Rounded windows can't go straight to the screen, so
+  a full-screen game or video (not rounded) still does.
+- **Frosted glass**: the shell's glass surfaces (the bar, the dock, Today, menus, the launcher, Search, the control
+  centre, notifications, the switcher…, by their layer names) are drawn over a blur of what's behind them. Just
+  before one is drawn, what's already on screen under it is copied at half size, blurred (dual Kawase, down to a
+  sixteenth and back) and shows through the glass's translucent parts only, so shadows and soft edges stay clear.
+  It's only redone when what's behind changes. Reduce Transparency and High Contrast turn it off (the shell says so
+  with the dock's layout).
+- **Title islands for other apps**: apps that don't draw their own title bar (X11 apps, and Wayland apps asking for
+  one) get Huginn's: an island across the top with the three lights at the left (close, minimise, fill; grey
+  when the window isn't in front, a mark on the one under the pointer) and the window's title in Inter, cut with an
+  ellipsis. Drag it to move the window. X11 windows are now told where they really are after a move, so their
+  menus open in the right place.
+- Every layer, window and the dim are now drawn by Huginn's own scene code instead of Smithay's, so the frost can
+  wrap the shell's surfaces.
+- Tested nested (`--winit`, llvmpipe): shadows, corners (also while moving and in the Overview), the frost (Today
+  over a document, against the same with the frost off), an X11 app's title island, its lights, moving it. And on
+  DRM in a VM (QEMU without KVM, from the built ISO): the preview session draws the desktop with rounded windows and
+  the shell's glass, and the bar and dock come up on their own (the KWin session too).
+
+Also fixed: the start screens of Writer, Sheets, Slides, Notes, Documents and Archives sat right of centre (centred
+beside the side island, which is short when there's nothing in it). They're centred in the window now, and only move
+over when the side island would reach them (`GlassWindow.middleX`).
 
 ## Huginn, the browser
 

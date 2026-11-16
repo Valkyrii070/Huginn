@@ -44,6 +44,60 @@ pub const HEADER_BAR_HEIGHT: i32 = 32;
 const BUTTON_HEIGHT: u32 = HEADER_BAR_HEIGHT as u32;
 const BUTTON_WIDTH: u32 = 32;
 
+// Huginn's title island (drawn in look.rs): the three lights at the left, as on Huginn's own windows, then the title.
+pub const LIGHT_X0: i32 = 20;
+pub const LIGHT_GAP: i32 = 20;
+pub const TITLE_X: i32 = 80;
+
+/// Which light (0 close, 1 minimise, 2 fill) is under `x` (logical, from the island's left edge), if any.
+pub fn light_at(x: f64) -> Option<i32> {
+    (0..3).find(|i| (x - (LIGHT_X0 + LIGHT_GAP * i) as f64).abs() <= (LIGHT_GAP as f64) / 2.0)
+}
+
+/// What a click in the title island does: a light's job, or move the window.
+enum Act {
+    Close,
+    Minimise,
+    Fill,
+    Move,
+}
+
+fn act_at(loc: Option<&Point<f64, Logical>>) -> Option<Act> {
+    let loc = loc?;
+    Some(match light_at(loc.x) {
+        Some(0) => Act::Close,
+        Some(1) => Act::Minimise,
+        Some(2) => Act::Fill,
+        _ => Act::Move,
+    })
+}
+
+fn close(window: &WindowElement) {
+    match window.0.underlying_surface() {
+        WindowSurface::Wayland(w) => w.send_close(),
+        #[cfg(feature = "xwayland")]
+        WindowSurface::X11(w) => {
+            let _ = w.close();
+        }
+    };
+}
+
+fn fill<BackendData: Backend>(state: &mut HuginnState<BackendData>, window: &WindowElement) {
+    match window.0.underlying_surface() {
+        WindowSurface::Wayland(w) => state.maximize_request(w.clone()),
+        #[cfg(feature = "xwayland")]
+        WindowSurface::X11(w) => {
+            let surface = w.clone();
+            state.handle.insert_idle(move |data| data.maximize_request_x11(&surface));
+        }
+    };
+}
+
+fn minimise<BackendData: Backend>(state: &mut HuginnState<BackendData>, window: &WindowElement) {
+    let window = window.clone();
+    state.handle.insert_idle(move |data| data.minimise_window(&window));
+}
+
 impl HeaderBar {
     pub fn pointer_enter(&mut self, loc: Point<f64, Logical>) {
         self.pointer_loc = Some(loc);
@@ -60,29 +114,11 @@ impl HeaderBar {
         window: &WindowElement,
         serial: Serial,
     ) {
-        match self.pointer_loc.as_ref() {
-            Some(loc) if loc.x >= (self.width - BUTTON_WIDTH) as f64 => {
-                match window.0.underlying_surface() {
-                    WindowSurface::Wayland(w) => w.send_close(),
-                    #[cfg(feature = "xwayland")]
-                    WindowSurface::X11(w) => {
-                        let _ = w.close();
-                    }
-                };
-            }
-            Some(loc) if loc.x >= (self.width - (BUTTON_WIDTH * 2)) as f64 => {
-                match window.0.underlying_surface() {
-                    WindowSurface::Wayland(w) => state.maximize_request(w.clone()),
-                    #[cfg(feature = "xwayland")]
-                    WindowSurface::X11(w) => {
-                        let surface = w.clone();
-                        state
-                            .handle
-                            .insert_idle(move |data| data.maximize_request_x11(&surface));
-                    }
-                };
-            }
-            Some(_) => {
+        match act_at(self.pointer_loc.as_ref()) {
+            Some(Act::Close) => close(window),
+            Some(Act::Minimise) => minimise(state, window),
+            Some(Act::Fill) => fill(state, window),
+            Some(Act::Move) => {
                 match window.0.underlying_surface() {
                     WindowSurface::Wayland(w) => {
                         let seat = seat.clone();
@@ -100,7 +136,7 @@ impl HeaderBar {
                     }
                 };
             }
-            _ => {}
+            None => {}
         };
     }
 
@@ -111,29 +147,24 @@ impl HeaderBar {
         window: &WindowElement,
         serial: Serial,
     ) {
-        match self.pointer_loc.as_ref() {
-            Some(loc) if loc.x >= (self.width - BUTTON_WIDTH) as f64 => {}
-            Some(loc) if loc.x >= (self.width - (BUTTON_WIDTH * 2)) as f64 => {}
-            Some(_) => {
-                match window.0.underlying_surface() {
-                    WindowSurface::Wayland(w) => {
-                        let seat = seat.clone();
-                        let toplevel = w.clone();
-                        state
-                            .handle
-                            .insert_idle(move |data| data.move_request_xdg(&toplevel, &seat, serial));
-                    }
-                    #[cfg(feature = "xwayland")]
-                    WindowSurface::X11(w) => {
-                        let window = w.clone();
-                        state
-                            .handle
-                            .insert_idle(move |data| data.move_request_x11(&window));
-                    }
-                };
-            }
-            _ => {}
-        };
+        if let Some(Act::Move) = act_at(self.pointer_loc.as_ref()) {
+            match window.0.underlying_surface() {
+                WindowSurface::Wayland(w) => {
+                    let seat = seat.clone();
+                    let toplevel = w.clone();
+                    state
+                        .handle
+                        .insert_idle(move |data| data.move_request_xdg(&toplevel, &seat, serial));
+                }
+                #[cfg(feature = "xwayland")]
+                WindowSurface::X11(w) => {
+                    let window = w.clone();
+                    state
+                        .handle
+                        .insert_idle(move |data| data.move_request_x11(&window));
+                }
+            };
+        }
     }
 
     pub fn touch_up<BackendData: Backend>(
@@ -142,30 +173,12 @@ impl HeaderBar {
         state: &mut HuginnState<BackendData>,
         window: &WindowElement,
     ) {
-        match self.pointer_loc.as_ref() {
-            Some(loc) if loc.x >= (self.width - BUTTON_WIDTH) as f64 => {
-                match window.0.underlying_surface() {
-                    WindowSurface::Wayland(w) => w.send_close(),
-                    #[cfg(feature = "xwayland")]
-                    WindowSurface::X11(w) => {
-                        let _ = w.close();
-                    }
-                };
-            }
-            Some(loc) if loc.x >= (self.width - (BUTTON_WIDTH * 2)) as f64 => {
-                match window.0.underlying_surface() {
-                    WindowSurface::Wayland(w) => state.maximize_request(w.clone()),
-                    #[cfg(feature = "xwayland")]
-                    WindowSurface::X11(w) => {
-                        let surface = w.clone();
-                        state
-                            .handle
-                            .insert_idle(move |data| data.maximize_request_x11(&surface));
-                    }
-                };
-            }
+        match act_at(self.pointer_loc.as_ref()) {
+            Some(Act::Close) => close(window),
+            Some(Act::Minimise) => minimise(state, window),
+            Some(Act::Fill) => fill(state, window),
             _ => {}
-        };
+        }
     }
 
     pub fn redraw(&mut self, width: u32) {

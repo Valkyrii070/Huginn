@@ -65,7 +65,7 @@ GlassWindow {
     Connections { target: Backend; function onChanged() { if (Backend.current !== "" && win.browsing && Backend.count > 0 && !win.wasOpen) { win.browsing = false } win.wasOpen = Backend.current !== "" } }
     property bool wasOpen: Backend.current !== ""
 
-    Column { visible: win.browsing; anchors.centerIn: parent; spacing: 10
+    Column { visible: win.browsing; anchors.verticalCenter: parent.verticalCenter; x: win.middleX(width, parent.y + y, height) - parent.x; spacing: 10
         Item { width: 300; height: 170; anchors.horizontalCenter: parent.horizontalCenter      // three slides fanned out, the front one with a title on it
             Rectangle { x: 60; y: 0; width: 224; height: 126; radius: 10; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine; rotation: 7; opacity: 0.5 }
             Rectangle { x: 44; y: 14; width: 224; height: 126; radius: 10; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine; rotation: 3; opacity: 0.75 }

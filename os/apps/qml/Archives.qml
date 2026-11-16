@@ -23,7 +23,7 @@ GlassWindow {
             Seg { icon: "download"; text: "Unpack All"; on: true; onClicked: Backend.extract("") }
         }
     ]
-    Column { visible: !Backend.isOpen; anchors.centerIn: parent; spacing: 8; width: 380
+    Column { visible: !Backend.isOpen; anchors.verticalCenter: parent.verticalCenter; x: win.middleX(width, parent.y + y, height) - parent.x; spacing: 8; width: 380
         Item { width: 190; height: 160; anchors.horizontalCenter: parent.horizontalCenter      // a box, zipped shut down the middle
             Rectangle { x: 15; y: 40; width: 160; height: 112; radius: 12; color: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.16); border.width: 1.5; border.color: Theme.t.accent }
             Rectangle { x: 5; y: 18; width: 180; height: 34; radius: 9; color: Theme.t.island; border.width: 1.5; border.color: Theme.t.accent }

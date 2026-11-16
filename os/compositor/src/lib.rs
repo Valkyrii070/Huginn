@@ -14,6 +14,7 @@ pub mod drawing;
 pub mod focus;
 pub mod huginn;
 pub mod input_handler;
+pub mod look;
 pub mod render;
 pub mod shell;
 pub mod state;
