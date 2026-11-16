@@ -645,6 +645,15 @@ Four apps are being taken, round by round, to the level of the professional tool
     same over MIDI, a drawn bend gliding, the mod wheel's vibrato. On screen: notes' strength bars and a drawn bend.
   - Not yet: controllers in MIDI files, and on the live keyboard.
 
+- *Freeze* and *Bounce in Place* (Smart Controls): freezing draws a track's instrument and effects once (their knobs
+  as drawn) and plays it back from the file, light on the computer however heavy its plugins; its fader, pan and
+  sends still work. Anything the sound depends on changing (its regions, instrument, effects, the song's key or
+  timing) puts it out of date: it plays live again and offers to freeze again. Bouncing puts the same sound on an
+  audio track of its own beside it, and mutes the original. Both in the background.
+  - Tested (9 checks): frozen in 0.6 s, played from the file and the same as live to 0.00001, the fader moving
+    it 12 dB, a new note making it out of date, a bounce beside the original with its sound, the original muted. On
+    screen: freezing, the snowflake on the track.
+
 ## From power-on to the desktop
 
 Every screen between pressing the power button and the desktop is now Huginn's own, and they flow into each other.

@@ -290,6 +290,7 @@ class Tempo(QObject):
         self._back.connect(lambda fn: fn())
         self._midi_threads = []
         self._mic = None
+        self._busy = set()                                    # tracks being frozen or bounced
         self._plugins, self._plugin_state = [], "finding" if se.lv2 is not None and se.lv2.available() else "none"
         self._plugin_controls = {}
         if self._plugin_state == "finding":
@@ -464,6 +465,8 @@ class Tempo(QObject):
                 "family": self._plugin_family(t.get("instrument") or {}) or inst.get("family", ""), "automation": t.get("automation") or {}, "colour": t.get("colour") or COLOURS.get(t["kind"], "#4FA3FF"),
                 "output": t.get("output", ""), "members": members, "summary": summary, "open": t.get("open", True), "lane": t.get("lane", "volume"),
                 "midiFx": t.get("midiFx") or {}, "outputName": (self._t(t.get("output", "")) or {}).get("name", ""),
+                "frozenState": ("busy" if t["id"] in self._busy else "" if not t.get("frozen") else
+                                "on" if (t.get("frozen") or {}).get("key") == se.freeze_key(self._p, t) else "stale"),
                 "hidden": bool(t.get("output") and not (self._t(t["output"]) or {}).get("open", True))}
 
     def _peaks(self, r: dict, file: str, count: int) -> list:
@@ -754,6 +757,98 @@ class Tempo(QObject):
         if self._sel_track == tid:
             self._sel_track = self._p["tracks"][0]["id"] if self._p["tracks"] else ""
         self._keep()
+
+    # ---------------------------------------------------------------- freezing and bouncing
+    def _render_track_then(self, tid: str, what: str, done) -> None:
+        """Draw a track's own sound in the background, then `done(audio)` here."""
+        if self._p is None or self._t(tid) is None or tid in self._busy:
+            return
+        self._busy.add(tid)
+        self.changed.emit()
+        snap = json.loads(json.dumps(self._p))
+        self.said.emit(f"{what}…", False)
+
+        def work():
+            try:
+                audio = se.render_track(snap, tid, self._folder)
+            except Exception as e:                            # noqa: BLE001
+                audio, err = None, str(e)
+            else:
+                err = ""
+
+            def finish():
+                self._busy.discard(tid)
+                if audio is None:
+                    self.said.emit(f"Couldn't do that: {err}", True)
+                else:
+                    done(audio, snap)
+                self.changed.emit()
+            self._back.emit(finish)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sound_file(self, sub: str, stem: str, audio) -> str:
+        folder = (self._folder / sub) if self._folder else Path("/tmp") / f"tempo-{sub}"
+        folder.mkdir(parents=True, exist_ok=True)
+        f = folder / f"{stem}.wav"
+        se.write_wav(str(f), audio, 24)
+        return f"{sub}/{f.name}" if self._folder else str(f)
+
+    @Slot(str)
+    def freezeTrack(self, tid: str) -> None:
+        """Freeze: the track's instrument and effects drawn once, played from the file (light on the computer)."""
+        t = self._t(tid)
+        if t is None or t["kind"] == "stack":
+            return
+
+        def done(audio, snap):
+            t2 = self._t(tid)
+            if t2 is None:
+                return
+            key = se.freeze_key(snap, next(x for x in snap["tracks"] if x["id"] == tid))
+            file = self._sound_file("freeze", f"{tid}-{key[:10]}", audio)
+            self._before()
+            t2["frozen"] = {"file": file, "key": key}
+            self._keep()
+            self.said.emit(f"{t2['name']} is frozen: it plays from a recording of itself until you change it.", False)
+        self._render_track_then(tid, "Freezing", done)
+
+    @Slot(str)
+    def unfreezeTrack(self, tid: str) -> None:
+        t = self._t(tid)
+        if t is not None and t.get("frozen"):
+            self._before()
+            t.pop("frozen")
+            self._keep()
+
+    @Slot(str)
+    def bounceTrack(self, tid: str) -> None:
+        """Bounce in place: the track's sound (instrument and effects) on a new audio track; the original is muted."""
+        t = self._t(tid)
+        if t is None or t["kind"] == "stack":
+            return
+
+        def done(audio, snap):
+            src = self._t(tid)
+            if src is None or not len(audio):
+                return
+            file = self._sound_file("audio", f"{re.sub(r'[^A-Za-z0-9]+', '-', src['name']).strip('-') or 'bounce'}-bounced-{uuid.uuid4().hex[:6]}", audio)
+            tm = self._tm()
+            self._before()
+            nt = self._add_track("audio", "", f"{src['name']} (bounced)")
+            nt["effects"] = [dict(f, on=False) if f.get("kind") in ("eq", "comp") else f for f in nt["effects"]]
+            for k in ("volume", "pan", "reverb", "echo", "output"):
+                if k in src:
+                    nt[k] = src[k]
+            tracks = self._p["tracks"]                     # beside the original
+            tracks.insert(tracks.index(src) + 1, tracks.pop(tracks.index(nt)))
+            self._p["regions"].append({"id": self._id("r"), "track": nt["id"], "start": 0.0, "length": round(tm.beat(len(audio) / se.SR), 4),
+                                       "kind": "audio", "file": file, "offset": 0.0, "gain": 0.0, "name": f"{src['name']} (bounced)",
+                                       "srcTempo": tm.tempo_at(0)})
+            src["mute"] = True
+            self._sel_track = nt["id"]
+            self._keep()
+            self.said.emit(f"Bounced {src['name']} to a sound on its own track (the original is muted).", False)
+        self._render_track_then(tid, "Bouncing", done)
 
     @Slot(str, int)
     def moveTrack(self, tid: str, to: int) -> None:

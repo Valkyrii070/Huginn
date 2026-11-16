@@ -21,6 +21,8 @@
     groove          swing and humanising, a region's own, as it plays (its notes stay where they were written)
     controllers     sustain pedal, pitch bend and mod wheel drawn in a region: to a plugin instrument as MIDI; Tempo's
                     own instruments hold notes on the pedal and bend and shake each note's playback, as samplers do
+    freezing        a track's instrument and effects drawn once and played back from the file (its fader, pan and
+                    sends stay live), until anything it depends on changes; bouncing puts the same on an audio track
     plugins         LV2 effects and instruments installed on the computer (huginn_tempo_lv2): an effect like any other
                     on a track, a stack or the master; an instrument drawn a region at a time, with its own tail
     files           WAV, FLAC, MP3, Ogg and AAC out (and stems); Standard MIDI Files in and out
@@ -1366,6 +1368,14 @@ class Mixer:
         self.p = project
         self.tempo = float(project.get("tempo", 120))            # where the song starts (echoes keep time with it)
         self.tm = TempoMap(project)
+        self.frozen = {}
+        for t in project.get("tracks", []):                       # frozen tracks still as frozen: from their files
+            f = t.get("frozen") or {}
+            if f.get("file") and f.get("key") == freeze_key(project, t):
+                try:
+                    self.frozen[t["id"]] = load_audio(resolve(f["file"], self.audio_dir))
+                except Exception:                                 # noqa: BLE001  (gone: played live)
+                    pass
         self.fx = {}
         for t in project.get("tracks", []):
             self.fx[t["id"]] = [(i, f, make_effect(f, self.tempo)) for i, f in enumerate(t.get("effects", [])) if f.get("on", True)]
@@ -1427,8 +1437,13 @@ class Mixer:
                                   self.audio_dir, track.get("midiFx"), int(self.p.get("key", 0)), self.p.get("mode", "major"), clock)
 
     def track_block(self, track: dict, s0: int, n: int) -> np.ndarray:
-        """One track's sound for samples [s0, s0+n), before its effects: stereo."""
+        """One track's sound for samples [s0, s0+n), before its effects: stereo. (A frozen track's, after them.)"""
         out = np.zeros((n, 2), np.float32)
+        frozen = self.frozen.get(track["id"]) if hasattr(self, "frozen") else None
+        if frozen is not None:
+            piece = frozen[s0:s0 + n]
+            out[:len(piece)] = piece if piece.ndim == 2 else piece[:, None]
+            return out
         for r in self.p.get("regions", []):
             if r.get("track") != track["id"] or r.get("muted"):
                 continue
@@ -1478,7 +1493,7 @@ class Mixer:
     def _strip(self, t: dict, x: np.ndarray, raw: dict, b0: float, b1: float, n: int):
         """A track's channel strip: its effects (a compressor may listen to another track), then volume and pan,
         all as drawn over time. Gives the sound after the fader, and the send amounts."""
-        fxs = self.fx.get(t["id"], [])
+        fxs = self.fx.get(t["id"], []) if t["id"] not in getattr(self, "frozen", {}) else []   # frozen: in the file already
         self._automate(t, fxs, b0, b1)
         for _i, _f, fx in fxs:
             if fx is None:
@@ -1590,6 +1605,48 @@ def render_song(project: dict, audio_dir: Path = None, tracks: list = None, tail
         out[k:k + n] = m.render(BLOCK)[:n]
         k += n
     return out
+
+
+def freeze_key(project: dict, t: dict) -> str:
+    """What a track's frozen sound depends on: its regions, instrument, effects and their drawn knobs, the song's key
+    (loops follow it) and timing. Its fader, pan and sends aren't in it: they stay live."""
+    regions = [r for r in project.get("regions", []) if r.get("track") == t["id"]]
+    auto = {k: v for k, v in (t.get("automation") or {}).items() if k.startswith("fx.")}
+    keys = {(f.get("params") or {}).get("key") for f in t.get("effects", [])} - {None, ""}
+    others = [r for r in project.get("regions", []) if r.get("track") in keys]       # what its sidechain listens to
+    return hashlib.sha1(json.dumps([regions, t.get("instrument"), t.get("effects"), auto, t.get("midiFx"), others, project.get("tempo"),
+                                    project.get("tempoChanges"), project.get("key"), project.get("mode"), t.get("kind")],
+                                   sort_keys=True).encode()).hexdigest()
+
+
+def render_track(project: dict, tid: str, audio_dir: Path = None, tail: float = 4.0) -> np.ndarray:
+    """A track's own sound for the whole song: its instrument and effects (their knobs as drawn), not its fader, pan
+    or sends. What freezing and bouncing keep."""
+    p = json.loads(json.dumps(project))
+    t = next((x for x in p.get("tracks", []) if x["id"] == tid), None)
+    if t is None:
+        return np.zeros((0, 2), np.float32)
+    t.update(volume=0.0, pan=0.0, reverb=0.0, echo=0.0, mute=False, solo=False, frozen=None, output="")
+    t["automation"] = {k: v for k, v in (t.get("automation") or {}).items() if k.startswith("fx.")}
+    keys = {(f.get("params") or {}).get("key") for f in t.get("effects", [])} - {None, ""}
+    p["tracks"] = [t] + [x for x in p["tracks"] if x["id"] in keys]
+    m = Mixer(p, audio_dir)
+    tm = m.tm
+    mine = [r for r in p.get("regions", []) if r.get("track") == tid]
+    end = max([float(r["start"]) + float(r.get("length", 4)) * max(1, int(r.get("loops", 1))) for r in mine] or [0.0])
+    total = int((tm.seconds(end) + tail) * SR)
+    out = np.zeros((max(0, total), 2), np.float32)
+    k = 0
+    while k < total:
+        n = min(BLOCK, total - k)
+        b0, b1 = tm.beat(k / SR), tm.beat((k + n) / SR)
+        raw = {x["id"]: m.track_block(x, k, n) for x in p["tracks"]}
+        x, _rv, _ec = m._strip(t, raw[tid], raw, b0, b1, n)
+        out[k:k + n] = x
+        k += n
+    # the tail, cut where it's died away
+    loud = np.nonzero(np.abs(out).max(axis=1) > 1e-5)[0] if len(out) else []
+    return out[:int(loud[-1]) + 1] if len(loud) else out[:0]
 
 
 def write_wav(path: str, audio: np.ndarray, bits: int = 24) -> None:

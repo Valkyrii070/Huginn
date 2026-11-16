@@ -298,7 +298,7 @@ GlassWindow {
                         Column { x: 56; y: 9; width: parent.width - 56 - (head.stack ? 60 : 86); spacing: 1
                             Label { width: parent.width; elide: Text.ElideRight; text: head.modelData.name; font.pixelSize: 12; font.weight: Font.DemiBold }
                             Label { width: parent.width; elide: Text.ElideRight; font.pixelSize: 10; secondary: true
-                                text: head.stack ? (head.modelData.open ? "▾ " : "▸ ") + head.modelData.instName : head.modelData.kind === "audio" ? "Recording" : head.modelData.instName } }
+                                text: (head.modelData.frozenState === "on" ? "❄ " : "") + (head.stack ? (head.modelData.open ? "▾ " : "▸ ") + head.modelData.instName : head.modelData.kind === "audio" ? "Recording" : head.modelData.instName) } }
                         Row { anchors { right: parent.right; rightMargin: 8 } y: 10; spacing: 2
                             Pressable { width: 24; height: 22; radius: 6; color: head.modelData.mute ? Theme.t.danger : (hovered ? Theme.t.hover : "transparent"); onClicked: Backend.setTrack(head.modelData.id, "mute", !head.modelData.mute)
                                 Text { anchors.centerIn: parent; text: "M"; font.pixelSize: 10; font.weight: Font.Bold; color: head.modelData.mute ? "#FFFFFF" : Theme.t.text } }
@@ -661,6 +661,14 @@ GlassWindow {
                     Label { width: parent.width; elide: Text.ElideRight; text: win.selTrack ? win.selTrack.instName : ""; font.pixelSize: 15; font.weight: Font.DemiBold }
                     Label { text: win.selTrack ? win.selTrack.family : ""; secondary: true; font.pixelSize: 11 }
                     Btn { text: "Change Instrument…"; onClicked: win.drawer = "library" }
+                    // freezing (the track played from a recording of itself) and bouncing it to a sound of its own
+                    Row { spacing: 4; height: 30
+                        Seg { objectName: "freezeBtn"; anchors.verticalCenter: undefined; on: !!win.selTrack && win.selTrack.frozenState === "on"
+                            text: !win.selTrack ? "" : win.selTrack.frozenState === "busy" ? "Working…" : win.selTrack.frozenState === "on" ? "❄ Frozen" : win.selTrack.frozenState === "stale" ? "❄ Freeze again" : "❄ Freeze"
+                            tip: "Play it from a recording of itself: light on the computer (its fader, pan and sends still work)"
+                            onClicked: if (win.selTrack.frozenState === "on") Backend.unfreezeTrack(win.selTrack.id); else if (win.selTrack.frozenState !== "busy") Backend.freezeTrack(win.selTrack.id) }
+                        Seg { objectName: "bounceBtn"; anchors.verticalCenter: undefined; text: "Bounce in Place"; tip: "Its sound, effects and all, on an audio track of its own; this one is muted"
+                            onClicked: if (win.selTrack.frozenState !== "busy") Backend.bounceTrack(win.selTrack.id) } }
                     Btn { objectName: "instPluginBtn"; visible: !!(win.selTrack && win.selTrack.instrument && win.selTrack.instrument.id === "plugin"); text: "Controls & Presets…"
                         onClicked: win.pluginPanel = { tid: win.selTrack.id, index: -1, uri: win.selTrack.instrument.uri, name: win.selTrack.instrument.name } }
                     // the sampler: its root note and how it plays
