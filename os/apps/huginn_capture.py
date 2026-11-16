@@ -1,4 +1,5 @@
-"""A picture of the screen from KWin, through huginn-grab (native/huginn-grab.c).
+"""A picture of the screen: from Huginn's own compositor over the bus (org.huginn.Compositor.Capture), or from KWin
+through huginn-grab (native/huginn-grab.c).
 
 KWin hands screen pictures only to programs a .desktop file names (X-KDE-DBUS-Restricted-Interfaces), checked by the
 program's own executable, so Huginn's Python can't ask itself: the small native helper is named
@@ -35,6 +36,14 @@ def note(line: str) -> None:
 
 def raw_to_png(raw: str, out_png: str) -> str:
     """huginn-grab's file (a header line, then the pixels) as a PNG: '' on success, else the reason."""
+    image = raw_image(raw)
+    if isinstance(image, str):
+        return image
+    return "" if image.save(out_png, "PNG") else "the picture couldn't be saved"
+
+
+def raw_image(raw: str):
+    """A raw picture file (huginn-grab's, or the compositor's) as a QImage, else why not."""
     from PySide6.QtGui import QImage
     try:
         data = Path(raw).read_bytes()
@@ -48,13 +57,65 @@ def raw_to_png(raw: str, out_png: str) -> str:
     if len(pixels) < stride * h:
         return "the picture arrived cut short"
     image = QImage(pixels, w, h, stride, QImage.Format(fmt)).copy()     # copy: the bytes go away after this
-    if image.isNull():
-        return "the picture couldn't be read"
-    return "" if image.save(out_png, "PNG") else "the picture couldn't be saved"
+    return "the picture couldn't be read" if image.isNull() else image
+
+
+def own_grab(out_png: str) -> str | None:
+    """Every screen from Huginn's own compositor, as one PNG: None when it isn't running, '' when out_png was
+    written, else why not. It answers with a raw picture per screen and where each screen is on the desktop."""
+    try:
+        from gi.repository import Gio
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        text = bus.call_sync("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", "Capture",
+                             None, None, 0, 5000, None).unpack()[0]
+    except Exception:                                      # noqa: BLE001  (not running: KWin's turn)
+        return None
+    if not text.startswith("["):                            # the earlier preview compositor: a PNG's path, or ""
+        if not text:
+            return "the compositor couldn't take the picture"
+        import shutil
+        shutil.copyfile(text, out_png)
+        return ""
+    import json
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage, QPainter
+    parts, why = json.loads(text), ""
+    try:
+        if not parts:
+            return "the compositor couldn't take the picture"
+        k = max(p["w"] / max(1, p["lw"]) for p in parts)                  # the sharpest screen's pixels
+        x0, y0 = min(p["x"] for p in parts), min(p["y"] for p in parts)
+        w = max(p["x"] + p["lw"] for p in parts) - x0
+        h = max(p["y"] + p["lh"] for p in parts) - y0
+        canvas = QImage(round(w * k), round(h * k), QImage.Format_RGB32)
+        canvas.fill(0)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        for p in parts:
+            image = raw_image(p["path"])
+            if isinstance(image, str):
+                why = image
+                continue
+            painter.drawImage(QRectF((p["x"] - x0) * k, (p["y"] - y0) * k, p["lw"] * k, p["lh"] * k), image)
+        painter.end()
+        if not why and not canvas.save(out_png, "PNG"):
+            why = "the picture couldn't be saved"
+    finally:
+        for p in parts:
+            try:
+                os.unlink(p["path"])
+            except OSError:
+                pass
+    if why:
+        note(f"compositor: {why}")
+    return why
 
 
 def kwin_grab(out_png: str, screen: str = "") -> str:
-    """The screen through KWin: '' when out_png was written, else why not."""
+    """The screen: '' when out_png was written, else why not. Huginn's own compositor first (every screen), then KWin."""
+    own = own_grab(out_png)
+    if own is not None:
+        return own
     prog = helper()
     if not prog:
         return "huginn-grab isn't installed"
@@ -114,7 +175,7 @@ def notify(summary: str, body: str, image: str = "") -> None:
 
 
 def save_screenshot() -> str:
-    """Print in the KWin session: the whole screen into Pictures › Screenshots. Returns the path, or ''."""
+    """Print: the whole screen into Pictures › Screenshots. Returns the path, or ''."""
     path = next_path()
     why = kwin_grab(str(path))
     if why:

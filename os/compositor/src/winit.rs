@@ -369,6 +369,22 @@ pub fn run_winit() {
                 })
             });
 
+            // pictures of the screen (capture.rs): drawn again without the cursor
+            if crate::capture::wanted(&output) {
+                let renderer = backend.renderer();
+                let (els, clear) = crate::render::output_elements(
+                    &output,
+                    &state.space,
+                    Vec::<CustomRenderElements<GlesRenderer>>::new(),
+                    renderer,
+                    state.show_window_preview,
+                    lock_view.as_ref(),
+                    &view,
+                );
+                let now = state.clock.now();
+                crate::capture::serve(renderer, &output, &els, 0, clear, now.into());
+            }
+
             match render_res {
                 Ok(render_output_result) => {
                     let has_rendered = render_output_result.damage.is_some();

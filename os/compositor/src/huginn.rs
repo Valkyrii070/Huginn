@@ -183,6 +183,22 @@ impl<B: Backend + 'static> HuginnState<B> {
             Request::OverviewDo(action) => self.overview_do(&action),
             Request::SpaceDo(action) => self.space_do(&action),
             Request::DockLayout(json) => self.dock_layout(&json),
+            Request::Capture(tx) => {
+                let outputs: Vec<_> = self.space.outputs().cloned().collect();
+                if outputs.is_empty() {
+                    let _ = tx.send(String::new());
+                }
+                let collect = std::rc::Rc::new(std::cell::RefCell::new(crate::capture::Collect {
+                    left: outputs.len(),
+                    parts: Vec::new(),
+                    tx,
+                }));
+                for output in outputs {
+                    let geo = self.space.output_geometry(&output).unwrap_or_default();
+                    let name = format!("\"x\":{},\"y\":{},\"lw\":{},\"lh\":{}", geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
+                    crate::capture::ask_shot(&output, collect.clone(), name);
+                }
+            }
         }
     }
 

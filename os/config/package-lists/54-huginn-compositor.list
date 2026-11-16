@@ -5,6 +5,8 @@
 #  - the earlier preview compositor in Python (shell/huginn_compositor.py + qml/Compositor.qml), still there for
 #    `huginn_shell.py --compositor` until the Rust one takes over everywhere
 xdg-desktop-portal
+# screen sharing and recording for apps on Huginn's own compositor (PipeWire, through the portal)
+xdg-desktop-portal-wlr
 libseat1
 libinput10
 libdisplay-info3

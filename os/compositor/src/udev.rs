@@ -1703,6 +1703,7 @@ fn render_surface<'a>(
         custom_elements.push(CustomRenderElements::Fps(element.clone()));
     }
 
+    let cursor_n = custom_elements.len();
     let (elements, clear_color) =
         output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);
 
@@ -1739,6 +1740,8 @@ fn render_surface<'a>(
         })?;
 
     update_primary_scanout_output(space, output, dnd_icon, cursor_status, &states);
+    let now = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
+    crate::capture::serve(renderer, output, &elements, cursor_n, clear_color, now.into());
 
     if rendered {
         let output_presentation_feedback = take_presentation_feedback(output, space, &states);

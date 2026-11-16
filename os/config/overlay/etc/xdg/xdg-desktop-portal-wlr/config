@@ -1,0 +1,5 @@
+# Screen sharing on Huginn's own compositor (xdg-desktop-portal-wlr). Asked to share a screen, it shares the
+# first one; picking among several screens is still to come.
+[screencast]
+chooser_type=none
+max_fps=60

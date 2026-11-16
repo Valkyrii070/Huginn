@@ -166,6 +166,8 @@ pub struct HuginnState<BackendData: Backend + 'static> {
     pub image_capture_source_state: ImageCaptureSourceState,
     pub output_capture_source_state: OutputCaptureSourceState,
     pub image_copy_capture_state: ImageCopyCaptureState,
+    /// apps' capture sessions (screen sharing): a session stops when dropped
+    pub capture_sessions: Vec<Session>,
 
     pub dnd_icon: Option<DndIcon>,
 
@@ -634,13 +636,8 @@ impl<BackendData: Backend> ImageCopyCaptureHandler for HuginnState<BackendData> 
         use smithay::output::WeakOutput;
         let weak_output = source.user_data().get::<WeakOutput>()?;
         let output = weak_output.upgrade()?;
-        let mode = output.current_mode()?;
-
         Some(BufferConstraints {
-            size: mode
-                .size
-                .to_logical(1)
-                .to_buffer(1, smithay::utils::Transform::Normal),
+            size: crate::capture::size_of(&output)?,
             shm: vec![
                 smithay::reexports::wayland_server::protocol::wl_shm::Format::Argb8888,
                 smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888,
@@ -650,13 +647,21 @@ impl<BackendData: Backend> ImageCopyCaptureHandler for HuginnState<BackendData> 
         })
     }
 
-    fn new_session(&mut self, _session: Session) {
-        // Anvil doesn't track sessions; they clean up on drop
+    fn new_session(&mut self, session: Session) {
+        self.capture_sessions.push(session);
     }
 
-    fn frame(&mut self, _session: &SessionRef, frame: Frame) {
-        // Anvil doesn't implement actual capture
-        frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
+    fn session_destroyed(&mut self, session: SessionRef) {
+        self.capture_sessions.retain(|s| *s != session);
+    }
+
+    fn frame(&mut self, session: &SessionRef, frame: Frame) {
+        // filled the next time its output is drawn (capture.rs)
+        let output = session.source().user_data().get::<smithay::output::WeakOutput>().and_then(|o| o.upgrade());
+        match output {
+            Some(output) => crate::capture::ask_frame(&output, frame, session.draw_cursor()),
+            None => frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Stopped),
+        }
     }
 }
 
@@ -805,6 +810,7 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
             image_capture_source_state,
             output_capture_source_state,
             image_copy_capture_state,
+            capture_sessions: Vec::new(),
             dnd_icon: None,
             suppressed_keys: Vec::new(),
             cursor_status: CursorImageStatus::default_named(),

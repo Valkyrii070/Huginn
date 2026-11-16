@@ -8,6 +8,7 @@
 )]
 
 #[cfg(any(feature = "udev", feature = "xwayland"))]
+pub mod capture;
 pub mod cursor;
 pub mod dbus;
 pub mod drawing;

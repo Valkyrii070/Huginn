@@ -1070,6 +1070,18 @@ Also fixed: the start screens of Writer, Sheets, Slides, Notes, Documents and Ar
 beside the side island, which is short when there's nothing in it). They're centred in the window now, and only move
 over when the side island would reach them (`GlassWindow.middleX`).
 
+## Huginn's compositor, round 3: the computer's own settings (2026-11-15)
+
+- **Pictures of the screen.** Print, Shift+Print, the Screenshot app and apps asking through the portal now work on
+  Huginn's own compositor, not just under KWin: it answers `org.huginn.Compositor.Capture` with a picture of each
+  screen and where it sits, and `huginn_capture.py` puts them together (`compositor/src/capture.rs`).
+- **Screen sharing and recording for apps** (video calls, OBS, the browser): the compositor speaks
+  ext-image-copy-capture, and xdg-desktop-portal-wlr turns that into a PipeWire stream. The own-compositor session
+  says `XDG_CURRENT_DESKTOP=Huginn-Own:Huginn:KDE`, so the portal reads `huginn-own-portals.conf`, which sends
+  screen sharing there. It shares the first screen; a picker for several screens is still to come.
+- Icons: Huginn OS's and the browser's ravens in the same smoked glass as the apps, and Calendar's tile shows
+  today's date.
+
 ## Huginn, the browser
 
 Inside the Huginn repository (this kit is its `os/` folder) the image ships the repository's own browser. A kit used

@@ -2,7 +2,8 @@
 # Huginn OS (own compositor, preview): Huginn's own compositor (huginn-compositor, built on Smithay) in place of KWin,
 # with the same shell, apps and session services. Still being tried out on real computers: the "Huginn" session
 # (KWin) stays the default, and is the one to pick at the sign-in screen if this misbehaves.
-export XDG_CURRENT_DESKTOP=Huginn:KDE
+# Huginn-Own first: the desktop portal reads huginn-own-portals.conf (screen sharing through xdg-desktop-portal-wlr)
+export XDG_CURRENT_DESKTOP=Huginn-Own:Huginn:KDE
 export XDG_SESSION_DESKTOP=huginn-preview
 export QT_QPA_PLATFORM=wayland
 export QT_QPA_PLATFORMTHEME=kde

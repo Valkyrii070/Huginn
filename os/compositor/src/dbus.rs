@@ -43,6 +43,8 @@ pub enum Request {
     SpaceDo(String),
     /// Where the dock's tiles are, and how windows hide into them (JSON)
     DockLayout(String),
+    /// Pictures of every screen (capture.rs): JSON, [{"path", "w", "h", "x", "y", "lw", "lh"}]
+    Capture(mpsc::Sender<String>),
 }
 
 /// What the compositor tells others over the bus.
@@ -144,9 +146,15 @@ impl Compositor {
         String::new()
     }
 
-    /// A picture of the screen for the desktop portal: its path ("" when it can't be done yet).
+    /// Pictures of the screens, for Print, the Screenshot app and the desktop portal: JSON, one entry per screen,
+    /// [{"path": a raw picture in $XDG_RUNTIME_DIR (huginn_capture.py reads it), "w", "h" in pixels, "x", "y", "lw",
+    /// "lh": where the screen is on the desktop}], or "" when it can't be done.
     fn capture(&self) -> String {
-        String::new()
+        let (tx, rx) = mpsc::channel();
+        if self.to_loop.send(Request::Capture(tx)).is_err() {
+            return String::new();
+        }
+        rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default()
     }
 
     /// The windows, as JSON: {"current": space, "spaces": [names], "windows": [{"id", "app", "title", "minimised",
