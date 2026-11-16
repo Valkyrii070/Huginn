@@ -14,6 +14,7 @@ pub mod cursor;
 pub mod dbus;
 pub mod displays;
 pub mod input;
+pub mod places;
 pub mod drawing;
 pub mod focus;
 pub mod huginn;

@@ -32,5 +32,18 @@ python3 /usr/share/huginn-apps/huginn_updates.py watch &
 if [ "$1" = "--services" ]; then
     wait
 else
-    exec python3 /usr/share/huginn-shell/huginn_shell.py
+    # The shell, started again if it stops on its own (a crash): the desktop carries on, windows and all. Five
+    # times in a minute and it's left stopped (the compositor then ends the session). Signing out ends everything.
+    tries=0 since=$(date +%s)
+    while :; do
+        python3 /usr/share/huginn-shell/huginn_shell.py
+        code=$?
+        [ "$code" -eq 0 ] && exit 0
+        now=$(date +%s)
+        if [ $((now - since)) -gt 60 ]; then tries=0 since=$now; fi
+        tries=$((tries + 1))
+        [ "$tries" -gt 5 ] && exit "$code"
+        echo "huginn-session: the shell stopped ($code); starting it again" >&2
+        sleep 1
+    done
 fi

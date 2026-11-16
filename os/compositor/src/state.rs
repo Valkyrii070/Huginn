@@ -52,8 +52,10 @@ use smithay::{
         fifo::{FifoBarrierCachedState, FifoManagerState},
         fixes::FixesState,
         fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale},
+        foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState},
         image_capture_source::{
-            ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState,
+            ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState, ToplevelCaptureSourceHandler,
+            ToplevelCaptureSourceState,
             OutputCaptureSourceHandler, OutputCaptureSourceState,
         },
         image_copy_capture::{
@@ -166,6 +168,9 @@ pub struct HuginnState<BackendData: Backend + 'static> {
     pub image_capture_source_state: ImageCaptureSourceState,
     pub output_capture_source_state: OutputCaptureSourceState,
     pub image_copy_capture_state: ImageCopyCaptureState,
+    /// windows for other programs (screen sharing of one window): the list, and capturing one
+    pub foreign_toplevel_list: ForeignToplevelListState,
+    pub toplevel_capture_source_state: ToplevelCaptureSourceState,
     /// apps' capture sessions (screen sharing): a session stops when dropped
     pub capture_sessions: Vec<Session>,
 
@@ -627,6 +632,22 @@ impl<BackendData: Backend> OutputCaptureSourceHandler for HuginnState<BackendDat
     }
 }
 
+impl<BackendData: Backend + 'static> ForeignToplevelListHandler for HuginnState<BackendData> {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list
+    }
+}
+
+impl<BackendData: Backend> ToplevelCaptureSourceHandler for HuginnState<BackendData> {
+    fn toplevel_capture_source_state(&mut self) -> &mut ToplevelCaptureSourceState {
+        &mut self.toplevel_capture_source_state
+    }
+
+    fn toplevel_source_created(&mut self, source: ImageCaptureSource, toplevel: ForeignToplevelHandle) {
+        source.user_data().insert_if_missing(|| toplevel.downgrade());
+    }
+}
+
 impl<BackendData: Backend> ImageCopyCaptureHandler for HuginnState<BackendData> {
     fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
         &mut self.image_copy_capture_state
@@ -634,10 +655,16 @@ impl<BackendData: Backend> ImageCopyCaptureHandler for HuginnState<BackendData> 
 
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
         use smithay::output::WeakOutput;
-        let weak_output = source.user_data().get::<WeakOutput>()?;
-        let output = weak_output.upgrade()?;
+        // one window (capture.rs): its size, drawn at its screen's scale
+        let size = if let Some(handle) = source.user_data().get::<smithay::wayland::foreign_toplevel_list::ForeignToplevelWeakHandle>() {
+            let handle = handle.upgrade()?;
+            crate::capture::window_size(&self.space, crate::capture::toplevel_window(&self.huginn.toplevels, &handle)?)?
+        } else {
+            let weak_output = source.user_data().get::<WeakOutput>()?;
+            crate::capture::size_of(&weak_output.upgrade()?)?
+        };
         Some(BufferConstraints {
-            size: crate::capture::size_of(&output)?,
+            size,
             shm: vec![
                 smithay::reexports::wayland_server::protocol::wl_shm::Format::Argb8888,
                 smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888,
@@ -656,6 +683,14 @@ impl<BackendData: Backend> ImageCopyCaptureHandler for HuginnState<BackendData> 
     }
 
     fn frame(&mut self, session: &SessionRef, frame: Frame) {
+        // one window: drawn the next time its screen is drawn (capture.rs)
+        if let Some(handle) = session.source().user_data().get::<smithay::wayland::foreign_toplevel_list::ForeignToplevelWeakHandle>() {
+            match handle.upgrade().and_then(|h| crate::capture::toplevel_window(&self.huginn.toplevels, &h)) {
+                Some(id) => crate::capture::ask_window(id, crate::capture::WindowAsk::Frame(frame, session.clone(), session.draw_cursor())),
+                None => frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Stopped),
+            }
+            return;
+        }
         // filled the next time its output is drawn (capture.rs)
         let output = session.source().user_data().get::<smithay::output::WeakOutput>().and_then(|o| o.upgrade());
         match output {
@@ -755,6 +790,8 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
         let image_capture_source_state = ImageCaptureSourceState::new();
         let output_capture_source_state = OutputCaptureSourceState::new::<Self>(&dh);
         let image_copy_capture_state = ImageCopyCaptureState::new::<Self>(&dh);
+        let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&dh);
+        let toplevel_capture_source_state = ToplevelCaptureSourceState::new::<Self>(&dh);
 
         // init input
         let seat_name = backend_data.seat_name();
@@ -812,6 +849,8 @@ impl<BackendData: Backend + 'static> HuginnState<BackendData> {
             image_capture_source_state,
             output_capture_source_state,
             image_copy_capture_state,
+            foreign_toplevel_list,
+            toplevel_capture_source_state,
             capture_sessions: Vec::new(),
             dnd_icon: None,
             suppressed_keys: Vec::new(),

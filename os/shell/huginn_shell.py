@@ -160,9 +160,11 @@ class Settings(QObject):
                 "contrast": "false", "reduceTransparency": "false", "reduceMotion": "false", "uiScale": "1",       # accessibility
                 # Settings › Desktop & Dock
                 "dockSize": "44", "hideStyle": "drop", "dockClickHides": "true", "overviewOpen": "glide", "hotCorner": "false",
-                "spacesAllScreens": "true", "inAppMotion": "grow", "fillButtonLayouts": "true", "snapGaps": "true", "keepSnapped": "true"}
+                "spacesAllScreens": "true", "inAppMotion": "grow", "fillButtonLayouts": "true", "snapGaps": "true", "keepSnapped": "true",
+                # windows and screens on Huginn's own compositor
+                "reopenApps": "true", "rememberPlaces": "true", "adaptiveSync": "auto"}
     SWITCHES = ("clock24", "barDate", "batteryPercent", "dockHide", "dockDots", "autoUpdate", "liveWallpaper", "contrast", "reduceTransparency", "reduceMotion",
-                "dockClickHides", "hotCorner", "spacesAllScreens", "fillButtonLayouts", "snapGaps", "keepSnapped")
+                "dockClickHides", "hotCorner", "spacesAllScreens", "fillButtonLayouts", "snapGaps", "keepSnapped", "reopenApps", "rememberPlaces")
     SCALES = ("1", "1.25", "1.5", "1.75", "2")
 
     def __init__(self, path: Path, realms: list, persist: bool = True):
@@ -170,7 +172,7 @@ class Settings(QObject):
         self._path, self._persist, self._values = path, persist, dict(self.DEFAULTS)
         self._choices = {"menuStyle": ("one", "row", "dropdown", "inline"), "dark": ("true", "false"), "realm": tuple(realms), "uiScale": self.SCALES,
                          "dockSize": ("36", "40", "44", "52", "60"), "hideStyle": ("drop", "line", "comet"), "overviewOpen": ("glide", "light"),
-                         "inAppMotion": ("grow", "slide"),
+                         "inAppMotion": ("grow", "slide"), "adaptiveSync": ("auto", "off"),
                          **{k: ("true", "false") for k in self.SWITCHES}}
         self._load()
         self._watcher = QFileSystemWatcher(self)
@@ -219,6 +221,9 @@ class Settings(QObject):
     fillButtonLayouts = Property(bool, lambda self: self._values["fillButtonLayouts"] == "true", notify=changed)
     snapGaps = Property(bool, lambda self: self._values["snapGaps"] == "true", notify=changed)
     keepSnapped = Property(bool, lambda self: self._values["keepSnapped"] == "true", notify=changed)
+    reopenApps = Property(bool, lambda self: self._values["reopenApps"] == "true", notify=changed)
+    rememberPlaces = Property(bool, lambda self: self._values["rememberPlaces"] == "true", notify=changed)
+    adaptiveSync = Property(str, lambda self: self._values["adaptiveSync"], notify=changed)
 
     def override(self, key: str, value: str) -> None:
         """Set a value for this run only (command-line flags)."""

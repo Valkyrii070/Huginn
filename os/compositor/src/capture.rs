@@ -184,6 +184,25 @@ pub enum WindowAsk {
     Card(mpsc::Sender<String>),
     /// the window as it was when it was asked to close: it fades out once it's gone
     Ghost,
+    /// an app's frame of one window (sharing one window): its session, and whether to draw the pointer
+    Frame(Frame, smithay::wayland::image_copy_capture::SessionRef, bool),
+}
+
+/// The window behind a handle in the list other programs see.
+pub fn toplevel_window(
+    toplevels: &[(u64, smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle)],
+    handle: &smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle,
+) -> Option<u64> {
+    toplevels.iter().find(|(_, h)| h.matches(handle)).map(|(id, _)| *id)
+}
+
+/// The size of a window's pictures for sharing: everything it draws (shadow too), at its screen's scale.
+pub fn window_size(space: &smithay::desktop::Space<crate::shell::WindowElement>, id: u64) -> Option<Size<i32, smithay::utils::Buffer>> {
+    use smithay::desktop::space::SpaceElement;
+    let w = space.elements().find(|w| crate::huginn::window_id(w) == id)?;
+    let scale = space.outputs_for_element(w).first().map_or(1.0, |o| o.current_scale().fractional_scale());
+    let b = w.bbox();
+    Some(((b.size.w as f64 * scale).ceil() as i32, (b.size.h as f64 * scale).ceil() as i32).into())
 }
 
 /// A closed window fading out: its last picture, where it was (desktop, logical), since when it's been gone.
@@ -219,8 +238,12 @@ where
     let mut later = Vec::new();
     for (id, ask) in asks {
         let Some(window) = space.elements().find(|w| crate::huginn::window_id(w) == id) else {
-            if let WindowAsk::Card(tx) = ask {
-                let _ = tx.send(String::new());
+            match ask {
+                WindowAsk::Card(tx) => {
+                    let _ = tx.send(String::new());
+                }
+                WindowAsk::Frame(frame, ..) => frame.fail(CaptureFailureReason::Unknown), // minimised, or on another space
+                WindowAsk::Ghost => {}
             }
             continue;
         };
@@ -228,17 +251,34 @@ where
             later.push((id, ask));
             continue;
         }
-        let bbox = window.bbox();
+        // shared windows are the window itself (no shadow, which changes with focus); the rest everything it draws
+        let sharing = matches!(ask, WindowAsk::Frame(..));
+        let bbox = if sharing { window.geometry() } else { window.bbox() };
         let Some(loc) = space.element_location(window) else { continue };
         let out_scale = output.current_scale().fractional_scale();
-        let scale = match ask {
+        let mut scale = match ask {
             WindowAsk::Card(_) => (360.0 / bbox.size.w.max(1) as f64).min(1.0) * out_scale,
-            WindowAsk::Ghost => out_scale,
+            WindowAsk::Ghost | WindowAsk::Frame(..) => out_scale,
         };
-        let size: Size<i32, smithay::utils::Buffer> =
+        let mut size: Size<i32, smithay::utils::Buffer> =
             ((bbox.size.w as f64 * scale).ceil() as i32, (bbox.size.h as f64 * scale).ceil() as i32).into();
         if size.w < 2 || size.h < 2 {
+            if let WindowAsk::Frame(frame, ..) = ask {
+                frame.fail(CaptureFailureReason::Unknown);
+            }
             continue;
+        }
+        // a shared window that changed size: this frame fits it into the buffers the app has, and the app is told
+        // the new size for the next ones
+        if let WindowAsk::Frame(_, session, _) = &ask
+            && let Some(mut c) = session.current_constraints()
+            && c.size != size
+        {
+            let fit = (c.size.w as f64 / size.w as f64).min(c.size.h as f64 / size.h as f64);
+            scale *= fit;
+            c.size = size;
+            session.update_constraints(c);
+            size = Size::from(((bbox.size.w as f64 * scale).floor().max(1.0) as i32, (bbox.size.h as f64 * scale).floor().max(1.0) as i32));
         }
         let at = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
             (-(bbox.loc.x as f64) * scale).round() as i32,
@@ -263,6 +303,13 @@ where
                 });
                 let _ = tx.send(answer);
             }
+            WindowAsk::Frame(frame, _, _) => {
+                if fill(&frame, &shot) {
+                    frame.success(Transform::Normal, None, presented_now());
+                } else {
+                    frame.fail(CaptureFailureReason::Unknown);
+                }
+            }
             WindowAsk::Ghost => {
                 let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
                     &shot.bytes,
@@ -284,17 +331,21 @@ where
 fn fill(frame: &Frame, shot: &Shot) -> bool {
     let buffer = frame.buffer();
     shm::with_buffer_contents_mut(&buffer, |ptr, len, data| {
-        if data.width != shot.w || data.height != shot.h {
+        // the picture, top left; a smaller one (a shared window that just grew) on black
+        if shot.w > data.width || shot.h > data.height {
             return false;
         }
         let row = shot.w as usize * 4;
         let (offset, stride) = (data.offset as usize, data.stride as usize);
-        if stride < row || offset + stride * (shot.h as usize - 1) + row > len {
+        if stride < data.width as usize * 4 || offset + stride * data.height as usize > len {
             return false;
         }
-        for y in 0..shot.h as usize {
-            // SAFETY: inside the pool, checked above
-            unsafe {
+        // SAFETY: inside the pool, checked above
+        unsafe {
+            if shot.w != data.width || shot.h != data.height {
+                std::ptr::write_bytes(ptr.add(offset), 0, stride * data.height as usize);
+            }
+            for y in 0..shot.h as usize {
                 std::ptr::copy_nonoverlapping(shot.bytes.as_ptr().add(y * shot.stride), ptr.add(offset + y * stride), row);
             }
         }
@@ -315,4 +366,8 @@ fn save(shot: &Shot) -> Option<PathBuf> {
     file.write_all(format!("HUGINNRAW {} {} {} 4\n", shot.w, shot.h, shot.stride).as_bytes()).ok()?;
     file.write_all(&shot.bytes).ok()?;
     Some(path)
+}
+
+fn presented_now() -> Duration {
+    smithay::utils::Clock::<smithay::utils::Monotonic>::new().now().into()
 }

@@ -290,7 +290,7 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     }
 
     fn on_gesture_swipe_begin<B: InputBackend>(&mut self, evt: B::GestureSwipeBeginEvent) {
-        if evt.fingers() == 3 {
+        if evt.fingers() >= 3 {
             self.huginn.swipe = Some((0.0, 0.0));
             return;
         }
@@ -347,7 +347,12 @@ impl<BackendData: Backend> HuginnState<BackendData> {
         );
     }
 
+    /// Three fingers or more pinched in: the start menu; spread out: the Overview. Fewer go to the app.
     fn on_gesture_pinch_begin<B: InputBackend>(&mut self, evt: B::GesturePinchBeginEvent) {
+        if evt.fingers() >= 3 {
+            self.huginn.pinch = Some(1.0);
+            return;
+        }
         let serial = SCOUNTER.next_serial();
         let pointer = self.pointer.clone();
         pointer.gesture_pinch_begin(
@@ -361,6 +366,10 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     }
 
     fn on_gesture_pinch_update<B: InputBackend>(&mut self, evt: B::GesturePinchUpdateEvent) {
+        if let Some(s) = self.huginn.pinch.as_mut() {
+            *s = evt.scale();
+            return;
+        }
         let pointer = self.pointer.clone();
         pointer.gesture_pinch_update(
             self,
@@ -374,6 +383,16 @@ impl<BackendData: Backend> HuginnState<BackendData> {
     }
 
     fn on_gesture_pinch_end<B: InputBackend>(&mut self, evt: B::GesturePinchEndEvent) {
+        if let Some(s) = self.huginn.pinch.take() {
+            if !evt.cancelled() {
+                if s < 0.75 {
+                    self.say(crate::dbus::Outgoing::Launcher);
+                } else if s > 1.3 {
+                    self.overview_open();
+                }
+            }
+            return;
+        }
         let serial = SCOUNTER.next_serial();
         let pointer = self.pointer.clone();
         pointer.gesture_pinch_end(

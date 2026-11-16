@@ -61,6 +61,13 @@ pub struct Huginn {
     pub super_alone: bool,
     /// Screens turned off in Settings › Displays (displays.rs): kept, dark, out of the desktop
     pub off_outputs: Vec<smithay::output::Output>,
+    /// Where each app's window last was (places.rs), and how often that's been looked at
+    pub places: crate::places::Places,
+    pub places_tick: u32,
+    /// A pinch on the touchpad, three fingers or more: how far it has gone (1: not at all)
+    pub pinch: Option<f64>,
+    /// Every window as other programs see it (ext-foreign-toplevel-list: screen sharing of one window), by id
+    pub toplevels: Vec<(u64, smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle)>,
     /// Sticky keys and bounce keys (access.rs)
     pub keys: crate::access::Keys,
     /// The colour filter in use (access.rs)
@@ -164,6 +171,11 @@ impl<B: Backend + 'static> HuginnState<B> {
     }
 
     fn tick(&mut self) {
+        self.sync_toplevels();
+        self.huginn.places_tick = self.huginn.places_tick.wrapping_add(1);
+        if self.huginn.places_tick % 5 == 0 {
+            self.note_places();
+        }
         self.report_active();
         self.report_windows();
         self.watch_lock();
@@ -383,6 +395,38 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
     }
 
+    /// The window list other programs see (ext-foreign-toplevel-list): every window, minimised and on other spaces
+    /// too, with its title and app; gone ones closed.
+    pub fn sync_toplevels(&mut self) {
+        let all: Vec<WindowElement> = self
+            .space
+            .elements()
+            .cloned()
+            .chain(self.huginn.minimised.iter().map(|(w, _)| w.clone()))
+            .chain(self.huginn.wm.away.iter().map(|(w, _)| w.clone()))
+            .collect();
+        let ids: Vec<u64> = all.iter().map(window_id).collect();
+        let gone: Vec<_> = self.huginn.toplevels.iter().filter(|(id, _)| !ids.contains(id)).map(|(_, h)| h.clone()).collect();
+        for h in gone {
+            self.foreign_toplevel_list.remove_toplevel(&h);
+        }
+        self.huginn.toplevels.retain(|(id, _)| ids.contains(id));
+        for w in &all {
+            let id = window_id(w);
+            let (title, app) = crate::shell::window_names(w);
+            if let Some((_, h)) = self.huginn.toplevels.iter().find(|(i, _)| *i == id) {
+                if h.title() != title || h.app_id() != app {
+                    h.send_title(&title);
+                    h.send_app_id(&app);
+                    h.send_done();
+                }
+            } else {
+                let h = self.foreign_toplevel_list.new_toplevel::<Self>(title, app);
+                self.huginn.toplevels.push((id, h));
+            }
+        }
+    }
+
     pub fn close_window(window: &WindowElement) {
         // it fades out once it's gone (capture.rs: a picture of it now)
         if !crate::access::still() {
@@ -571,6 +615,16 @@ impl<B: Backend + 'static> HuginnState<B> {
             let zone = layer_map_for_output(&output).non_exclusive_zone();
             Rectangle::new(geo.loc + zone.loc, zone.size)
         };
+        // a rule for the app, or where its window last was (places.rs)
+        if let Some(at) = self.place_from_memory(window) {
+            let offset = window.geometry().loc;
+            self.space.map_element(window.clone(), at - offset, true);
+            self.tell_x11_where(window);
+            if !self.is_locked() {
+                self.activate_window(window);
+            }
+            return;
+        }
         let mut loc = Point::<i32, Logical>::from((
             area.loc.x + (area.size.w - size.w).max(0) / 2,
             area.loc.y + (area.size.h - size.h).max(0) / 2,

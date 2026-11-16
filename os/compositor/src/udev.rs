@@ -1836,7 +1836,9 @@ fn render_surface<'a>(
         output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);
 
     // FreeSync / adaptive sync: on while something fills the screen (a game, a video), off otherwise
-    let want_vrr = lock.is_none() && crate::state::HuginnState::<UdevData>::output_has_fullscreen(output);
+    let want_vrr = lock.is_none()
+        && !crate::look::NO_VRR.load(std::sync::atomic::Ordering::Relaxed)
+        && crate::state::HuginnState::<UdevData>::output_has_fullscreen(output);
     if want_vrr != surface.vrr_on {
         let ok = surface.drm_output.with_compositor(|c| c.use_vrr(want_vrr).is_ok());
         surface.vrr_on = want_vrr && ok;

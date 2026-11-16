@@ -68,6 +68,8 @@ impl Look for GlesRenderer {
 /// Dark or light: the shell says (with the dock's layout); the title islands follow.
 pub static DARK: AtomicBool = AtomicBool::new(true);
 /// Frost behind the shell's glass (off with Reduce Transparency; the shell says).
+/// Settings › Desktop & Dock: adaptive sync off
+pub static NO_VRR: AtomicBool = AtomicBool::new(false);
 pub static FROST: AtomicBool = AtomicBool::new(true);
 
 /// Window corners, in logical pixels: the same as Huginn's own windows draw (tokens: radius.window).

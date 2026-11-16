@@ -40,7 +40,8 @@ QtObject {
             var tiles = dock.tileRects(), out = {}, x0 = (sw - dock.width) / 2, y0 = sh - dockWin.height
             for (var k in tiles) out[k] = [x0 + tiles[k][0], y0 + tiles[k][1], tiles[k][2], tiles[k][3]]
             var text = JSON.stringify({ tiles: out, style: Theme.t.openMs > 0 ? Settings.hideStyle : "none", glow: Theme.t.glowA.toString(), gaps: Settings.snapGaps,
-                                       dark: Theme.t.dark, frost: !Settings.reduceTransparency && !Settings.contrast })
+                                       dark: Theme.t.dark, frost: !Settings.reduceTransparency && !Settings.contrast,
+                                       remember: Settings.rememberPlaces, vrr: Settings.adaptiveSync })
             if (text !== last) { last = text; Status.dockLayout(text) }
         }
     }

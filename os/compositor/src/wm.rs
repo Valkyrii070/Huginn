@@ -649,7 +649,7 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
     }
 
-    fn configure_size(&mut self, window: &WindowElement, size: Size<i32, Logical>, tiled: bool) {
+    pub(crate) fn configure_size(&mut self, window: &WindowElement, size: Size<i32, Logical>, tiled: bool) {
         if let Some(t) = window.0.toplevel() {
             t.with_pending_state(|s| {
                 s.size = Some(size);
@@ -835,6 +835,12 @@ impl<B: Backend + 'static> HuginnState<B> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
             return;
         };
+        if let Some(r) = v.get("remember").and_then(|x| x.as_bool()) {
+            crate::places::REMEMBER.store(r, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(s) = v.get("vrr").and_then(|x| x.as_str()) {
+            crate::look::NO_VRR.store(s == "off", std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(tiles) = v.get("tiles").and_then(|t| t.as_object()) {
             self.huginn.wm.tiles = tiles
                 .iter()

@@ -654,6 +654,61 @@ class Session(QObject):
         self._night_watch.directoryChanged.connect(lambda *_: QTimer.singleShot(300, self.night_light))
         QTimer.singleShot(2500, self.night_light)
         QTimer.singleShot(4000, self.keyboard_on_screen)
+        # the apps that were open, again (Settings › Desktop & Dock), then noting them as they change
+        QTimer.singleShot(6000, self.reopen_apps)
+        self._apps_timer = QTimer(self, interval=60000, timeout=self.note_apps)
+
+    LAST_APPS = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "huginn" / "last-apps.json"
+    NOT_REOPENED = ("huginn-installer", "huginn-welcome", "huginn-authenticate")
+
+    def _shell_setting(self, key: str, default: str) -> str:
+        try:
+            data = json.loads((Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "huginn-shell" / "settings.json").read_text(encoding="utf-8"))
+            return str(data.get(key, default))
+        except (OSError, ValueError, AttributeError):
+            return default
+
+    def _open_apps(self) -> list:
+        got = self.sb.call("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", "Windows", None, "(s)", timeout=2000) if self.sb else None
+        try:
+            wins = json.loads(got[0]).get("windows", []) if got else []
+        except (ValueError, AttributeError):
+            return []
+        apps = []
+        for w in wins:
+            app = w.get("app") or ""
+            if app and app not in apps and app not in self.NOT_REOPENED:
+                apps.append(app)
+        return apps
+
+    def note_apps(self) -> None:
+        """Which apps are open, every minute (and the last time before the session ends): for Reopen apps."""
+        if not getattr(self, "_compositor", False) or LIVE:
+            return
+        apps = self._open_apps()
+        try:
+            self.LAST_APPS.parent.mkdir(parents=True, exist_ok=True)
+            self.LAST_APPS.write_text(json.dumps({"apps": apps}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def reopen_apps(self) -> None:
+        """Signed in on Huginn's own compositor: the apps that were open last time, opened again (they open where
+        they were, the compositor remembers that), unless Settings says not to."""
+        if getattr(self, "_compositor", False) and not LIVE and self._shell_setting("reopenApps", "true") == "true":
+            try:
+                apps = json.loads(self.LAST_APPS.read_text(encoding="utf-8")).get("apps", [])
+            except (OSError, ValueError, AttributeError):
+                apps = []
+            from gi.repository import Gio as _Gio
+            for app in apps[:12]:
+                try:
+                    info = _Gio.DesktopAppInfo.new(f"{app}.desktop") or _Gio.DesktopAppInfo.new(f"{app.lower()}.desktop")
+                    if info:
+                        info.launch([], None)
+                except GLib.Error:
+                    pass
+        self._apps_timer.start()
 
     def keyboard_on_screen(self) -> None:
         """Settings' on-screen keyboard, on Huginn's own compositor: Squeekboard (KWin starts its own)."""

@@ -158,6 +158,10 @@ Column {
         SetRow { title: "Layouts from the fill button"; sub: "Hold the pointer on a window's fill button for halves, thirds and quarters."; Toggle { on: Settings.fillButtonLayouts; onToggled: pg.sw("fillButtonLayouts") } }
         SetRow { title: "Gaps between snapped windows"; Toggle { on: Settings.snapGaps; onToggled: pg.sw("snapGaps") } }
         SetRow { title: "Keep snapped windows together"; sub: "Bring them forward together, and see them as a pair in the Overview."; Toggle { on: Settings.keepSnapped; onToggled: pg.sw("keepSnapped") } }
+        SetRow { title: "Windows open where they were"; sub: "Each app's window comes back at the size and place you left it."; Toggle { on: Settings.rememberPlaces; onToggled: pg.sw("rememberPlaces") } }
+        SetRow { title: "Reopen apps when you sign in"; sub: "The apps you had open come back after signing out or restarting."; Toggle { on: Settings.reopenApps; onToggled: pg.sw("reopenApps") } }
+        SetRow { title: "Adaptive sync for games and videos"; sub: "Smoother motion on screens that support FreeSync or G-Sync, while something fills the screen."
+            SetChoice { each: 90; options: [["auto", "On"], ["off", "Off"]]; value: Settings.adaptiveSync; onPicked: function (v) { Settings.set("adaptiveSync", v) } } }
     }
     // ---------------------------------------------------------------- the Overview and spaces
     SetCard { title: "Overview & spaces"

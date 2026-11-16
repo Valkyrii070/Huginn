@@ -1106,6 +1106,25 @@ over when the side island would reach them (`GlassWindow.middleX`).
   white details, a soft shadow, no glow; `STYLE` in make-icons.py). Huginn OS's and the browser's ravens are in the
   same glass, and Calendar's tile shows today's date.
 
+## Huginn's compositor, rounds 4 and 5: staying up, and day-to-day polish (2026-11-16)
+
+- **The shell comes back by itself** if it stops (a crash): `huginn-session-apps` starts it again, up to five times
+  a minute, and the windows stay where they are.
+- **Apps reopen when you sign in** (Settings › Desktop & Dock): the session daemon notes the open apps every minute
+  and opens them again next time.
+- **Windows open where they were**: each app's window comes back at its size and place (`places.rs`,
+  `~/.config/huginn/places.json`), and **window rules** for particular apps can be written by hand in
+  `~/.config/huginn/window-rules.json` (open on a space, filled, at a size or place).
+- **Sharing one window** in calls and recordings: the compositor lists its windows for other programs
+  (ext-foreign-toplevel-list) and draws one window alone for them (ext-image-copy-capture), so the portal's
+  chooser offers windows as well as screens.
+- **Touchpad**: three or four fingers up for the Overview, down to leave it, sideways between spaces; pinch in
+  with three or more for the start menu, spread for the Overview.
+- **Adaptive sync** (FreeSync, G-Sync compatible) can be turned off in Settings › Desktop & Dock; it's on while a
+  game or video fills the screen. Screens are driven at 10 bits per colour where they can be.
+- Not there yet, and why: tearing for games (Smithay can't flip asynchronously yet), sharp X11 apps at fractional
+  scales (Smithay's XWayland has no scale of its own yet) and HDR (no colour pipeline yet) wait on Smithay.
+
 ## Huginn, the browser
 
 Inside the Huginn repository (this kit is its `os/` folder) the image ships the repository's own browser. A kit used
