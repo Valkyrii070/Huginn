@@ -573,7 +573,8 @@ class Installer(QObject):
         where = {"erase": f"Erase {d.get('model', '')} ({d.get('sizeText', '')}) and put Huginn OS on all of it",
                  "free": f"Put Huginn OS in the {d.get('freeText', '')} of free space on {d.get('model', '')}" + (f", beside {' and '.join(d.get('systems'))}" if d.get("systems") else ""),
                  "shrink": f"Shrink {d.get('shrinkLabel', 'Windows')} to {size_text(self._shrink['size'] - self._shrink['huginn'])} and put Huginn OS "
-                           f"in the {size_text(self._shrink['huginn'])} that frees, on {d.get('model', '')}. You'll choose which to start each time",
+                           f"in the {size_text(self._shrink['huginn'])} that frees, on {d.get('model', '')}. You'll choose which to start each time, "
+                           f"and Windows checks its disk once, the first time it starts again",
                  "manual": f"Put Huginn OS on {self._root} (it will be formatted)" + (f", starting from {self._efi}" if self._efi else "")}[self._mode]
         rows = [{"label": "Disk", "value": where, "warn": self._mode in ("erase", "shrink")},
                 {"label": "Encryption", "value": "On: the disk asks for its password when the computer starts" if self._encrypt else "Off"},
