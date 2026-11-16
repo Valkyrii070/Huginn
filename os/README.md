@@ -1088,6 +1088,10 @@ over when the side island would reach them (`GlassWindow.middleX`).
   reads (kxkbrc, kcminputrc), read again when Settings changes them; mice and touchpads (tap to click, natural
   scrolling, left-handed, speed, ignore while typing) are listed and changed over the bus and kept by device name in
   `~/.config/huginn/input.json` (`input.rs`).
+- **Accessibility** there too (`access.rs`, from the settings KWin and KAccess read): colour filters for colour
+  blindness through each screen's colour matrix (where the graphics card has one), inverted colours through its
+  gamma, sticky keys and bounce keys, and Reduce Motion (no sliding windows or Overview). Zoom, slow keys, mouse
+  keys and the on-screen keyboard are still to come on Huginn's own compositor; Settings says so.
 - **Night light** there too: the session daemon reads Settings' night light (kwinrc's [NightColor], as KWin does)
   and sets every screen's gamma through the compositor, easing in and out over half an hour.
 - Icons: the pictures inside the smoked glass are solid now, as macOS and iOS draw theirs (the app's colour with

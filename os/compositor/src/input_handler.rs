@@ -87,7 +87,22 @@ impl<BackendData: Backend> HuginnState<BackendData> {
         }
     }
 
+    /// A key, through sticky keys and bounce keys first (access.rs).
     fn keyboard_key_to_action<B: InputBackend>(&mut self, evt: B::KeyboardKeyEvent) -> KeyAction {
+        let pressed = matches!(evt.state(), KeyState::Pressed);
+        let release = match self.huginn.keys.key(evt.key_code(), pressed) {
+            crate::access::Key::Drop => return KeyAction::None,
+            crate::access::Key::Pass => Vec::new(),
+            crate::access::Key::PassThenRelease(keys) => keys,
+        };
+        let action = self.keyboard_key_inner::<B>(evt);
+        if !release.is_empty() {
+            self.release_keys(release);
+        }
+        action
+    }
+
+    fn keyboard_key_inner<B: InputBackend>(&mut self, evt: B::KeyboardKeyEvent) -> KeyAction {
         let keycode = evt.key_code();
         let state = evt.state();
         debug!(?keycode, ?state, "key");

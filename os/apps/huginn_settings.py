@@ -1723,6 +1723,9 @@ class SystemSettings(QObject):
                 dbus_call("session", "org.kde.KWin", "/KWin", "org.kde.KWin.reconfigure")
             elif key == "animations":
                 kconfig_write(CONFIG / "kdeglobals", ["KDE"], "AnimationDurationFactor", "1" if value else "0")
+            # Huginn's own compositor reads the same files: colour filters, sticky and bounce keys, Reduce Motion
+            if own_compositor("ReloadAccess") is not None and key in ("zoom", "zoomStep", "zoomFollow", "slow", "slowDelay", "mouseKeys", "osk"):
+                note = "That isn't ready yet on Huginn's own compositor; it works in the Huginn session."
             return note
 
         def demo(st):

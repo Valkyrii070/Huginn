@@ -116,12 +116,12 @@ pub struct Overview {
 
 impl Overview {
     fn progress(&self) -> f64 {
-        let t = (self.start.elapsed().as_secs_f64() * 1000.0 / OVERVIEW_MS).min(1.0);
+        let t = if crate::access::still() { 1.0 } else { (self.start.elapsed().as_secs_f64() * 1000.0 / OVERVIEW_MS).min(1.0) };
         let e = 1.0 - (1.0 - t).powi(3);
         if self.opening { e } else { 1.0 - e }
     }
     fn settled(&self) -> bool {
-        self.start.elapsed().as_secs_f64() * 1000.0 >= OVERVIEW_MS
+        crate::access::still() || self.start.elapsed().as_secs_f64() * 1000.0 >= OVERVIEW_MS
     }
 }
 
@@ -834,7 +834,7 @@ impl<B: Backend + 'static> HuginnState<B> {
         let Some(output) = self.space.output_under(rect.loc.to_f64()).next().cloned().or_else(|| self.overview_output()) else {
             return;
         };
-        if self.huginn.wm.hide_style == "none" {
+        if self.huginn.wm.hide_style == "none" || crate::access::still() {
             return;
         }
         let geo = self.space.output_geometry(&output).unwrap_or_default();

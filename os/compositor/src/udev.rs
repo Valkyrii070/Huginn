@@ -164,6 +164,9 @@ pub struct UdevData {
     keyboards: Vec<smithay::reexports::input::Device>,
     /// mice and touchpads, for Settings (input.rs)
     pointers: Vec<smithay::reexports::input::Device>,
+    /// night light (displays.rs) and the colour filter (access.rs), together on every screen
+    warmth: [f64; 3],
+    filter: crate::access::Filter,
 }
 
 impl UdevData {
@@ -266,19 +269,70 @@ impl Backend for UdevData {
     }
 
     fn set_warmth(&mut self, rgb: [f64; 3]) {
+        self.warmth = rgb;
+        self.colour();
+    }
+
+    fn set_filter(&mut self, filter: &crate::access::Filter) {
+        self.filter = filter.clone();
+        self.colour();
+    }
+}
+
+impl UdevData {
+    /// Every screen's gamma (night light's warmth, turned over for inverted colours) and colour matrix (colour
+    /// filters), where the hardware has them.
+    fn colour(&mut self) {
+        use smithay::reexports::drm::control::Device as _;
         for device in self.backends.values() {
             let drm = device.drm_output_manager.device();
             for crtc in device.surfaces.keys() {
-                let Ok(info) = drm.get_crtc(*crtc) else { continue };
-                let n = info.gamma_length() as usize;
-                if n < 2 {
-                    continue;
+                if let Ok(info) = drm.get_crtc(*crtc) {
+                    let n = info.gamma_length() as usize;
+                    if n >= 2 {
+                        let ramp = |k: f64| -> Vec<u16> {
+                            (0..n)
+                                .map(|i| {
+                                    let v = i as f64 / (n - 1) as f64;
+                                    let v = if self.filter.invert { 1.0 - v } else { v };
+                                    (v * k * 65535.0).round() as u16
+                                })
+                                .collect()
+                        };
+                        let (r, g, b) = (ramp(self.warmth[0]), ramp(self.warmth[1]), ramp(self.warmth[2]));
+                        if let Err(err) = drm.set_gamma(*crtc, &r, &g, &b) {
+                            warn!("The screen's gamma couldn't be set: {err}");
+                        }
+                    }
                 }
-                let ramp = |k: f64| -> Vec<u16> {
-                    (0..n).map(|i| (i as f64 / (n - 1) as f64 * k * 65535.0).round() as u16).collect()
+                let ctm = drm.get_properties(*crtc).ok().and_then(|props| {
+                    props.into_iter().find_map(|(h, _)| {
+                        let info = drm.get_property(h).ok()?;
+                        (info.name().to_str() == Ok("CTM")).then_some(h)
+                    })
+                });
+                let Some(ctm) = ctm else {
+                    if self.filter.matrix.is_some() {
+                        warn!("This screen has no colour matrix: colour filters can't be shown on it");
+                    }
+                    continue;
                 };
-                if let Err(err) = drm.set_gamma(*crtc, &ramp(rgb[0]), &ramp(rgb[1]), &ramp(rgb[2])) {
-                    warn!("Night light: the screen's gamma couldn't be set: {err}");
+                let value = match self.filter.matrix {
+                    Some(m) => {
+                        // S31.32 sign-magnitude, row by row (struct drm_color_ctm)
+                        let fixed: [u64; 9] = std::array::from_fn(|i| {
+                            let v = m[i];
+                            ((v.abs() * 4294967296.0) as u64 & !(1 << 63)) | if v < 0.0 { 1 << 63 } else { 0 }
+                        });
+                        match drm.create_property_blob(&fixed) {
+                            Ok(smithay::reexports::drm::control::property::Value::Blob(id)) => id,
+                            _ => continue,
+                        }
+                    }
+                    None => 0,
+                };
+                if let Err(err) = drm.set_property(*crtc, ctm, value) {
+                    warn!("The screen's colour matrix couldn't be set: {err}");
                 }
             }
         }
@@ -346,6 +400,8 @@ pub fn run_udev() {
         debug_flags: DebugFlags::empty(),
         keyboards: Vec::new(),
         pointers: Vec::new(),
+        warmth: [1.0; 3],
+        filter: Default::default(),
     };
     let mut state = HuginnState::init(display, event_loop.handle(), data, true);
 

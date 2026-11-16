@@ -57,6 +57,8 @@ pub enum Request {
     SetPointer(String, String, String, mpsc::Sender<String>),
     /// Settings changed the keyboard's layouts or key repeat
     ReloadInput,
+    /// Settings changed accessibility (colour filters, sticky and bounce keys, Reduce Motion)
+    ReloadAccess,
 }
 
 /// What the compositor tells others over the bus.
@@ -212,6 +214,11 @@ impl Compositor {
             return "The compositor didn't answer.".into();
         }
         rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| "The compositor didn't answer.".into())
+    }
+
+    /// Settings changed accessibility (kaccessrc, kwinrc, kdeglobals): read it again.
+    fn reload_access(&self) {
+        let _ = self.to_loop.send(Request::ReloadAccess);
     }
 
     /// Settings changed the keyboard (kxkbrc, kcminputrc): read it again.

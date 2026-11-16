@@ -59,6 +59,10 @@ pub struct Huginn {
     pub minimised: Vec<(WindowElement, Point<i32, Logical>)>,
     /// Super is down and nothing else has been pressed since (on its release: the start menu).
     pub super_alone: bool,
+    /// Sticky keys and bounce keys (access.rs)
+    pub keys: crate::access::Keys,
+    /// The colour filter in use (access.rs)
+    pub filter: crate::access::Filter,
     /// Alt+Tab in progress: the windows in the order they were in when it began, and where we are.
     pub switching: Option<(Vec<WindowElement>, usize)>,
     /// The session to start once the compositor is listening, and whether it was.
@@ -124,6 +128,7 @@ impl<B: Backend + 'static> HuginnState<B> {
             .expect("can't listen to the bus thread");
         self.huginn.out = Some(dbus::start(to_loop, self.huginn.shared.clone()));
         self.wm_start();
+        self.reload_access();
         self.huginn.shared.touched();
         self.handle
             .insert_source(Timer::from_duration(Duration::from_millis(400)), |_, _, state| {
@@ -190,6 +195,7 @@ impl<B: Backend + 'static> HuginnState<B> {
                 let _ = tx.send(self.backend_data.set_pointer(&sys, &prop, &value));
             }
             Request::ReloadInput => self.reload_input(),
+            Request::ReloadAccess => self.reload_access(),
             Request::Displays(tx) => {
                 let _ = tx.send(self.displays_json());
             }

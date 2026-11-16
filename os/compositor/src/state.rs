@@ -1275,6 +1275,8 @@ pub trait Backend {
     }
     /// Night light: how much red, green and blue every screen shows (1.0 each: off).
     fn set_warmth(&mut self, _rgb: [f64; 3]) {}
+    /// A colour filter over every screen (access.rs).
+    fn set_filter(&mut self, _filter: &crate::access::Filter) {}
     /// Mice and touchpads, as Settings lists them (input.rs).
     fn pointers(&mut self) -> Vec<serde_json::Value> {
         Vec::new()
