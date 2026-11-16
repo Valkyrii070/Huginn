@@ -212,6 +212,7 @@ impl<B: Backend + 'static> HuginnState<B> {
                     left: outputs.len(),
                     parts: Vec::new(),
                     tx,
+                    files: Vec::new(),
                 }));
                 for output in outputs {
                     let geo = self.space.output_geometry(&output).unwrap_or_default();

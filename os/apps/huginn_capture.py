@@ -67,7 +67,7 @@ def own_grab(out_png: str) -> str | None:
         from gi.repository import Gio
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         text = bus.call_sync("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", "Capture",
-                             None, None, 0, 5000, None).unpack()[0]
+                             None, None, 0, 20000, None).unpack()[0]
     except Exception:                                      # noqa: BLE001  (not running: KWin's turn)
         return None
     if not text.startswith("["):                            # the earlier preview compositor: a PNG's path, or ""

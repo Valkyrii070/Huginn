@@ -40,6 +40,8 @@ pub struct Collect {
     pub left: usize,
     pub parts: Vec<String>,
     pub tx: mpsc::Sender<String>,
+    /// the files written, taken away again if no one is waiting any more
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -115,6 +117,7 @@ where
         let part = without.as_ref().and_then(|shot| save(shot).map(|path| (path, shot)));
         let mut c = collect.borrow_mut();
         if let Some((path, shot)) = part {
+            c.files.push(path.clone());
             c.parts.push(format!(
                 "{{\"path\":{:?},\"w\":{},\"h\":{},{}}}",
                 path.to_string_lossy(),
@@ -124,8 +127,10 @@ where
             ));
         }
         c.left = c.left.saturating_sub(1);
-        if c.left == 0 {
-            let _ = c.tx.send(format!("[{}]", c.parts.join(",")));
+        if c.left == 0 && c.tx.send(format!("[{}]", c.parts.join(","))).is_err() {
+            for f in &c.files {
+                let _ = std::fs::remove_file(f);
+            }
         }
     }
 }
@@ -135,11 +140,13 @@ where
     R: Renderer + Offscreen<GlesRenderbuffer> + Bind<GlesRenderbuffer> + ExportMem,
     E: RenderElement<R>,
 {
-    let mode = output.current_mode().ok_or("no mode")?;
     let size = size_of(output).ok_or("no mode")?;
     let mut target: GlesRenderbuffer = renderer.create_buffer(Fourcc::Argb8888, size).map_err(|e| e.to_string())?;
     let mut fb = renderer.bind(&mut target).map_err(|e| e.to_string())?;
-    let mut tracker = OutputDamageTracker::new(mode.size, output.current_scale().fractional_scale(), output.current_transform());
+    // the screen as it is seen (a turned screen the right way up), its first row first: OpenGL keeps rows
+    // bottom up, so the picture is drawn turned over
+    let mut tracker =
+        OutputDamageTracker::new((size.w, size.h), output.current_scale().fractional_scale(), Transform::Flipped180);
     tracker
         .render_output(renderer, &mut fb, 0, elements, clear)
         .map_err(|e| format!("{e:?}"))?;

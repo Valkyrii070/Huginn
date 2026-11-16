@@ -168,7 +168,8 @@ impl Compositor {
         if self.to_loop.send(Request::Capture(tx)).is_err() {
             return String::new();
         }
-        rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default()
+        // a slow computer (or a virtual one) can take a while to draw the screen again
+        rx.recv_timeout(Duration::from_secs(15)).unwrap_or_default()
     }
 
     /// The screens, in kscreen-doctor's JSON (`kscreen-doctor -j`), for Settings › Displays.
