@@ -369,7 +369,8 @@ pub fn run_winit() {
                 })
             });
 
-            // pictures of the screen (capture.rs): drawn again without the cursor
+            // pictures of windows (the dock's cards, closing windows) and of the screen (capture.rs)
+            crate::capture::serve_windows(backend.renderer(), &state.space, &output);
             if crate::capture::wanted(&output) {
                 let renderer = backend.renderer();
                 let (els, clear) = crate::render::output_elements(

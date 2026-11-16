@@ -1096,7 +1096,12 @@ over when the side island would reach them (`GlassWindow.middleX`).
   (Squeekboard), and Reduce Motion (no sliding windows or Overview, no fading in).
 - **Night light** there too: the session daemon reads Settings' night light (kwinrc's [NightColor], as KWin does)
   and sets every screen's gamma through the compositor, easing in and out over half an hour.
-- New windows fade in (160 ms; not with Reduce Motion).
+- New windows fade in (160 ms), and windows closed from Huginn (the close light, Alt+F4, the dock) fade out and
+  shrink a little once they're gone (a picture taken as they're asked to close); not with Reduce Motion.
+- The line between two windows snapped side by side can be dragged: both windows follow it (each keeps at least a
+  fifth of the screen).
+- The dock's window cards show each window live (a small picture every second and a half while they're open,
+  `WindowPicture` on the bus).
 - Icons: the pictures inside the smoked glass are solid now, as macOS and iOS draw theirs (the app's colour with
   white details, a soft shadow, no glow; `STYLE` in make-icons.py). Huginn OS's and the browser's ravens are in the
   same glass, and Calendar's tile shows today's date.

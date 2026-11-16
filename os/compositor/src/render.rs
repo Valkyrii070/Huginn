@@ -24,6 +24,7 @@ use smithay::{
 
 #[cfg(feature = "debug")]
 use crate::drawing::FpsElement;
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use crate::{
     drawing::{CLEAR_COLOR, CLEAR_COLOR_FULLSCREEN, PointerRenderElement},
     look::{Frosted, Look},
@@ -65,6 +66,7 @@ smithay::backend::renderer::element::render_elements! {
     Solid=SolidColorRenderElement,
     Frosted=Frosted<WaylandSurfaceRenderElement<R>>,
     Zoom=crate::look::ZoomElement,
+    Ghost=RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
 }
 
 impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
@@ -80,6 +82,7 @@ impl<R: Look, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
             Self::Solid(arg0) => f.debug_tuple("Solid").field(arg0).finish(),
             Self::Frosted(arg0) => f.debug_tuple("Frosted").field(arg0).finish(),
             Self::Zoom(arg0) => f.debug_tuple("Zoom").field(arg0).finish(),
+            Self::Ghost(arg0) => f.debug_tuple("Ghost").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }
@@ -235,6 +238,52 @@ where
     out
 }
 
+/// Windows that were asked to close, fading out and shrinking a little once they're gone (capture.rs: Ghost).
+fn ghosts<R, E>(renderer: &mut R, space: &Space<WindowElement>, output: &Output) -> Vec<OutputRenderElements<R, E>>
+where
+    R: Look,
+    R::TextureId: Clone + Send + 'static,
+    E: RenderElement<R>,
+{
+    const MS: f64 = 180.0;
+    let geo = space.output_geometry(output).unwrap_or_default();
+    let scale = output.current_scale().fractional_scale();
+    let mapped: Vec<u64> = space.elements().map(crate::huginn::window_id).collect();
+    crate::capture::GHOSTS.with(|g| {
+        let mut g = g.borrow_mut();
+        g.retain_mut(|gh| {
+            if mapped.contains(&gh.id) {
+                // still there (it may be asking whether to save): wait a while, then forget it
+                return gh.asked.elapsed().as_secs() < 30;
+            }
+            let gone = *gh.gone.get_or_insert_with(std::time::Instant::now);
+            gone.elapsed().as_secs_f64() * 1000.0 < MS
+        });
+        g.iter()
+            .filter_map(|gh| {
+                let t = (gh.gone?.elapsed().as_secs_f64() * 1000.0 / MS).min(1.0);
+                let rect = Rectangle::new(gh.at, gh.size);
+                if !geo.overlaps(rect) {
+                    return None;
+                }
+                let loc = (gh.at - geo.loc).to_f64().to_physical(scale);
+                let e = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    loc,
+                    &gh.buffer,
+                    Some(((1.0 - t) * (1.0 - t)) as f32),
+                    None,
+                    Some(gh.size),
+                    Kind::Unspecified,
+                )
+                .ok()?;
+                let middle = (rect.loc - geo.loc + Point::from((rect.size.w / 2, rect.size.h / 2))).to_physical_precise_round(scale);
+                Some(OutputRenderElements::Ghost(RescaleRenderElement::from_element(e, middle, 1.0 - 0.05 * t)))
+            })
+            .collect()
+    })
+}
+
 /// When a window was first drawn: it fades in over its first moments (not with Reduce Motion).
 #[derive(Default)]
 pub struct Opened(pub std::cell::Cell<Option<std::time::Instant>>);
@@ -329,6 +378,7 @@ where
             )));
         }
 
+        output_render_elements.extend(ghosts(renderer, space, output));
         if show_window_preview && !view.active() && space.elements_for_output(output).count() > 0 {
             output_render_elements.extend(space_preview_elements(renderer, space, output));
         }

@@ -849,6 +849,47 @@ for (var i = 0; i < all.length; i++) {{ var win = all[i]; if (String(win.interna
         except GLib.Error:
             return None
 
+    # ---------------------------------------------------------------- pictures of windows, for the dock's cards
+    picturesChanged = Signal()
+    windowPictures = Property("QVariantMap", lambda self: getattr(self, "_pictures", {}), notify=picturesChanged)
+
+    @Slot("QVariantList")
+    def refreshPictures(self, ids: list) -> None:
+        """Ask Huginn's own compositor for a small picture of each window (KWin: none; the cards stay plain). They
+        come back one by one, as PNGs in $XDG_RUNTIME_DIR, into windowPictures (id -> file URL)."""
+        if not self.sb or not self._own_compositor():
+            return
+        if not hasattr(self, "_pictures"):
+            self._pictures, self._picture_n = {}, 0
+        run = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+        for wid in ids:
+            wid = str(wid)
+
+            def done(bus, res, wid=wid):
+                try:
+                    text = bus.call_finish(res).unpack()[0]
+                    info = json.loads(text) if text else None
+                except (GLib.Error, ValueError):
+                    info = None
+                if not info:
+                    return
+                from PySide6.QtGui import QImage
+                try:
+                    data = Path(info["path"]).read_bytes()
+                    Path(info["path"]).unlink(missing_ok=True)
+                except OSError:
+                    return
+                head, _, pixels = data.partition(b"\n")
+                w, h, stride = (int(x) for x in head.split()[1:4])
+                image = QImage(pixels, w, h, stride, QImage.Format_ARGB32_Premultiplied).copy()
+                self._picture_n += 1
+                out = run / f"huginn-card-{os.getpid()}-{wid}-{self._picture_n % 2}.png"
+                if image.save(str(out), "PNG"):
+                    self._pictures = dict(self._pictures, **{wid: f"file://{out}?{self._picture_n}"})
+                    self.picturesChanged.emit()
+            self.sb.call("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", "WindowPicture",
+                         GLib.Variant("(s)", (wid,)), GLib.VariantType("(s)"), 0, 6000, None, done)
+
     @Slot("QVariantMap", result=bool)
     def activateApp(self, app: dict) -> bool:
         """A running app's window comes forward (un-minimised) instead of the app starting again. Huginn's own

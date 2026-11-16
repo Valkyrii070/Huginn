@@ -73,6 +73,9 @@ fn act_at(loc: Option<&Point<f64, Logical>>) -> Option<Act> {
 }
 
 fn close(window: &WindowElement) {
+    if !crate::access::still() {
+        crate::capture::ask_window(crate::huginn::window_id(window), crate::capture::WindowAsk::Ghost);
+    }
     match window.0.underlying_surface() {
         WindowSurface::Wayland(w) => w.send_close(),
         #[cfg(feature = "xwayland")]

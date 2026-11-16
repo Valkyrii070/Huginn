@@ -252,6 +252,16 @@ impl<BackendData: Backend> HuginnState<BackendData> {
 
         let state = wl_pointer::ButtonState::from(evt.state());
 
+        // the line between two snapped windows: dragged (wm.rs)
+        if self.huginn.wm.divider.is_some() {
+            if wl_pointer::ButtonState::Released == state {
+                self.divider_end();
+            }
+            return;
+        }
+        if wl_pointer::ButtonState::Pressed == state && button == 0x110 && !self.is_locked() && self.divider_start(self.pointer.current_location()) {
+            return;
+        }
         if wl_pointer::ButtonState::Pressed == state {
             self.huginn.super_alone = false;
             self.huginn.alt_alone = false;
@@ -748,6 +758,12 @@ impl<BackendData: Backend> HuginnState<BackendData> {
         let serial = SCOUNTER.next_serial();
 
         let pointer = self.pointer.clone();
+        if self.huginn.wm.divider.is_some() {
+            self.divider_move(pos);
+            pointer.motion(self, None, &MotionEvent { location: pos, serial, time: evt.time() });
+            pointer.frame(self);
+            return;
+        }
         let under = self.surface_under(pos);
         pointer.motion(
             self,
@@ -900,6 +916,13 @@ impl HuginnState<UdevData> {
 
         pointer_location += delta;
 
+        if self.huginn.wm.divider.is_some() {
+            self.divider_move(pointer_location);
+            pointer.motion(self, None, &MotionEvent { location: pointer_location, serial, time: evt.time() });
+            pointer.frame(self);
+            return;
+        }
+
         let new_under = self.surface_under(pointer_location);
 
         // If confined, don't move pointer if it would go outside surface
@@ -965,6 +988,12 @@ impl HuginnState<UdevData> {
         pointer_location = self.clamp_coords(pointer_location);
 
         let pointer = self.pointer.clone();
+        if self.huginn.wm.divider.is_some() {
+            self.divider_move(pointer_location);
+            pointer.motion(self, None, &MotionEvent { location: pointer_location, serial, time: evt.time() });
+            pointer.frame(self);
+            return;
+        }
         let under = self.surface_under(pointer_location);
 
         pointer.motion(

@@ -16,6 +16,11 @@ Glass {
     popup: true; dense: true; radius: 22
     width: Math.max(320, cards.width + 28); height: column.height + 28
     HoverHandler { onHoveredChanged: isle.hoverChanged(hovered) }
+    // the cards' pictures, kept fresh while they're shown
+    Timer {
+        running: isle.visible && isle.wins.length > 0; repeat: true; interval: 1500; triggeredOnStart: true
+        onTriggered: Status.refreshPictures(isle.wins.filter(function (w) { return !w.minimised }).map(function (w) { return String(w.id) }))
+    }
     Column {
         id: column
         x: 14; y: 14; spacing: 12
@@ -49,7 +54,7 @@ Glass {
                         width: isle.cardW; height: isle.cardH
                         scale: cardHit.pressed ? Theme.t.pressScale : 1
                         Behavior on scale { NumberAnimation { duration: 90 } }
-                        Rectangle {   // the window, drawn plainly: its app's colour and icon (a picture of it comes with Huginn's compositor)
+                        Rectangle {   // the window: its app's colour and icon, under a live picture of it on Huginn's own compositor
                             anchors.fill: parent; radius: 10; clip: true
                             color: Theme.t.dark ? "#1C2026" : "#F2F4F7"
                             opacity: card.modelData.minimised ? 0.45 : 1
@@ -58,6 +63,13 @@ Glass {
                             Rectangle { x: 1; y: 1; width: parent.width - 2; height: 18; radius: 9; color: Qt.rgba(isle.tone.r, isle.tone.g, isle.tone.b, 0.22)
                                 Label { x: 8; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 16; text: card.modelData.title; elide: Text.ElideRight; font.pixelSize: 10; secondary: true } }
                             AppIcon { anchors.centerIn: parent; anchors.verticalCenterOffset: 8; size: 34; opacity: 0.85; name: isle.app ? isle.app.name : ""; glyph: isle.app ? isle.app.glyph : ""; image: isle.app ? isle.app.image : ""; own: isle.app ? isle.app.own || "" : ""; web: isle.app ? isle.app.web : false }
+                            // the window itself, live, on Huginn's own compositor (Status.refreshPictures)
+                            Image {
+                                anchors.fill: parent; anchors.margins: 3
+                                source: Status.windowPictures[String(card.modelData.id)] || ""
+                                visible: status === Image.Ready && !card.modelData.minimised
+                                fillMode: Image.PreserveAspectFit; smooth: true; mipmap: true; cache: false; asynchronous: true
+                            }
                         }
                         Rectangle {
                             visible: card.modelData.minimised; anchors.centerIn: parent; anchors.verticalCenterOffset: 8

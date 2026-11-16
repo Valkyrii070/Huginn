@@ -51,6 +51,8 @@ pub enum Request {
     ConfigureDisplay(String, String, mpsc::Sender<String>),
     /// Night light: the colour temperature, in kelvin (6500: off)
     NightLight(u32),
+    /// A small picture of one window, for the dock's window cards: JSON {"path", "w", "h"}, or ""
+    WindowPicture(u64, mpsc::Sender<String>),
     /// Mice and touchpads (input.rs): JSON
     Pointers(mpsc::Sender<String>),
     /// One setting on one of them: device, setting, value (JSON): "" when done, else why not
@@ -225,6 +227,17 @@ impl Compositor {
     /// Settings changed the keyboard (kxkbrc, kcminputrc): read it again.
     fn reload_input(&self) {
         let _ = self.to_loop.send(Request::ReloadInput);
+    }
+
+    /// A small picture of one window (by the id the window list gives it), for the dock's window cards: JSON
+    /// {"path": a raw picture in $XDG_RUNTIME_DIR, "w", "h"}, or "" (no such window, or it couldn't be drawn).
+    fn window_picture(&self, id: &str) -> String {
+        let Ok(id) = id.parse::<u64>() else { return String::new() };
+        let (tx, rx) = mpsc::channel();
+        if self.to_loop.send(Request::WindowPicture(id, tx)).is_err() {
+            return String::new();
+        }
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
     }
 
     /// The windows, as JSON: {"current": space, "spaces": [names], "windows": [{"id", "app", "title", "minimised",

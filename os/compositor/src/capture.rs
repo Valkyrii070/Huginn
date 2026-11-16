@@ -141,12 +141,25 @@ where
     E: RenderElement<R>,
 {
     let size = size_of(output).ok_or("no mode")?;
+    draw_at(renderer, size, output.current_scale().fractional_scale(), elements, clear)
+}
+
+/// Elements drawn into a buffer of their own, `size` pixels, and copied out: the first row first (OpenGL keeps
+/// rows bottom up, so the picture is drawn turned over).
+fn draw_at<R, E>(
+    renderer: &mut R,
+    size: Size<i32, smithay::utils::Buffer>,
+    scale: f64,
+    elements: &[E],
+    clear: Color32F,
+) -> Result<Shot, String>
+where
+    R: Renderer + Offscreen<GlesRenderbuffer> + Bind<GlesRenderbuffer> + ExportMem,
+    E: RenderElement<R>,
+{
     let mut target: GlesRenderbuffer = renderer.create_buffer(Fourcc::Argb8888, size).map_err(|e| e.to_string())?;
     let mut fb = renderer.bind(&mut target).map_err(|e| e.to_string())?;
-    // the screen as it is seen (a turned screen the right way up), its first row first: OpenGL keeps rows
-    // bottom up, so the picture is drawn turned over
-    let mut tracker =
-        OutputDamageTracker::new((size.w, size.h), output.current_scale().fractional_scale(), Transform::Flipped180);
+    let mut tracker = OutputDamageTracker::new((size.w, size.h), scale, Transform::Flipped180);
     tracker
         .render_output(renderer, &mut fb, 0, elements, clear)
         .map_err(|e| format!("{e:?}"))?;
@@ -162,6 +175,109 @@ where
         out.extend_from_slice(bytes.get(row * stride..(row + 1) * stride).ok_or("short picture")?);
     }
     Ok(Shot { w: size.w, h: size.h, stride, bytes: out })
+}
+
+// ------------------------------------------------------------------------------------------------- one window
+/// What a picture of one window is for.
+pub enum WindowAsk {
+    /// a small picture for the shell's window cards (the dock): its file, as JSON
+    Card(mpsc::Sender<String>),
+    /// the window as it was when it was asked to close: it fades out once it's gone
+    Ghost,
+}
+
+/// A closed window fading out: its last picture, where it was (desktop, logical), since when it's been gone.
+pub struct Ghost {
+    pub id: u64,
+    pub buffer: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub at: smithay::utils::Point<i32, smithay::utils::Logical>,
+    pub size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    pub gone: Option<std::time::Instant>,
+    pub asked: std::time::Instant,
+}
+
+thread_local! {
+    static WINDOWS: RefCell<Vec<(u64, WindowAsk)>> = const { RefCell::new(Vec::new()) };
+    pub static GHOSTS: RefCell<Vec<Ghost>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn ask_window(id: u64, ask: WindowAsk) {
+    WINDOWS.with(|w| w.borrow_mut().push((id, ask)));
+}
+
+/// Pictures of windows on `output` that were asked for: drawn alone, at the output's scale (cards: smaller).
+pub fn serve_windows<R>(renderer: &mut R, space: &smithay::desktop::Space<crate::shell::WindowElement>, output: &Output)
+where
+    R: crate::look::Look + Offscreen<GlesRenderbuffer> + Bind<GlesRenderbuffer> + ExportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    use smithay::{backend::renderer::element::AsRenderElements, desktop::space::SpaceElement};
+    if WINDOWS.with(|w| w.borrow().is_empty()) {
+        return;
+    }
+    let asks = WINDOWS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    let mut later = Vec::new();
+    for (id, ask) in asks {
+        let Some(window) = space.elements().find(|w| crate::huginn::window_id(w) == id) else {
+            if let WindowAsk::Card(tx) = ask {
+                let _ = tx.send(String::new());
+            }
+            continue;
+        };
+        if !space.outputs_for_element(window).contains(output) {
+            later.push((id, ask));
+            continue;
+        }
+        let bbox = window.bbox();
+        let Some(loc) = space.element_location(window) else { continue };
+        let out_scale = output.current_scale().fractional_scale();
+        let scale = match ask {
+            WindowAsk::Card(_) => (360.0 / bbox.size.w.max(1) as f64).min(1.0) * out_scale,
+            WindowAsk::Ghost => out_scale,
+        };
+        let size: Size<i32, smithay::utils::Buffer> =
+            ((bbox.size.w as f64 * scale).ceil() as i32, (bbox.size.h as f64 * scale).ceil() as i32).into();
+        if size.w < 2 || size.h < 2 {
+            continue;
+        }
+        let at = smithay::utils::Point::<i32, smithay::utils::Physical>::from((
+            (-(bbox.loc.x as f64) * scale).round() as i32,
+            (-(bbox.loc.y as f64) * scale).round() as i32,
+        ));
+        let elements: Vec<crate::shell::WindowRenderElement<R>> =
+            AsRenderElements::<R>::render_elements(window, renderer, at, scale.into(), 1.0);
+        let shot = match draw_at(renderer, size, scale, &elements, [0.0, 0.0, 0.0, 0.0].into()) {
+            Ok(shot) => shot,
+            Err(err) => {
+                warn!("A picture of a window failed: {err}");
+                if let WindowAsk::Card(tx) = ask {
+                    let _ = tx.send(String::new());
+                }
+                continue;
+            }
+        };
+        match ask {
+            WindowAsk::Card(tx) => {
+                let answer = save(&shot).map_or(String::new(), |p| {
+                    format!("{{\"path\":{:?},\"w\":{},\"h\":{}}}", p.to_string_lossy(), shot.w, shot.h)
+                });
+                let _ = tx.send(answer);
+            }
+            WindowAsk::Ghost => {
+                let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+                    &shot.bytes,
+                    Fourcc::Argb8888,
+                    (shot.w, shot.h),
+                    1,
+                    Transform::Normal,
+                    None,
+                );
+                let now = std::time::Instant::now();
+                GHOSTS.with(|g| g.borrow_mut().push(Ghost { id, buffer, at: loc + bbox.loc, size: bbox.size, gone: None, asked: now }));
+            }
+        }
+    }
+    WINDOWS.with(|w| w.borrow_mut().extend(later));
 }
 
 /// Copy a picture into the app's buffer (shared memory, Argb8888 or Xrgb8888, the size we asked for).

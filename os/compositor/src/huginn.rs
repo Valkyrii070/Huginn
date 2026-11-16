@@ -200,6 +200,7 @@ impl<B: Backend + 'static> HuginnState<B> {
                 let _ = tx.send(self.backend_data.set_pointer(&sys, &prop, &value));
             }
             Request::ReloadInput => self.reload_input(),
+            Request::WindowPicture(id, tx) => crate::capture::ask_window(id, crate::capture::WindowAsk::Card(tx)),
             Request::ReloadAccess => self.reload_access(),
             Request::Displays(tx) => {
                 let _ = tx.send(self.displays_json());
@@ -383,6 +384,10 @@ impl<B: Backend + 'static> HuginnState<B> {
     }
 
     pub fn close_window(window: &WindowElement) {
+        // it fades out once it's gone (capture.rs: a picture of it now)
+        if !crate::access::still() {
+            crate::capture::ask_window(window_id(window), crate::capture::WindowAsk::Ghost);
+        }
         #[cfg(feature = "xwayland")]
         if let Some(x) = window.0.x11_surface() {
             let _ = x.close();

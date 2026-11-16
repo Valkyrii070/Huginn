@@ -151,6 +151,8 @@ pub struct Wm {
     pub glow: [f32; 4],
     pub gaps: bool,
     pub switcher_shown: bool,
+    /// The line between two windows snapped side by side, being dragged: the left one, the right one.
+    pub divider: Option<(WindowElement, WindowElement)>,
 }
 
 /// What render.rs draws differently this frame.
@@ -765,6 +767,55 @@ impl<B: Backend + 'static> HuginnState<B> {
                 }
                 self.report_windows_now();
             }
+        }
+    }
+
+    /// The line between two windows snapped side by side, under `at` (in the gap, give or take a little): the left
+    /// window and the right one.
+    pub fn divider_at(&self, at: Point<f64, Logical>) -> Option<(WindowElement, WindowElement)> {
+        self.space.elements().find_map(|w| {
+            let s = *self.huginn.wm.snapped.get(&window_id(w))?;
+            if !matches!(s, Snap::Left | Snap::LeftThird | Snap::LeftTwoThirds) {
+                return None;
+            }
+            let r = self.partner_of(w)?;
+            let (lg, rg) = (self.space.element_geometry(w)?, self.space.element_geometry(&r)?);
+            let (x0, x1) = ((lg.loc.x + lg.size.w) as f64 - 4.0, rg.loc.x as f64 + 4.0);
+            let inside = at.x >= x0 && at.x <= x1 && at.y >= lg.loc.y.max(rg.loc.y) as f64 && at.y <= (lg.loc.y + lg.size.h) as f64;
+            inside.then(|| (w.clone(), r))
+        })
+    }
+
+    /// A press on that line: dragging it starts (true), and nothing else gets the press.
+    pub fn divider_start(&mut self, at: Point<f64, Logical>) -> bool {
+        self.huginn.wm.divider = self.divider_at(at);
+        self.huginn.wm.divider.is_some()
+    }
+
+    /// Dragging the line: the two windows share the screen where it is now (each at least a fifth of it).
+    pub fn divider_move(&mut self, at: Point<f64, Logical>) {
+        let Some((left, right)) = self.huginn.wm.divider.clone() else { return };
+        let Some(output) = self.output_of(&left) else { return };
+        let a = self.snap_rect(&output, Snap::Max);
+        let g = if self.huginn.wm.gaps { GAP } else { 0 };
+        let split = (at.x as i32).clamp(a.loc.x + a.size.w / 5, a.loc.x + a.size.w * 4 / 5);
+        let l = Rectangle::new(a.loc, (split - g / 2 - a.loc.x, a.size.h).into());
+        let r = Rectangle::new((split + (g - g / 2), a.loc.y).into(), (a.loc.x + a.size.w - split - (g - g / 2), a.size.h).into());
+        for (w, rect) in [(left, l), (right, r)] {
+            self.configure_size(&w, rect.size, true);
+            let offset = w.geometry().loc;
+            self.space.map_element(w.clone(), rect.loc - offset, false);
+            #[cfg(feature = "xwayland")]
+            if let Some(x) = w.0.x11_surface() {
+                let _ = x.configure(rect);
+            }
+        }
+    }
+
+    pub fn divider_end(&mut self) {
+        if let Some((l, r)) = self.huginn.wm.divider.take() {
+            self.tell_x11_where(&l);
+            self.tell_x11_where(&r);
         }
     }
 
