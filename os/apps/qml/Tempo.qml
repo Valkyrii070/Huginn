@@ -23,6 +23,7 @@ GlassWindow {
     property bool duckMenu: false
     property bool tempoOn: (Backend.song.tempoChanges || []).length > 0 || (Backend.song.sigChanges || []).length > 0   // the Tempo lane
     property int tempoSel: -1                     // the tempo change picked in it
+    property string ccKind: "velocity"            // the piano roll's lane: velocity | sustain | bend | mod
     readonly property int tracksTop: 98 + (tempoOn ? 54 : 0)
     property string pluginBrowser: ""             // "effect" while the plugin browser is open
     property string pluginCat: "All"
@@ -435,7 +436,7 @@ GlassWindow {
                 Seg { text: "Quantize"; onClicked: Backend.quantize(win.reg.id, win.grid, 1.0) }
                 Seg { text: "−12"; onClicked: Backend.transpose(win.reg.id, -12) }
                 Seg { text: "+12"; onClicked: Backend.transpose(win.reg.id, 12) } }
-            Flickable { id: rollView; visible: !!win.reg.id && win.reg.trackKind !== "audio"; anchors.fill: parent; clip: true; boundsBehavior: Flickable.StopAtBounds
+            Flickable { id: rollView; visible: !!win.reg.id && win.reg.trackKind !== "audio"; anchors { fill: parent; bottomMargin: 78 } clip: true; boundsBehavior: Flickable.StopAtBounds
                 contentWidth: 50 + (win.reg.length || 16) * roll.bpp + 40; contentHeight: (roll.topPitch - 24) * roll.nh
                 Component.onCompleted: contentY = (roll.topPitch - 76) * roll.nh
                 // the keys down the left
@@ -480,6 +481,16 @@ GlassWindow {
             contentWidth: regionRow.width; boundsBehavior: Flickable.StopAtBounds
             Label { visible: !win.reg.id; anchors.centerIn: parent; secondary: true; text: "Pick a region to shape it here." }
             Row { id: regionRow; visible: !!win.reg.id; spacing: 18; height: parent.height
+                // the groove: swing and humanising, as it plays (the notes stay where they were written)
+                Column { objectName: "groovePane"; visible: !!win.reg.id && win.reg.kind !== "audio"; width: 220; spacing: 6
+                    readonly property var g: win.reg.groove || ({})
+                    Heading { text: "GROOVE" }
+                    Label { text: "Swing  " + Math.round(parent.g.swing || 50) + " %" + ((parent.g.swing || 50) > 64 && (parent.g.swing || 50) < 69 ? "  (triplets)" : (parent.g.swing || 50) <= 50 ? "  (straight)" : ""); font.pixelSize: 11 }
+                    Meter { objectName: "swingMeter"; width: 210; interactive: true; value: ((parent.g.swing || 50) - 50) / 25; onMoved: function (v) { Backend.setGroove(win.reg.id, "swing", 50 + v * 25) } }
+                    Chips { width: 210; items: [["0.5", "Swing 1/8"], ["0.25", "Swing 1/16"]]; current: String(parent.g.swingGrid || 0.5); onChosen: function (id) { Backend.setGroove(win.reg.id, "swingGrid", parseFloat(id)) } }
+                    Label { text: "Humanize  " + Math.round((parent.g.humanize || 0) * 100) + " %"; font.pixelSize: 11; topPadding: 4 }
+                    Meter { objectName: "humanMeter"; width: 210; interactive: true; value: parent.g.humanize || 0; onMoved: function (v) { Backend.setGroove(win.reg.id, "humanize", v) } }
+                    Label { width: 210; wrapMode: Text.WordWrap; font.pixelSize: 10; secondary: true; text: "Played this way; the notes stay where you wrote them." } }
                 Column { visible: win.reg.kind === "audio"; width: 230; spacing: 6
                     Heading { text: "THE RECORDING" }
                     Label { text: "Gain  " + ((win.reg.gain || 0) > 0 ? "+" : "") + (win.reg.gain || 0).toFixed(1) + " dB"; font.pixelSize: 11 }
@@ -539,6 +550,44 @@ GlassWindow {
                     Heading { text: "TAKES" }
                     Label { width: parent.width; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 11
                         text: "Turn the cycle on (C) and record: every time round becomes a take. Pick the best one, or comp the best parts of each." } } } }
+
+        // the piano roll's lane: each note's strength, or a controller drawn over the region
+        Item { id: ccLane; objectName: "ccLane"; visible: win.benchKind === "roll" && !!win.reg.id && win.reg.trackKind !== "audio"; x: 12; width: parent.width - 24; height: 72
+            y: parent.height - 10 - height
+            readonly property var pts: ((win.reg.cc || {})[win.ccKind]) || []
+            function vy(v) { return win.ccKind === "bend" ? (1 - (v + 1) / 2) * (height - 4) + 2 : (1 - v) * (height - 4) + 2 }
+            function vOf(y) { var f = 1 - Math.max(0, Math.min(1, (y - 2) / (height - 4))); return win.ccKind === "bend" ? f * 2 - 1 : f }
+            Column { x: 0; width: 48; spacing: 2
+                Repeater { model: [["velocity", "Velocity"], ["sustain", "Sustain"], ["bend", "Bend"], ["mod", "Mod"]]
+                    Pressable { required property var modelData; width: 48; height: 16; radius: 5; color: win.ccKind === modelData[0] ? Qt.rgba(win.hot.r, win.hot.g, win.hot.b, 0.3) : hovered ? Theme.t.hover : "transparent"
+                        onClicked: win.ccKind = modelData[0]
+                        Label { anchors.centerIn: parent; text: modelData[1]; font.pixelSize: 9 } } } }
+            Rectangle { id: ccArea; x: 50; width: parent.width - 50; height: parent.height; radius: 8; clip: true; color: Theme.t.dark ? "#0AFFFFFF" : "#06000000"
+                readonly property real ox: -rollView.contentX                      // follows the roll as it scrolls
+                Rectangle { visible: win.ccKind === "bend"; y: parent.height / 2; width: parent.width; height: 1; color: Theme.t.text; opacity: 0.15 }
+                // velocity: a bar for each note; drag one up or down
+                Repeater { model: win.ccKind === "velocity" ? (win.reg.notes || []) : []
+                    Rectangle { required property var modelData; x: ccArea.ox + modelData.t * roll.bpp; width: 4; radius: 2; color: win.hot
+                        height: (modelData.v / 127) * (ccArea.height - 6); y: ccArea.height - height - 2
+                        MouseArea { anchors.fill: parent; anchors.margins: -4; anchors.topMargin: -(ccArea.height - parent.height); preventStealing: true; cursorShape: Qt.SizeVerCursor
+                            onPositionChanged: function (m) { var p = mapToItem(ccArea, m.x, m.y); Backend.setVelocity(win.reg.id, parent.modelData.i, Math.round((1 - p.y / ccArea.height) * 127)) } } } }
+                // a controller: the line, its points; click or drag to draw
+                Canvas { id: ccCurve; anchors.fill: parent; visible: win.ccKind !== "velocity"
+                    property var p: ccLane.pts
+                    onPChanged: requestPaint()
+                    Connections { target: rollView; function onContentXChanged() { ccCurve.requestPaint() } }
+                    onPaint: { var c = getContext("2d"); c.reset(); if (!p.length) return; c.lineWidth = 2; c.strokeStyle = win.hot; c.beginPath()
+                        var step = win.ccKind === "sustain"
+                        for (var i = 0; i < p.length; i++) { var x = ccArea.ox + p[i][0] * roll.bpp, y = ccLane.vy(p[i][1])
+                            if (i === 0) { c.moveTo(0, y); c.lineTo(x, y) } else if (step) { c.lineTo(x, ccLane.vy(p[i - 1][1])); c.lineTo(x, y) } else c.lineTo(x, y) }
+                        c.lineTo(width, ccLane.vy(p[p.length - 1][1])); c.stroke()
+                        c.fillStyle = win.hot; for (var j = 0; j < p.length; j++) { c.beginPath(); c.arc(ccArea.ox + p[j][0] * roll.bpp, ccLane.vy(p[j][1]), 3.5, 0, Math.PI * 2); c.fill() } } }
+                MouseArea { anchors.fill: parent; visible: win.ccKind !== "velocity"; preventStealing: true
+                    function draw(m) { var t = Math.round((m.x - ccArea.ox) / roll.bpp / (win.grid / 2)) * (win.grid / 2); Backend.drawControl(win.reg.id, win.ccKind, t, ccLane.vOf(m.y)) }
+                    onPressed: function (m) { draw(m) } onPositionChanged: function (m) { draw(m) } }
+                Label { visible: win.ccKind !== "velocity" && ccLane.pts.length === 0; anchors.centerIn: parent; font.pixelSize: 10; secondary: true
+                    text: win.ccKind === "sustain" ? "Click high to hold the pedal down, low to let it up" : win.ccKind === "bend" ? "Draw the bend: the middle is in tune, the top two semitones up" : "Draw the mod wheel: vibrato" }
+                Seg { visible: win.ccKind !== "velocity" && ccLane.pts.length > 0; anchors { right: parent.right; top: parent.top; margins: 4 } text: "Clear"; onClicked: Backend.clearControl(win.reg.id, win.ccKind) } } }
 
         // ---- the drum grid
         Item { id: drumGrid; objectName: "drumGrid"; visible: win.benchKind === "drums"; x: 12; y: 46; width: parent.width - 24; height: parent.height - 56

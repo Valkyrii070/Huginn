@@ -633,6 +633,18 @@ Four apps are being taken, round by round, to the level of the professional tool
     and MIDI keeping a jump, a glide and a signature change. On screen: the lane, adding a change, dragging it to
     117, Glide, a 3/4 bar from bar 6 with the ruler, the lane's chip and the display following.
 
+- *Groove*: a region's swing (50 % straight to 75 %, 66 % for triplets, on eighths or sixteenths) and humanizing
+  (timing and strength a little off, the same each time), as it plays: the notes stay where they were written
+  (Region › Groove).
+- *Controllers*: a lane under the piano roll for each note's strength (drag its bar) and for the sustain pedal,
+  pitch bend (two semitones either way) and the mod wheel, drawn over the region. A plugin instrument gets them as
+  MIDI (pitch bend every 10 ms along a drawn line); Tempo's own instruments hold notes while the pedal is down and
+  bend and shake (vibrato, 5.5 Hz) each note by playing it faster and slower, as samplers do.
+  - Tested (9 checks): swung eighths a third of an eighth late at 66.7 %, humanizing a little off and the same each
+    time, the pedal holding a short note, a full bend taking Tempo's organ from 440 to 493.8 Hz and Calf's synth the
+    same over MIDI, a drawn bend gliding, the mod wheel's vibrato. On screen: notes' strength bars and a drawn bend.
+  - Not yet: controllers in MIDI files, and on the live keyboard.
+
 ## From power-on to the desktop
 
 Every screen between pressing the power button and the desktop is now Huginn's own, and they flow into each other.

@@ -599,9 +599,9 @@ class Effect:
             part.close()
 
 
-def render_notes(uri: str, params: dict, notes: list, seconds: float, tail: float = 2.0) -> np.ndarray:
+def render_notes(uri: str, params: dict, notes: list, seconds: float, tail: float = 2.0, controls: list = None) -> np.ndarray:
     """An instrument playing notes ([start s, length s, pitch, velocity]) from silence: stereo float32, with its tail
-    (cut where it has died away)."""
+    (cut where it has died away). `controls`: other MIDI to send, [(seconds, message)] (pedal, bends, mod wheel)."""
     inst = _make(uri, params)
     if inst is None:
         return np.zeros((int(seconds * SR), 2), np.float32)
@@ -611,6 +611,8 @@ def render_notes(uri: str, params: dict, notes: list, seconds: float, tail: floa
             on = max(0, int(start * SR))
             evs.append((on, 1, bytes([0x90, int(pitch) & 127, max(1, min(127, int(vel)))])))
             evs.append((on + max(1, int(length * SR)), 0, bytes([0x80, int(pitch) & 127, 0])))
+        for at, msg in controls or []:                # controllers before notes at the same moment
+            evs.append((max(0, int(at * SR)), -1, bytes(msg)))
         evs.sort(key=lambda e: (e[0], e[1]))           # at the same moment, a note ends before the next begins
         total = int((seconds + tail) * SR)
         out = np.zeros((total, 2), np.float32)

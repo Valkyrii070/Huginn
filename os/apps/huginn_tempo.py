@@ -1797,6 +1797,54 @@ class Tempo(QObject):
             n["t"] = round(n["t"] + (q - n["t"]) * max(0.0, min(1.0, strength)), 4)
         self._keep()
 
+    # ---------------------------------------------------------------- groove and controllers
+    @Slot(str, str, float)
+    def setGroove(self, rid: str, key: str, value: float) -> None:
+        """A region's swing (50–75 %), the grid it swings (1/8 or 1/16) and how human it plays (0–1), as it plays."""
+        r = self._r(rid)
+        if r is None or r.get("kind") == "audio" or key not in ("swing", "swingGrid", "humanize"):
+            return
+        self._before(("groove", rid, key))
+        g = r.setdefault("groove", {})
+        if key == "swing":
+            g["swing"] = round(max(50.0, min(75.0, float(value))), 1)
+        elif key == "swingGrid":
+            g["swingGrid"] = 0.25 if float(value) < 0.4 else 0.5
+        else:
+            g["humanize"] = round(max(0.0, min(1.0, float(value))), 2)
+        self._keep()
+
+    @Slot(str, str, float, float)
+    def drawControl(self, rid: str, kind: str, t: float, value: float) -> None:
+        """A point of a controller drawn in a region (sustain: down or up; bend: −1 to 1; mod wheel: 0 to 1), replacing
+        one close by."""
+        r = self._r(rid)
+        if r is None or r.get("kind") == "audio" or kind not in ("sustain", "bend", "mod"):
+            return
+        t = round(max(0.0, min(float(r.get("length", 4)), float(t))), 4)
+        v = (1.0 if value > 0.5 else 0.0) if kind == "sustain" else round(max(-1.0 if kind == "bend" else 0.0, min(1.0, float(value))), 3)
+        self._before(("cc", rid, kind))
+        pts = [p for p in (r.setdefault("cc", {}).get(kind) or []) if abs(p[0] - t) > 1 / 64]
+        pts.append([t, v])
+        r["cc"][kind] = sorted(pts)
+        self._keep()
+
+    @Slot(str, str)
+    def clearControl(self, rid: str, kind: str) -> None:
+        r = self._r(rid)
+        if r is not None and (r.get("cc") or {}).get(kind):
+            self._before()
+            r["cc"].pop(kind)
+            self._keep()
+
+    @Slot(str, int, int)
+    def setVelocity(self, rid: str, index: int, vel: int) -> None:
+        r, notes = self._notes(rid)
+        if notes is not None and 0 <= index < len(notes):
+            self._before(("vel", rid, index))
+            notes[index]["v"] = max(1, min(127, int(vel)))
+            self._keep()
+
     @Slot(str, int)
     def transpose(self, rid: str, semis: int) -> None:
         self._before()

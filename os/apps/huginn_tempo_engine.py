@@ -18,6 +18,9 @@
                     (a track ducking under another, the kick pushing the bass down)
     sampler         any sound as an instrument across the keys (its pitch heard), and sounds of your own on drum pads
     MIDI effects    an arpeggiator and chord trigger in front of an instrument
+    groove          swing and humanising, a region's own, as it plays (its notes stay where they were written)
+    controllers     sustain pedal, pitch bend and mod wheel drawn in a region: to a plugin instrument as MIDI; Tempo's
+                    own instruments hold notes on the pedal and bend and shake each note's playback, as samplers do
     plugins         LV2 effects and instruments installed on the computer (huginn_tempo_lv2): an effect like any other
                     on a track, a stack or the master; an instrument drawn a region at a time, with its own tail
     files           WAV, FLAC, MP3, Ogg and AAC out (and stems); Standard MIDI Files in and out
@@ -757,7 +760,124 @@ _REGIONS = {}
 
 
 def region_key(region: dict, inst: dict, tempo: float, extra=None) -> str:
-    return hashlib.sha1(json.dumps([region.get("notes"), region.get("length"), inst, tempo, region.get("kind"), extra], sort_keys=True).encode()).hexdigest()
+    return hashlib.sha1(json.dumps([region.get("notes"), region.get("length"), inst, tempo, region.get("kind"), extra,
+                                    region.get("groove"), region.get("cc"), region.get("id") if (region.get("groove") or {}).get("humanize") else None],
+                                   sort_keys=True).encode()).hexdigest()
+
+
+# ---- groove and controllers
+BEND_RANGE = 2.0                                      # semitones a full pitch bend goes, as on most keyboards
+VIBRATO = (5.5, 0.6)                                  # the mod wheel's vibrato at full: Hz, semitones
+
+
+def groove_notes(notes: list, region: dict) -> list:
+    """A region's notes as its groove plays them: swing (the off-beats of the grid late: 50% straight, 66% triplets,
+    75% dotted) and humanising (timing and strength a little off, the same each time it plays)."""
+    g = region.get("groove") or {}
+    pct = max(50.0, min(75.0, float(g.get("swing", 50))))
+    grid = float(g.get("swingGrid", 0.5))
+    hum = max(0.0, min(1.0, float(g.get("humanize", 0))))
+    if pct <= 50.01 and hum <= 0:
+        return notes
+    import random
+    rnd = random.Random(f"{region.get('id', '')}:{g.get('seed', 0)}")
+    out = []
+    for n in notes:
+        n = dict(n)
+        t = float(n["t"])
+        k = round(t / grid)
+        if pct > 50.01 and k % 2 == 1 and abs(t - k * grid) < grid * 0.12:
+            t += grid * (2 * pct / 100 - 1)
+        if hum > 0:
+            t += rnd.gauss(0, 0.022 * hum)
+            n["v"] = int(max(1, min(127, int(n.get("v", 100)) + rnd.gauss(0, 9 * hum))))
+        n["t"] = max(0.0, t)
+        out.append(n)
+    return out
+
+
+def control_curve(points: list, beats, default: float = 0.0, step: bool = False) -> np.ndarray:
+    """A controller drawn in a region ([[beat, value]]) at the given beats: lines between points (steps for the
+    pedal), held before the first and after the last."""
+    beats = np.asarray(beats, np.float64)
+    if not points:
+        return np.full(beats.shape, default)
+    pts = sorted(points)
+    xs, ys = np.array([p[0] for p in pts], np.float64), np.array([p[1] for p in pts], np.float64)
+    if step:
+        idx = np.searchsorted(xs, beats, side="right") - 1
+        return np.where(idx >= 0, ys[np.clip(idx, 0, len(ys) - 1)], default)
+    return np.interp(beats, xs, ys)
+
+
+def sustained(notes: list, pedal: list, length: float) -> list:
+    """Notes held by the sustain pedal: one let go while it's down sounds on until it comes up."""
+    if not pedal:
+        return notes
+    pts = sorted(pedal)
+    out = []
+    for n in notes:
+        end = float(n["t"]) + float(n["d"])
+        down = [v for b, v in pts if b <= end]
+        if down and down[-1] > 0.5:
+            up = next((b for b, v in pts if b > end and v <= 0.5), length)
+            n = dict(n, d=max(float(n["d"]), up - float(n["t"])))
+        out.append(n)
+    return out
+
+
+def bend_note(a: np.ndarray, t_beat: float, clock, cc: dict) -> np.ndarray:
+    """A note bent and shaken as it plays (pitch bend, the mod wheel's vibrato), by reading it faster and slower."""
+    n = len(a)
+    if n < 2:
+        return a
+    s0 = clock(t_beat)
+    step = 64                                         # worked out every 64 samples, smoothed between
+    secs = s0 + np.arange(0, n + step, step) / SR
+    # the beats those moments fall on (the region's clock is monotonic: inverted by interpolation)
+    probe = np.linspace(0, max(1.0, t_beat + 64), 512)
+    probe_s = np.array([clock(b) for b in probe])
+    beats = np.interp(secs, probe_s, probe)
+    semis = control_curve(cc.get("bend") or [], beats) * BEND_RANGE
+    mod = control_curve(cc.get("mod") or [], beats)
+    if np.any(mod > 0):
+        semis = semis + mod * VIBRATO[1] * np.sin(2 * np.pi * VIBRATO[0] * (secs - s0))
+    if not np.any(np.abs(semis) > 1e-4):
+        return a
+    rate = np.interp(np.arange(n), np.arange(0, n + step, step), 2 ** (semis / 12))
+    pos = np.concatenate([[0.0], np.cumsum(rate[:-1])])
+    pos = pos[pos < n - 1]
+    if a.ndim == 1:
+        return np.interp(pos, np.arange(n), a).astype(np.float32)
+    return np.stack([np.interp(pos, np.arange(n), a[:, c]) for c in range(a.shape[1])], axis=1).astype(np.float32)
+
+
+def control_events(cc: dict, clock, length: float) -> list:
+    """A region's controllers as MIDI for a plugin instrument: (seconds, message), lines sent every 10 ms."""
+    evs = []
+    for b, v in sorted(cc.get("sustain") or []):
+        evs.append((clock(b), bytes([0xB0, 64, 127 if v > 0.5 else 0])))
+    for kind in ("bend", "mod"):
+        pts = sorted(cc.get(kind) or [])
+        if not pts:
+            continue
+        s_end = clock(min(length, pts[-1][0] + 0.001))
+        s = clock(max(0.0, pts[0][0]))
+        last = None
+        probe = np.linspace(0, length, 256)
+        probe_s = np.array([clock(b) for b in probe])
+        while s <= s_end + 1e-9:
+            v = float(control_curve(pts, [float(np.interp(s, probe_s, probe))])[0])
+            if kind == "bend":
+                val = int(round(8192 + max(-1.0, min(1.0, v)) * 8191))
+                msg = bytes([0xE0, val & 0x7F, (val >> 7) & 0x7F])
+            else:
+                msg = bytes([0xB0, 1, int(round(max(0.0, min(1.0, v)) * 127))])
+            if msg != last:
+                evs.append((s, msg))
+                last = msg
+            s += 0.01
+    return sorted(evs, key=lambda e: e[0])
 
 
 def render_midi_region(region: dict, inst: dict, tempo, base: Path = None, mfx: dict = None, key: int = 0, mode: str = "major",
@@ -777,15 +897,20 @@ def render_midi_region(region: dict, inst: dict, tempo, base: Path = None, mfx: 
     length_s = clock(float(region.get("length", 4)))
     pieces = []
     end = int(length_s * SR)
-    notes = region.get("notes") or []
+    notes = groove_notes(region.get("notes") or [], region)
     if use_fx:
         notes = apply_midi_fx(notes, mfx, float(region.get("length", 4)), key, mode)
+    cc = region.get("cc") or {}
+    notes = sustained(notes, cc.get("sustain") or [], float(region.get("length", 4)))
+    bends = bool(cc.get("bend") or cc.get("mod"))
     for nt in notes:
         t = float(nt["t"])
         if t >= float(region.get("length", 4)) or t < 0:
             continue
         d = min(float(nt["d"]), float(region.get("length", 4)) - t)
         sound = instrument_note(inst, int(nt["p"]), int(nt.get("v", 100)), clock(t + max(0.01, d)) - clock(t), base)
+        if bends:
+            sound = bend_note(sound, t, clock, cc)
         at = int(clock(t) * SR)
         pieces.append((at, sound))
         end = max(end, at + len(sound))
@@ -805,7 +930,7 @@ def _plugin_region(region: dict, inst: dict, tempo, mfx: dict, key: int, mode: s
     if cache in _REGIONS:
         return _REGIONS[cache]
     length = float(region.get("length", 4))
-    notes = region.get("notes") or []
+    notes = groove_notes(region.get("notes") or [], region)
     if mfx and region.get("kind") != "drummer":
         notes = apply_midi_fx(notes, mfx, length, key, mode)
     evs = []
@@ -815,7 +940,8 @@ def _plugin_region(region: dict, inst: dict, tempo, mfx: dict, key: int, mode: s
             d = min(float(nt["d"]), length - t)
             evs.append([clock(t), clock(t + max(0.01, d)) - clock(t), int(nt["p"]), int(nt.get("v", 100))])
     secs = clock(length)
-    out = lv2.render_notes(inst.get("uri", ""), inst.get("params") or {}, evs, secs, tail=4.0) if lv2 is not None and evs \
+    ctl = control_events(region.get("cc") or {}, clock, length)
+    out = lv2.render_notes(inst.get("uri", ""), inst.get("params") or {}, evs, secs, tail=4.0, controls=ctl) if lv2 is not None and evs \
         else np.zeros((max(1, int(secs * SR)), 2), np.float32)
     if len(_REGIONS) > 400:
         _REGIONS.clear()
