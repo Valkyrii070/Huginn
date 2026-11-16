@@ -555,7 +555,9 @@ class Tempo(QObject):
                 views.append({"name": tk.get("name", f"Take {k + 1}"), "notes": [[n["t"], n["d"], n["p"]] for n in ns], "low": min(ps), "high": max(ps)})
         return {**r, "notes": [dict(n, i=i) for i, n in enumerate(r.get("notes") or [])], "kit": kit, "trackKind": t.get("kind", ""),
                 "colour": self._track_view(t)["colour"] if t else "", "takeViews": views, "comp": r.get("comp") or [], "take": int(r.get("take", 0)),
-                "span": self._tm().clock(float(r["start"]))(float(r["length"]))}
+                "span": self._tm().clock(float(r["start"]))(float(r["length"])),
+                "tuneTargets": [round(se.tune_target(n, r["tune"], int(self._p.get("key", 0)), self._p.get("mode", "major")), 3) for n in (r.get("tune") or {}).get("notes", [])],
+                "finding": rid in self._busy}
 
     @Slot(str, result="QVariantList")
     def smartControls(self, tid: str) -> list:
@@ -1891,6 +1893,69 @@ class Tempo(QObject):
             q = round(n["t"] / grid) * grid
             n["t"] = round(n["t"] + (q - n["t"]) * max(0.0, min(1.0, strength)), 4)
         self._keep()
+
+    # ---------------------------------------------------------------- pitch correction
+    @Slot(str)
+    def analyzePitch(self, rid: str) -> None:
+        """Find the notes in a recording (in the background), to put them in tune."""
+        r = self._r(rid)
+        if r is None or r.get("kind") != "audio" or rid in self._busy:
+            return
+        if r.get("comp"):
+            self.said.emit("Flatten the comp first: then its notes can be found.", True)
+            return
+        path = se.resolve(r.get("file", ""), self._folder)
+        self._busy.add(rid)
+        self.changed.emit()
+
+        def work():
+            try:
+                notes = se.find_notes(se.load_audio(path))
+            except Exception:                                 # noqa: BLE001
+                notes = None
+
+            def done():
+                self._busy.discard(rid)
+                r2 = self._r(rid)
+                if r2 is not None and notes is not None:
+                    self._before()
+                    r2["tune"] = {"notes": notes, "amount": 0.0}
+                    self._keep()
+                    self.said.emit(f"{len(notes)} notes found. Tune them to the key, or drag one where it should be.", False)
+                elif notes is None:
+                    self.said.emit("Couldn't read that recording.", True)
+                self.changed.emit()
+            self._back.emit(done)
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(str, float)
+    def setTuneAmount(self, rid: str, amount: float) -> None:
+        r = self._r(rid)
+        if r is not None and r.get("tune"):
+            self._before(("tune", rid))
+            r["tune"]["amount"] = round(max(0.0, min(1.0, float(amount))), 2)
+            self._keep()
+
+    @Slot(str, int, float)
+    def moveTuneNote(self, rid: str, index: int, to: float) -> None:
+        """A found note put on a pitch (a whole semitone), or back to following the key (to < 0)."""
+        r = self._r(rid)
+        notes = ((r or {}).get("tune") or {}).get("notes") or []
+        if 0 <= index < len(notes):
+            self._before(("tunenote", rid, index))
+            if to < 0:
+                notes[index].pop("to", None)
+            else:
+                notes[index]["to"] = int(round(max(0.0, min(127.0, float(to)))))
+            self._keep()
+
+    @Slot(str)
+    def resetTune(self, rid: str) -> None:
+        r = self._r(rid)
+        if r is not None and r.get("tune"):
+            self._before()
+            r.pop("tune")
+            self._keep()
 
     # ---------------------------------------------------------------- groove and controllers
     @Slot(str, str, float)

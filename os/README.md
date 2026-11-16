@@ -654,6 +654,17 @@ Four apps are being taken, round by round, to the level of the professional tool
     it 12 dB, a new note making it out of date, a bounce beside the original with its sound, the original muted. On
     screen: freezing, the snowflake on the track.
 
+- *Pitch correction* (Region › Pitch, on recordings): "Find the Notes" tracks the pitch every 10 ms (YIN on every
+  frame at once, through FFTs) and splits it into notes, drawn as blobs over the line as sung. "Tune to the key"
+  moves every note toward the nearest note of the song's key by as much as you like; a blob dragged to a pitch goes
+  exactly there (double-click: back to following the key). Each note is shifted on its own (the phase vocoder, then
+  played at the speed that keeps its length) and crossfaded in over 20 ms; between notes the recording is left as it
+  was. Not yet: flattening drift and vibrato within a note, keeping a voice's formants on big moves.
+  - Tested (7 checks) on a sung line of five notes off pitch (60.3, 62.4, 63.7, 65.1, 67.6, with vibrato): all five
+    found, to a few cents and where they are, in 0.09 s for 4 s; at 100 % they come out at 60.00, 62.01, 64.00,
+    65.00, 67.00, at 50 % half way; one dragged to B3 comes out at 59.00 and the rest as sung; between notes,
+    untouched. On screen: finding them, the blobs on the key's lines at 100 %.
+
 ## From power-on to the desktop
 
 Every screen between pressing the power button and the desktop is now Huginn's own, and they flow into each other.

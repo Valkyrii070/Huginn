@@ -23,6 +23,8 @@
                     own instruments hold notes on the pedal and bend and shake each note's playback, as samplers do
     freezing        a track's instrument and effects drawn once and played back from the file (its fader, pan and
                     sends stay live), until anything it depends on changes; bouncing puts the same on an audio track
+    pitch           a recording's sung notes found (YIN every 10 ms, then split into notes) and put in tune: to the
+                    song's key by an amount, or each where it's dragged; each note shifted on its own and crossfaded
     plugins         LV2 effects and instruments installed on the computer (huginn_tempo_lv2): an effect like any other
                     on a track, a stack or the master; an instrument drawn a region at a time, with its own tail
     files           WAV, FLAC, MP3, Ogg and AAC out (and stems); Standard MIDI Files in and out
@@ -1084,19 +1086,154 @@ def pitch_shift(x: np.ndarray, semis: float, ratio: float = 1.0) -> np.ndarray:
 
 _PROCESSED = {}
 
+# ---- pitch correction
+MAJOR, MINOR = [0, 2, 4, 5, 7, 9, 11], [0, 2, 3, 5, 7, 8, 10]
 
-def processed_audio(path: str, reverse: bool = False, semis: float = 0.0, ratio: float = 1.0) -> np.ndarray:
-    """A sound file reversed, transposed and stretched, as asked. Cached."""
+
+def pitch_track(x: np.ndarray, hop: int = 480, win: int = 2048, fmin: float = 70.0, fmax: float = 1000.0):
+    """A recording's pitch every `hop` samples (10 ms): YIN on every frame at once (its difference function through
+    FFTs), the first dip under 0.15 followed to its bottom and refined between samples. Gives (MIDI pitch with a
+    fraction or 0 where there's none, loudness) for each frame."""
+    mono = (x.mean(axis=1) if x.ndim == 2 else x).astype(np.float64)
+    frames = max(0, 1 + (len(mono) - win) // hop)
+    pitch, level = np.zeros(frames), np.zeros(frames)
+    W = win // 2
+    tmin, tmax = max(2, int(SR / fmax)), min(W - 2, int(SR / fmin))
+    nfft = 1 << int(math.ceil(math.log2(2 * win)))
+    for c0 in range(0, frames, 256):
+        m = min(256, frames - c0)
+        idx = (c0 + np.arange(m))[:, None] * hop + np.arange(win)[None, :]
+        F = mono[idx]
+        F = F - F.mean(axis=1, keepdims=True)
+        level[c0:c0 + m] = np.sqrt((F ** 2).mean(axis=1))
+        ac = np.fft.irfft(np.fft.rfft(F, nfft) * np.conj(np.fft.rfft(F[:, :W], nfft)), nfft)[:, :W + 1]
+        cs = np.concatenate([np.zeros((m, 1)), np.cumsum(F ** 2, axis=1)], axis=1)
+        taus = np.arange(W + 1)
+        d = (cs[:, W] - cs[:, 0])[:, None] + (cs[:, taus + W] - cs[:, taus]) - 2 * ac
+        d[:, 0] = 0
+        cm = np.ones_like(d)
+        cm[:, 1:] = d[:, 1:] * np.arange(1, W + 1) / np.maximum(np.cumsum(d[:, 1:], axis=1), 1e-12)
+        band = cm[:, tmin:tmax]
+        below = band < 0.15
+        has = below.any(axis=1)
+        tau = np.where(has, np.argmax(below, axis=1), np.argmin(band, axis=1)) + tmin
+        rows = np.arange(m)
+        for _ in range(64):                           # down to the bottom of the dip
+            step = (tau + 1 < tmax) & (cm[rows, np.minimum(tau + 1, W)] < cm[rows, tau])
+            if not step.any():
+                break
+            tau = tau + step
+        conf = cm[rows, tau]
+        a, b, c = cm[rows, tau - 1], cm[rows, tau], cm[rows, tau + 1]
+        den = a - 2 * b + c
+        shift = np.where(np.abs(den) > 1e-12, 0.5 * (a - c) / np.where(np.abs(den) > 1e-12, den, 1), 0.0)
+        f0 = SR / (tau + np.clip(shift, -1, 1))
+        ok = conf < 0.3
+        pitch[c0:c0 + m] = np.where(ok, 69 + 12 * np.log2(np.maximum(f0, 1) / 440.0), 0.0)
+    return pitch, level
+
+
+def find_notes(x: np.ndarray, hop: int = 480, win: int = 2048) -> list:
+    """The notes sung (or played) in a recording: [{s, e (seconds), p (its pitch, the middle of how it was sung),
+    curve: [[seconds, pitch]] a point every 30 ms}]."""
+    pitch, level = pitch_track(x, hop, win)
+    if not len(pitch):
+        return []
+    quiet = max(float(level.max()) * 0.06, 1e-4)
+    voiced = (pitch > 0) & (level > quiet)
+    # a little smoothing of the line (a median of five), only over sung frames
+    sm = pitch.copy()
+    for i in range(2, len(pitch) - 2):
+        w = pitch[i - 2:i + 3][voiced[i - 2:i + 3]]
+        if voiced[i] and len(w) >= 3:
+            sm[i] = float(np.median(w))
+    t = (np.arange(len(pitch)) * hop + win / 2) / SR
+    notes, cur, gap = [], [], 0
+
+    def close():
+        if len(cur) >= 6:                             # 60 ms or more
+            ps = sm[cur]
+            curve = [[round(float(t[i]), 3), round(float(sm[i]), 2)] for i in cur[::3]]
+            notes.append({"s": round(float(t[cur[0]] - hop / SR), 3), "e": round(float(t[cur[-1]] + hop / SR), 3),
+                          "p": round(float(np.median(ps)), 2), "curve": curve})
+    for i in range(len(pitch)):
+        if voiced[i]:
+            if cur and abs(sm[i] - float(np.median(sm[cur[-8:]]))) > 0.7:
+                close()
+                cur = []
+            cur.append(i)
+            gap = 0
+        else:
+            gap += 1
+            if gap > 4 and cur:
+                close()
+                cur = []
+    close()
+    return notes
+
+
+def tune_target(n: dict, tune: dict, key: int, mode: str) -> float:
+    """Where a note goes: where it was dragged, else toward the nearest note of the key by the amount asked."""
+    if n.get("to") is not None:
+        return float(n["to"])
+    scale = [(key + k) % 12 for k in (MINOR if mode == "minor" else MAJOR)]
+    p = float(n["p"])
+    best = min((round(p) + d for d in range(-2, 3) if (round(p) + d) % 12 in scale), key=lambda q: abs(q - p))
+    return p + (best - p) * max(0.0, min(1.0, float(tune.get("amount", 0))))
+
+
+_TUNED = {}
+
+
+def tuned(x: np.ndarray, tune: dict, key: int = 0, mode: str = "major", path: str = "") -> np.ndarray:
+    """A recording with its notes put in tune: each note shifted on its own (the phase vocoder, then played at the
+    speed that keeps its length), crossfaded in over 20 ms; between notes, as it was."""
+    notes = tune.get("notes") or []
+    out = x.copy()
+    pad, fade = int(0.03 * SR), int(0.02 * SR)
+    for n in notes:
+        semis = tune_target(n, tune, key, mode) - float(n["p"])
+        if abs(semis) < 0.02:
+            continue
+        a, b = max(0, int(float(n["s"]) * SR) - pad), min(len(x), int(float(n["e"]) * SR) + pad)
+        if b - a < fade * 3:
+            continue
+        ck = (path, a, b, round(semis, 3))
+        seg = _TUNED.get(ck)
+        if seg is None:
+            src = x[a:b]
+            seg = pitch_shift(src, semis) if src.ndim == 2 else pitch_shift(src[:, None], semis)[:, 0]
+            if len(seg) < b - a:
+                seg = np.concatenate([seg, np.zeros((b - a - len(seg),) + seg.shape[1:], np.float32)])
+            seg = seg[:b - a].astype(np.float32)
+            if len(_TUNED) > 2000:
+                _TUNED.clear()
+            _TUNED[ck] = seg
+        env = np.ones(b - a, np.float32)
+        env[:fade] = np.linspace(0, 1, fade)
+        env[-fade:] = np.linspace(1, 0, fade)
+        env = env[:, None] if out.ndim == 2 else env
+        out[a:b] = out[a:b] * (1 - env) + seg * env
+    return out
+
+
+def processed_audio(path: str, reverse: bool = False, semis: float = 0.0, ratio: float = 1.0, tune: dict = None,
+                    key_note: int = 0, mode: str = "major") -> np.ndarray:
+    """A sound file put in tune, reversed, transposed and stretched, as asked. Cached."""
     a = load_audio(path)
-    if not a.size or (not reverse and abs(semis) < 0.01 and abs(ratio - 1) < 1e-3):
+    tuning = bool(tune and tune.get("notes") and (float(tune.get("amount", 0)) > 0 or any(n.get("to") is not None for n in tune["notes"])))
+    if not a.size or (not reverse and abs(semis) < 0.01 and abs(ratio - 1) < 1e-3 and not tuning):
         return a
     try:
         st = os.stat(path)
-        key = (path, st.st_mtime, st.st_size, bool(reverse), round(semis, 2), round(ratio, 4))
+        key = (path, st.st_mtime, st.st_size, bool(reverse), round(semis, 2), round(ratio, 4),
+               json.dumps([[n["s"], n["e"], n["p"], n.get("to")] for n in tune["notes"]] + [tune.get("amount"), key_note, mode]) if tuning else "")
     except OSError:
         return a
     if key in _PROCESSED:
         return _PROCESSED[key]
+    if tuning:
+        a = tuned(a, tune, key_note, mode, path)
     out = a[::-1].copy() if reverse else a
     if abs(semis) >= 0.01 or abs(ratio - 1) >= 1e-3:
         out = pitch_shift(out, semis, ratio)
@@ -1393,7 +1530,9 @@ class Mixer:
         """A take's sound as the region plays it: reversed, transposed and following the tempo, as the region says."""
         here = self.tm.tempo_at(float(r.get("start", 0)))
         ratio = float(r.get("srcTempo") or here) / here if r.get("follow") else 1.0
-        return processed_audio(resolve(file, self.audio_dir), bool(r.get("reverse")), float(r.get("transpose", 0)), ratio), ratio
+        tune = r.get("tune") if file == r.get("file") else None        # put in tune: the region's own recording (not a comp's takes)
+        return processed_audio(resolve(file, self.audio_dir), bool(r.get("reverse")), float(r.get("transpose", 0)), ratio,
+                               tune, int(self.p.get("key", 0)), self.p.get("mode", "major")), ratio
 
     def _region_audio(self, track: dict, r: dict, at_beat: float = None):
         start = float(r.get("start", 0)) if at_beat is None else at_beat

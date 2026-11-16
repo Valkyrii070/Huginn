@@ -491,6 +491,56 @@ GlassWindow {
                     Label { text: "Humanize  " + Math.round((parent.g.humanize || 0) * 100) + " %"; font.pixelSize: 11; topPadding: 4 }
                     Meter { objectName: "humanMeter"; width: 210; interactive: true; value: parent.g.humanize || 0; onMoved: function (v) { Backend.setGroove(win.reg.id, "humanize", v) } }
                     Label { width: 210; wrapMode: Text.WordWrap; font.pixelSize: 10; secondary: true; text: "Played this way; the notes stay where you wrote them." } }
+                // pitch: the notes sung, put in tune (to the key by an amount, or each where it's dragged)
+                Column { objectName: "pitchPane"; visible: win.reg.kind === "audio"; width: 430; spacing: 6
+                    readonly property var tune: win.reg.tune || null
+                    Row { spacing: 8; height: 22
+                        Heading { anchors.verticalCenter: parent.verticalCenter; text: "PITCH" }
+                        Label { anchors.verticalCenter: parent.verticalCenter; visible: !!parent.parent.tune; font.pixelSize: 10; secondary: true
+                            text: parent.parent.tune ? parent.parent.tune.notes.length + " notes · drag one to a pitch, double-click to let it follow the key" : "" } }
+                    Btn { objectName: "findNotes"; visible: !parent.tune; text: win.reg.finding ? "Finding the notes…" : "Find the Notes"; onClicked: if (!win.reg.finding) Backend.analyzePitch(win.reg.id) }
+                    Label { visible: !parent.tune; width: 420; wrapMode: Text.WordWrap; font.pixelSize: 10; secondary: true
+                        text: "Every note in the recording, sung or played, found so it can be put in tune: all of them to the song's key by as much as you like, or each where you want it." }
+                    Row { visible: !!parent.tune; spacing: 8; height: 24
+                        Label { anchors.verticalCenter: parent.verticalCenter; width: 150; font.pixelSize: 11; text: "Tune to the key  " + Math.round((parent.parent.tune ? parent.parent.tune.amount : 0) * 100) + " %" }
+                        Meter { objectName: "tuneMeter"; anchors.verticalCenter: parent.verticalCenter; width: 180; interactive: true; value: parent.parent.tune ? parent.parent.tune.amount : 0
+                            onMoved: function (v) { Backend.setTuneAmount(win.reg.id, v) } }
+                        Seg { text: "Reset"; onClicked: Backend.resetTune(win.reg.id) } }
+                    Rectangle { id: pitchView; objectName: "pitchView"; visible: !!parent.tune; width: 420; height: Math.max(70, regionPane.height - 92); radius: 10; clip: true
+                        color: Theme.t.dark ? "#0CFFFFFF" : "#06000000"
+                        readonly property var notes: parent.tune ? parent.tune.notes : []
+                        readonly property var targets: win.reg.tuneTargets || []
+                        readonly property real t0: win.reg.offset || 0
+                        readonly property real t1: t0 + Math.max(0.5, win.reg.span || 4)
+                        readonly property real lo: { var m = 127; for (var i = 0; i < notes.length; i++) m = Math.min(m, notes[i].p, targets[i] || 127); return Math.floor(m) - 2 }
+                        readonly property real hi: { var m = 0; for (var i = 0; i < notes.length; i++) m = Math.max(m, notes[i].p, targets[i] || 0); return Math.ceil(m) + 2 }
+                        function xOf(sec) { return (sec - t0) / (t1 - t0) * width }
+                        function yOf(p) { return (1 - (p - lo) / Math.max(1, hi - lo)) * (height - 10) + 5 }
+                        // a line for each semitone, the key's notes a little stronger
+                        Repeater { model: Math.max(0, pitchView.hi - pitchView.lo + 1)
+                            Rectangle { required property int index; readonly property int pitch: pitchView.lo + index; y: pitchView.yOf(pitch); width: pitchView.width; height: 1; color: Theme.t.text
+                                opacity: pitch % 12 === (win.song.key || 0) ? 0.18 : 0.06
+                                Text { visible: parent.pitch % 12 === (win.song.key || 0); x: 4; y: -11; text: Backend.noteNames[parent.pitch]; font.pixelSize: 8; color: Theme.t.text_secondary } } }
+                        // as sung: the line of each note, faint
+                        Canvas { id: sungLine; anchors.fill: parent; property var n: pitchView.notes; onNChanged: requestPaint()
+                            onPaint: { var c = getContext("2d"); c.reset(); c.lineWidth = 1.5; c.strokeStyle = Theme.t.dark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)"
+                                for (var i = 0; i < n.length; i++) { var cv = n[i].curve; c.beginPath()
+                                    for (var k = 0; k < cv.length; k++) { var x = pitchView.xOf(cv[k][0]), y = pitchView.yOf(cv[k][1]); if (k === 0) c.moveTo(x, y); else c.lineTo(x, y) }
+                                    c.stroke() } } }
+                        // where each goes: a blob to drag
+                        Repeater { model: pitchView.notes
+                            Rectangle { id: blob; required property var modelData; required property int index
+                                readonly property real target: pitchView.targets[index] !== undefined ? pitchView.targets[index] : modelData.p
+                                property real dy: 0
+                                x: pitchView.xOf(modelData.s); width: Math.max(4, pitchView.xOf(modelData.e) - x); height: 9; radius: 4.5
+                                y: pitchView.yOf(target) - height / 2 + dy
+                                color: modelData.to !== undefined ? win.hot : Qt.rgba(win.hot.r, win.hot.g, win.hot.b, 0.55); border.width: 1; border.color: win.hot
+                                MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.SizeVerCursor; preventStealing: true; property real y0: 0
+                                    onPressed: function (m) { y0 = mapToItem(pitchView, m.x, m.y).y }
+                                    onPositionChanged: function (m) { blob.dy = mapToItem(pitchView, m.x, m.y).y - y0 }
+                                    onReleased: { var step = (pitchView.height - 10) / Math.max(1, pitchView.hi - pitchView.lo), to = Math.round(blob.target - blob.dy / step); blob.dy = 0
+                                        Backend.moveTuneNote(win.reg.id, blob.index, to) }
+                                    onDoubleClicked: Backend.moveTuneNote(win.reg.id, blob.index, -1) } } } } }
                 Column { visible: win.reg.kind === "audio"; width: 230; spacing: 6
                     Heading { text: "THE RECORDING" }
                     Label { text: "Gain  " + ((win.reg.gain || 0) > 0 ? "+" : "") + (win.reg.gain || 0).toFixed(1) + " dB"; font.pixelSize: 11 }
