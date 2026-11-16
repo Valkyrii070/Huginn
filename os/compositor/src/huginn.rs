@@ -214,6 +214,7 @@ impl<B: Backend + 'static> HuginnState<B> {
             Request::ReloadInput => self.reload_input(),
             Request::WindowPicture(id, tx) => crate::capture::ask_window(id, crate::capture::WindowAsk::Card(tx)),
             Request::ReloadAccess => self.reload_access(),
+            Request::SignOut => self.sign_out(),
             Request::Displays(tx) => {
                 let _ = tx.send(self.displays_json());
             }
@@ -440,6 +441,35 @@ impl<B: Backend + 'static> HuginnState<B> {
         if let Some(t) = window.0.toplevel() {
             t.send_close();
         }
+    }
+
+    /// Sign out: every window is asked to close, and once they've gone the compositor ends, and the session with it.
+    /// A window still open after 20 seconds (an app that asked whether to save, and was told Cancel) calls it off;
+    /// signing out again within two minutes ends the session even so.
+    pub fn sign_out(&mut self) {
+        thread_local!(static CALLED_OFF: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
+        let insist = CALLED_OFF.with(|c| c.get()).is_some_and(|t| t.elapsed() < Duration::from_secs(120));
+        info!(insist, "Signing out");
+        let windows: Vec<WindowElement> =
+            self.space.elements().cloned().chain(self.huginn.minimised.iter().map(|(w, _)| w.clone())).collect();
+        for w in &windows {
+            Self::close_window(w);
+        }
+        let until = Instant::now() + Duration::from_secs(if insist { 3 } else { 20 });
+        let _ = self.handle.insert_source(Timer::from_duration(Duration::from_millis(250)), move |_, _, state| {
+            let left = state.space.elements().count() + state.huginn.minimised.iter().filter(|(w, _)| w.alive()).count();
+            if left == 0 || (insist && Instant::now() >= until) {
+                info!("Signed out");
+                state.running.store(false, Ordering::SeqCst);
+                return TimeoutAction::Drop;
+            }
+            if Instant::now() >= until {
+                warn!(left, "Signing out called off: windows are still open");
+                CALLED_OFF.with(|c| c.set(Some(Instant::now())));
+                return TimeoutAction::Drop;
+            }
+            TimeoutAction::ToDuration(Duration::from_millis(250))
+        });
     }
 
     pub fn window_action(&mut self, action: &str) {
@@ -692,7 +722,8 @@ impl<B: Backend + 'static> HuginnState<B> {
 
     // ------------------------------------------------------------------------------------------- the lock
     pub fn lock_now(&mut self) {
-        if self.huginn.lock.is_some() {
+        // no session of anyone's: the sign-in screen (SDDM's), with nothing to lock
+        if self.huginn.lock.is_some() || SESSION.get().is_none() {
             return;
         }
         info!("Locking");

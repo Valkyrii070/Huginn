@@ -299,11 +299,13 @@ impl<B: Backend + 'static> HuginnState<B> {
                 let sdr = saved(&output).and_then(|s| s.get("sdr").and_then(|v| v.as_f64())).unwrap_or(203.0);
                 hdr_of(&output).sdr.set(on.then_some(sdr));
                 self.backend_data.reset_buffers(&output);
+                crate::color::screen_changed(&output);
             }
             "sdr-brightness" => match value.parse::<f64>() {
                 Ok(nits) if (80.0..=500.0).contains(&nits) => {
                     if hdr_sdr(&output).is_some() {
                         hdr_of(&output).sdr.set(Some(nits));
+                        crate::color::screen_changed(&output);
                     }
                     let mut all = load();
                     all[key(&output)]["sdr"] = json!(nits);

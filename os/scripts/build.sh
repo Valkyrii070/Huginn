@@ -158,7 +158,13 @@ stage_install() {
     mapfile -t pkgs < <(package_list)
     in_chroot apt-get -y install "${pkgs[@]}"
 
-    # Apps Huginn has its own of stay out, even if a dependency brings one in.
+    purge_unwanted "${pkgs[@]}"
+}
+
+# Apps Huginn has its own of (and KWin and Plasma's workspace) stay out, even if a dependency brings one in. Also run
+# by stage_customise, so a chroot built before something joined config/not-wanted.list loses it too.
+purge_unwanted() {
+    local pkgs=("$@")
     local unwanted=() p
     while read -r p; do
         in_chroot dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' && unwanted+=("$p")
@@ -171,6 +177,16 @@ stage_install() {
                 || die "taking out ${unwanted[*]} also took out $p: fix config/not-wanted.list or the package lists"
         done
     fi
+    # What the lists name stays for good, even once nothing else depends on it (apt autoremove leaves it alone),
+    # and something newly listed comes in (a chroot built before it joined a list).
+    local missing=()
+    for p in "${pkgs[@]}"; do
+        in_chroot dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p")
+    done
+    if (( ${#missing[@]} )); then
+        in_chroot apt-get -y install "${missing[@]}"
+    fi
+    in_chroot apt-mark manual "${pkgs[@]}" >/dev/null
 }
 
 # Rounded corners for every window, as Huginn's own apps draw theirs: KDE-Rounded-Corners (a KWin effect, GPL-3.0,
@@ -263,8 +279,8 @@ build_compositor() {
     in_chroot sh -c 'grep -E -- "-dev\$|^(rustc|rustc-[0-9.]+|cargo|cargo-[0-9.]+|libstd-rust-[0-9.]+(-dev)?|gcc|gcc-[0-9]+|cpp|cpp-[0-9]+|pkg-config|pkgconf|pkgconf-bin|libwayland-bin|libc-dev-bin|meson|ninja-build|wayland-protocols)\$" /tmp/hc-new.txt | xargs -r env DEBIAN_FRONTEND=noninteractive apt-get purge -y' > "$WORK/comp-purge.log" 2>&1 || true
     in_chroot env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge >> "$WORK/comp-purge.log" 2>&1 || true
     rm -rf "$CHROOT/tmp/hc" "$CHROOT"/tmp/hc-*.txt
-    # Without it, the session menu mustn't offer a session that can't start.
-    [ -x "$CHROOT/usr/bin/huginn-compositor" ] || rm -f "$CHROOT/usr/share/wayland-sessions/huginnos-preview.desktop"
+    # Without it there's no desktop at all.
+    [ -x "$CHROOT/usr/bin/huginn-compositor" ] || die "Huginn's compositor didn't build: it's the only session there is (see $WORK/comp-build.log)"
     # Left by earlier builds (with --from customise): the session's old file name, and xwayland-satellite, which the
     # Python preview compositor needed and this one doesn't (XWayland is built in).
     rm -rf "$CHROOT/usr/share/wayland-sessions/huginn-preview.desktop" "$CHROOT/usr/libexec/huginn/xwayland-satellite" \
@@ -273,6 +289,9 @@ build_compositor() {
 
 stage_customise() {
     log "Apply overlay, theme and system defaults"
+    local listed
+    mapfile -t listed < <(package_list)
+    purge_unwanted "${listed[@]}"
     rsync -a --chown=root:root "$ROOT/config/overlay/" "$CHROOT/"
 
     # Theme files generated from the design tokens.
@@ -316,18 +335,12 @@ stage_customise() {
     # shell and the apps are large Python files; on a slow computer that alone takes seconds at every sign-in).
     in_chroot python3 -m compileall -q /usr/share/huginn-apps /usr/share/huginn-shell
 
-    build_rounded_corners
     build_compositor
-
-    # huginn-grab: KWin hands pictures of the screen only to programs a .desktop file names, by their executable;
-    # Huginn's apps are Python, so this small native helper is the one named (native/huginn-grab.c).
-    if command -v cc >/dev/null 2>&1 && pkg-config --exists gio-2.0 gio-unix-2.0 2>/dev/null; then
-        cc -O2 -Wall -o "$WORK/huginn-grab" "$ROOT/native/huginn-grab.c" $(pkg-config --cflags --libs gio-2.0 gio-unix-2.0) \
-            && install -D -m 755 "$WORK/huginn-grab" "$CHROOT/usr/libexec/huginn/huginn-grab" \
-            || warn "huginn-grab didn't build: screenshots fall back to KDE's portal backend"
-    else
-        warn "no C compiler or GIO headers here: huginn-grab isn't built (screenshots fall back to KDE's portal backend)"
-    fi
+    # KWin is gone (config/not-wanted.list): its rounded-corners effect and the screenshot helper it authorised
+    # (huginn-grab) go with it; Huginn's compositor rounds corners and takes the pictures itself.
+    rm -rf "$CHROOT/usr/libexec/huginn/huginn-grab" "$CHROOT/usr/share/applications/huginn-grab.desktop" \
+           "$CHROOT/usr/share/doc/huginn-rounded-corners"
+    find "$CHROOT/usr/lib" -path '*kwin*' -iname '*shapecorners*' -exec rm -rf {} + 2>/dev/null || true
 
     # Huginn, the browser, from vendor/huginn (see vendor/huginn/SOURCE for the version).
     # Its launcher and menu entry come from the overlay; the per-user installer is left out.

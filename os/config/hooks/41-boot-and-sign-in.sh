@@ -14,8 +14,8 @@ for realm in aurora bifrost muspelheim niflheim; do
 done
 test -f /usr/share/huginn-os/live/LiveWallpaper.qml
 chmod 755 /usr/libexec/huginn-login-look
-# The two sessions: "Huginn" (KWin, huginn.desktop, first in the list) and "Huginn OS (own compositor, preview)"
-# (huginnos-preview.desktop: named to sort after it, so it is never the sign-in screen's default).
+# The session: "Huginn OS" (huginn.desktop: Huginn's own compositor). huginn-session-preview is an old name for it.
+rm -f /usr/share/wayland-sessions/huginnos-preview.desktop /usr/share/xdg-desktop-portal/huginn-own-portals.conf
 chmod 755 /usr/bin/huginn-session /usr/bin/huginn-session-preview /usr/libexec/huginn-session-apps
 test -f /usr/share/huginn-shell/huginn_compositor.py
 test -f /usr/share/huginn-shell/qml/Compositor.qml
@@ -25,17 +25,14 @@ test -f /usr/share/xdg-desktop-portal/portals/huginn.portal
 test -f /usr/share/xdg-desktop-portal/portals/huginn-settings.portal
 test -f /usr/share/huginn-apps/qml/PortalPrompt.qml
 test -f /usr/share/huginn-apps/qml/PortalShot.qml
-# KDE's backend still does screen sharing — but only offers it (and screenshots through KWin, global shortcuts, the
-# background list) when XDG_CURRENT_DESKTOP is exactly "KDE", and Huginn's session says "Huginn:KDE". It is started
-# through a small wrapper that tells it "KDE" in Huginn's KWin session; its own D-Bus file is set aside (dpkg-divert,
-# so package updates keep to the side).
+# KDE's backend answers what Huginn's own and xdg-desktop-portal-wlr (screen sharing) don't. It is started through a
+# small wrapper (it once told it "KDE" in the KWin session, which is gone); its own D-Bus file is set aside
+# (dpkg-divert, so package updates keep to the side).
 kde_portal=$(dpkg -L xdg-desktop-portal-kde | grep '/libexec/xdg-desktop-portal-kde$' | head -n1)
 test -x "$kde_portal"
 cat > /usr/libexec/huginn-portal-kde <<EOF2
 #!/bin/sh
-# KDE's portal backend in Huginn's session: see /usr/share/xdg-desktop-portal/huginn-portals.conf. In the preview
-# session (Huginn's own compositor, no KWin) it is left as it is.
-[ "\$XDG_SESSION_DESKTOP" = huginn-preview ] || export XDG_CURRENT_DESKTOP=KDE
+# KDE's portal backend in Huginn's session: see /usr/share/xdg-desktop-portal/huginn-portals.conf.
 exec $kde_portal "\$@"
 EOF2
 chmod 755 /usr/libexec/huginn-portal-kde

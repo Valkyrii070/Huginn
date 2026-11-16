@@ -18,3 +18,10 @@ plasma-nm
 plasma-pa
 powerdevil
 bluedevil
+# KWin and Plasma's workspace: Huginn's own compositor draws the desktop and the sign-in screen
+kwin-wayland
+kwin-x11
+kwin-common
+plasma-workspace
+plasma-session-wayland
+kscreen

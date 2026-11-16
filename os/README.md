@@ -136,8 +136,8 @@ marks shown are sample values, not read from Flathub.
 - Scripts are syntax-checked and the package lists are verified against the 26.04 archive,
   but the first end-to-end build has not been run yet. Expect small fixes.
 - grub-mkrescue images boot on BIOS and UEFI but not with Secure Boot enabled. Phase 2 moves to the signed shim layout.
-- The login screen offers two sessions: Huginn (KWin + Huginn Shell) and Plasma (fallback).
-  The Huginn session scripts are a first draft and have not run on a live system yet.
+- (Phase 1 offered two sessions, KWin + Huginn Shell and Plasma. Both are gone: the sign-in screen and the session
+  are Huginn's own compositor, see "KWin's gone" below.)
 - Huginn itself is not in the image yet. It already runs on Linux through its per-user installer; Phase 2 wraps that as a system package.
 
 ## App style: glass and islands
@@ -1136,6 +1136,34 @@ over when the side island would reach them (`GlassWindow.middleX`).
   signal by a last pass (`look.rs`: HdrElement), with SDR white at a brightness of your choosing. Apps can't send
   HDR pictures of their own yet (that needs the colour-management protocol); `HUGINN_DEBUG_HDR=1` shows the pass in
   a window.
+
+### HDR from apps, and KWin's gone
+
+- **Apps' own HDR** (`color.rs`, wp-color-management-v1): games and video players can ask what each screen wants
+  (BT.2020 and PQ with its SDR white while HDR is on, else sRGB), be told when that changes, and mark a surface as
+  HDR. Parametric descriptions with named primaries (sRGB, BT.2020) and transfer functions (sRGB, gamma 2.2, PQ) and
+  luminances; ICC profiles and scRGB are refused. On an HDR screen such a surface goes out as it is: the HDR pass
+  skips it, except where something is over it (another window, the bar or dock, notifications, the pointer).
+  Checked with a small client (`wayland-scanner` + libwayland): the descriptions and their information, the change
+  events when HDR or SDR brightness changes, and a PQ window's pixels unchanged while the rest is converted.
+  (wayland-backend fills in a new object's data after the request that made it, so the information object, which
+  its own `done` ends, is answered from an idle callback: answering at once was a use-after-free.)
+  An app that sends PQ to a screen not in HDR isn't tone-mapped; apps that ask first (mpv, games) don't.
+- **KWin and Plasma's workspace are out of the image** (`config/not-wanted.list`): Huginn's compositor is the only
+  session (`/usr/bin/huginn-session`, "Huginn OS" at sign-in) and draws the sign-in screen too (SDDM's
+  `CompositorCommand`). Screen sharing goes through xdg-desktop-portal-wlr, everything else through KDE's portal.
+  Gone with them: the KWin script, Plasma's lock-screen package, the rounded-corners effect and huginn-grab.
+  What Plasma's workspace used to bring that's still used is listed now (plasma-integration, geoclue, hwdata), and
+  every listed package is marked as installed on purpose, so `apt autoremove` keeps it.
+- "Lock when waking" in Settings › Privacy & Security is honoured by the compositor (it was KDE's locker's).
+- **Signing out** goes through the compositor (`org.huginn.Compositor.SignOut`): every window is asked to close, and
+  once they've gone the compositor ends the session itself. Ending it through logind (as before) also ended SDDM's
+  helper, which SDDM takes for a crash: no sign-in screen came back. A window still open after 20 seconds (an app
+  asked whether to save, and was told Cancel) calls signing out off; signing out again within two minutes goes
+  through even so.
+- **The sign-in screen** on the compositor: with no session of anyone's it never locks, and the first key goes to the
+  greeter (a layer that otherwise only takes keys once clicked). Checked in the VM: the greeter comes up on our
+  compositor, takes the password, and signs in to the desktop.
 
 ## Huginn, the browser
 

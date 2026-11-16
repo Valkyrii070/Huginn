@@ -243,7 +243,25 @@ impl<BackendData: Backend> HuginnState<BackendData> {
                 };
             }
         }
-
+        // Nothing has the keyboard (as on the sign-in screen, whose greeter is a layer that takes keys when clicked):
+        // the topmost layer that takes keys gets them, so typing works without clicking first.
+        if keyboard.current_focus().is_none() && crate::huginn::SESSION.get().is_none() {
+            for layer in self.layer_shell_state.layer_surfaces().rev() {
+                let takes = layer.with_cached_state(|data| data.keyboard_interactivity != KeyboardInteractivity::None);
+                let surface = takes
+                    .then(|| {
+                        self.space.outputs().find_map(|o| {
+                            let map = layer_map_for_output(o);
+                            map.layers().find(|l| l.layer_surface() == &layer).cloned()
+                        })
+                    })
+                    .flatten();
+                if let Some(surface) = surface {
+                    keyboard.set_focus(self, Some(surface.into()), serial);
+                    return;
+                }
+            }
+        }
     }
 
     fn on_pointer_button<B: InputBackend>(&mut self, evt: B::PointerButtonEvent) {

@@ -1947,6 +1947,7 @@ fn render_surface<'a>(
                 crate::displays::hdr_of(output).id.clone(),
                 smithay::utils::Rectangle::from_size(size),
                 sdr,
+                crate::color::hdr_parts(space, output, pointer_location),
             )),
         );
     }

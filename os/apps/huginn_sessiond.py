@@ -958,8 +958,16 @@ class Session(QObject):
     def do(self, what: str, interactive: bool = False) -> None:
         """Carry out an action by its name: sleep, hibernate, shutdown, restart, signout, lock, screenOff, nothing.
         interactive: a person asked (the start menu), so logind may ask for a password if it needs one."""
-        if what == "signout" and self.yb:
-            self.yb.fire("org.freedesktop.login1", "/org/freedesktop/login1/session/auto", "org.freedesktop.login1.Session", "Terminate")
+        if what == "signout":
+            # Huginn's compositor closes the apps and ends the session itself, so the sign-in screen comes back
+            # (ending it through logind takes SDDM's helper down too, and SDDM takes that for a crash)
+            if getattr(self, "_compositor", False) and self.sb:
+                self.note_apps()
+                self._apps_timer.stop()
+                if self.sb.call("org.huginn.Compositor", "/org/huginn/Compositor", "org.huginn.Compositor", "SignOut") is not None:
+                    return
+            if self.yb:
+                self.yb.fire("org.freedesktop.login1", "/org/freedesktop/login1/session/auto", "org.freedesktop.login1.Session", "Terminate")
             return
         if what == "lock":
             self.lock()

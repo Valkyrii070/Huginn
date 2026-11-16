@@ -1,15 +1,18 @@
 #!/bin/sh
-# Huginn desktop session: KWin as compositor, Huginn Shell instead of plasmashell.
+# Huginn OS's desktop session: Huginn's own compositor (huginn-compositor, built on Smithay) with Huginn's shell,
+# apps and session services.
 export XDG_CURRENT_DESKTOP=Huginn:KDE
 export XDG_SESSION_DESKTOP=huginn
 export QT_QPA_PLATFORM=wayland
 export QT_QPA_PLATFORMTHEME=kde
-# KDE's parts find the installed apps through Plasma's menu file. Without it KWin knows no apps, and then refuses
-# KDE's portal backend the screen pictures and screen sharing it is allowed (X-KDE-DBUS-Restricted-Interfaces).
+# KDE's parts find the installed apps through Plasma's menu file.
 export XDG_MENU_PREFIX=plasma-
 # Every app's Open and Save windows are Huginn's own (huginn_portal.py, through xdg-desktop-portal):
 # KDE/Qt apps through KDE's integration, GTK apps through GTK's portal support, sandboxed apps always.
 export PLASMA_INTEGRATION_USE_PORTAL=1
 export GTK_USE_PORTAL=1
 export GDK_DEBUG=portals
-exec dbus-run-session -- kwin_wayland --xwayland --exit-with-session /usr/libexec/huginn-session-apps
+# The pointer: Breeze's (the compositor draws it, and so does X11 apps' server).
+export XCURSOR_THEME=breeze_cursors XCURSOR_SIZE=24
+# The compositor starts the session (services, then the shell) once it's listening, and ends when the shell does.
+exec dbus-run-session -- huginn-compositor -- /usr/libexec/huginn-session-apps

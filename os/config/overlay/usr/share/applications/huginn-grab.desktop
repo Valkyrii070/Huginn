@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Screen picture helper
-Comment=Takes a picture of the screen for Huginn's Screenshot app, the Print key and the screenshot portal
-Exec=/usr/libexec/huginn/huginn-grab
-NoDisplay=true
-X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

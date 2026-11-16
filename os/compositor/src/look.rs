@@ -1287,12 +1287,14 @@ pub struct HdrElement {
     id: Id,
     whole: Rectangle<i32, Physical>,
     sdr: f32,
+    /// HDR pictures from apps (color.rs), with nothing over them: left as they are
+    skip: Vec<Rectangle<i32, Physical>>,
 }
 
 impl HdrElement {
     /// `id`: the screen's own, kept from frame to frame (only what changed is converted)
-    pub fn new(id: Id, whole: Rectangle<i32, Physical>, sdr: f64) -> Self {
-        Self { id, whole, sdr: sdr as f32 }
+    pub fn new(id: Id, whole: Rectangle<i32, Physical>, sdr: f64, skip: Vec<Rectangle<i32, Physical>>) -> Self {
+        Self { id, whole, sdr: sdr as f32, skip }
     }
 }
 
@@ -1333,10 +1335,14 @@ impl<R: Look> RenderElement<R> for HdrElement {
         }
         let Some(p) = hdr_program(gles) else { return Ok(()) };
         let Some(to) = to_gl(gles, self.whole.to_f64()) else { return Ok(()) };
-        let rects: Vec<[f32; 4]> = damage
-            .iter()
-            .filter_map(|d| to_gl(gles, Rectangle::new(d.loc + dst.loc, d.size).to_f64()))
+        let damaged = damage.iter().map(|d| Rectangle::new(d.loc + dst.loc, d.size));
+        let rects: Vec<[f32; 4]> = Rectangle::subtract_rects_many(damaged, self.skip.iter().copied())
+            .into_iter()
+            .filter_map(|d| to_gl(gles, d.to_f64()))
             .collect();
+        if rects.is_empty() {
+            return Ok(());
+        }
         let instancing = gles.capabilities().contains(&Capability::Instancing);
         let sdr = self.sdr;
         gles.with_context(|gl| unsafe {

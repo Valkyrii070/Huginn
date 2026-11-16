@@ -726,6 +726,8 @@ for (var i = 0; i < all.length; i++) {{ var win = all[i]; if (String(win.interna
         if what == "lock":
             cmd = ["loginctl", "lock-session"]
         elif what == "signout":
+            if self.sb and self._own_compositor() and self._compositor("SignOut", None, None) is not None:
+                return
             cmd = ["loginctl", "terminate-session", os.environ.get("XDG_SESSION_ID", "")]
         else:
             cmd = ["systemctl", {"sleep": "suspend", "restart": "reboot", "shutdown": "poweroff"}[what]]
@@ -957,7 +959,7 @@ callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Activated
             main = json.loads((Path.home() / ".config" / "huginn" / "displays.json").read_text(encoding="utf-8")).get("_main", "")
         except (OSError, ValueError, AttributeError):
             main = ""
-        if main in names and os.environ.get("XDG_CURRENT_DESKTOP", "").startswith("Huginn-Own"):
+        if main in names and self.sb and self._own_compositor():
             return main
         screen = QGuiApplication.primaryScreen()
         return screen.name() if screen else ""

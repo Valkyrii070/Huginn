@@ -1,4 +1,0 @@
-# KDE's screen locker (the KWin session) shows the lock screen from this shell package: Huginn's
-# (/usr/share/plasma/shells/org.huginn.desktop, which falls back to Plasma's own for everything else).
-[Shell]
-ShellPackage=org.huginn.desktop

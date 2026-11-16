@@ -409,10 +409,11 @@ where
 {
     let (mut elements, clear_color) =
         output_elements(output, space, custom_elements, renderer, show_window_preview, lock, view);
-    // HUGINN_DEBUG_HDR (in a window): the HDR conversion drawn as on an HDR screen, to see that it runs
-    if std::env::var_os("HUGINN_DEBUG_HDR").is_some() {
+    // HUGINN_DEBUG_HDR (in a window, with HDR turned on in Displays): the HDR conversion drawn as on an HDR screen
+    if let Some(sdr) = crate::displays::hdr_sdr(output) {
         let size = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
-        elements.insert(0, OutputRenderElements::Hdr(crate::look::HdrElement::new(crate::displays::hdr_of(output).id.clone(), Rectangle::from_size(size), 203.0)));
+        let skip = crate::color::hdr_parts(space, output, (-1000.0, -1000.0).into());
+        elements.insert(0, OutputRenderElements::Hdr(crate::look::HdrElement::new(crate::displays::hdr_of(output).id.clone(), Rectangle::from_size(size), sdr, skip)));
     }
     damage_tracker.render_output(renderer, framebuffer, age, &elements, clear_color)
 }

@@ -61,6 +61,9 @@ pub enum Request {
     ReloadInput,
     /// Settings changed accessibility (colour filters, sticky and bounce keys, Reduce Motion)
     ReloadAccess,
+    /// Sign out: the apps are asked to close, then the compositor ends, and with it the session (so the sign-in
+    /// screen comes back: ending it through logind takes SDDM's helper down too, which SDDM takes for a crash).
+    SignOut,
 }
 
 /// What the compositor tells others over the bus.
@@ -217,6 +220,11 @@ impl Compositor {
             return "The compositor didn't answer.".into();
         }
         rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| "The compositor didn't answer.".into())
+    }
+
+    /// Sign out (the start menu, the session daemon).
+    fn sign_out(&self) {
+        let _ = self.to_loop.send(Request::SignOut);
     }
 
     /// Settings changed accessibility (kaccessrc, kwinrc, kdeglobals): read it again.
@@ -408,7 +416,13 @@ fn watch_logind(to_loop: LoopSender<Request>) {
         let request = match member.as_str() {
             "Lock" if ours => Some(Request::Lock),
             "Unlock" if ours => Some(Request::Unlock),
-            "PrepareForSleep" if msg.body().deserialize::<bool>().unwrap_or(false) => Some(Request::Lock),
+            // going to sleep: locked first, unless Settings › Privacy & Security says not to (kscreenlockerrc, as KDE's)
+            "PrepareForSleep"
+                if msg.body().deserialize::<bool>().unwrap_or(false)
+                    && crate::input::kconfig("kscreenlockerrc", "Daemon", "LockOnResume").is_none_or(|v| v != "false") =>
+            {
+                Some(Request::Lock)
+            }
             _ => None,
         };
         if let Some(request) = request {

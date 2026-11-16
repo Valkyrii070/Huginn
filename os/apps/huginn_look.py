@@ -81,6 +81,39 @@ def _ini(path: Path, values: dict) -> None:
         ini.write(f, space_around_delimiters=False)
 
 
+def _apply_colours(scheme: Path, name: str) -> None:
+    """A KDE colour scheme into ~/.config/kdeglobals, as plasma-apply-colorscheme does: its [Colors:*] groups (and
+    the rest it carries) replace those in kdeglobals, which Qt apps read through KDE's platform theme."""
+    import configparser
+
+    def ini():
+        c = configparser.ConfigParser(strict=False, interpolation=None)
+        c.optionxform = str
+        return c
+    src, dst = ini(), ini()
+    try:
+        src.read(scheme, encoding="utf-8")
+        dst.read(CONFIG / "kdeglobals", encoding="utf-8")
+    except (configparser.Error, OSError):
+        return
+    for section in src.sections():
+        if section == "ColorEffects:Disabled" or section.startswith(("Colors:", "ColorEffects:", "WM")):
+            if dst.has_section(section):
+                dst.remove_section(section)
+            dst.add_section(section)
+            for k, v in src.items(section):
+                dst.set(section, k, v)
+    if not dst.has_section("General"):
+        dst.add_section("General")
+    dst.set("General", "ColorScheme", name)
+    try:
+        (CONFIG).mkdir(parents=True, exist_ok=True)
+        with open(CONFIG / "kdeglobals", "w", encoding="utf-8") as fh:
+            dst.write(fh, space_around_delimiters=False)
+    except OSError:
+        pass
+
+
 def _run(cmd: list) -> None:
     if shutil.which(cmd[0]):
         env = dict(os.environ)
@@ -116,7 +149,10 @@ def apply(realm: str, dark: bool, contrast: bool = False, force: bool = False) -
         except OSError:
             pass
     if (SHARE / "color-schemes" / f"{name}.colors").exists():
-        _run(["plasma-apply-colorscheme", name])
+        if shutil.which("plasma-apply-colorscheme"):
+            _run(["plasma-apply-colorscheme", name])
+        else:                                                   # (Plasma's workspace isn't in the image any more)
+            _apply_colours(SHARE / "color-schemes" / f"{name}.colors", name)
     # GTK 3 and 4: Breeze-GTK in Huginn's colours; libadwaita's named colours for GTK 4
     gtk = SHARE / "huginn-os" / "gtk"
     breeze = gtk / f"{name}-breeze.css"

@@ -10,6 +10,7 @@
 #[cfg(any(feature = "udev", feature = "xwayland"))]
 pub mod access;
 pub mod capture;
+pub mod color;
 pub mod cursor;
 pub mod dbus;
 pub mod displays;
