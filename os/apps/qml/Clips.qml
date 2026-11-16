@@ -14,10 +14,15 @@ GlassWindow {
     property var dragMedia: null
     property bool mixer: false                     // the library island shows the mixer instead
     property bool boxing: false                    // drawing a box round something to follow
+    property bool picking: false                   // clicking the screen's colour in the picture, to key it out
+    property int segment: 0                        // the stretch of a speed ramp being set
     readonly property bool multicam: hasClip && clip.kind === "multicam"
     property real topH: Math.max(300, (height - 64) * 0.52)
     readonly property var clip: Backend.clip
     readonly property bool hasClip: !!clip.id
+    onTabChanged: inspScroll.contentY = 0
+    onClipChanged: { if (clip.segmentHere !== undefined && (clip.segments || []).every(function (s) { return s.k !== win.segment })) win.segment = clip.segmentHere }
+    function speedLabel(v) { return v === 0 ? "held" : v < 1 ? Math.round(v * 100) + "%" : (Math.round(v * 100) / 100) + "×" }
     readonly property real z: Backend.zoom
     readonly property int headW: 132
     readonly property color cutBg: Theme.t.dark ? "#101216" : "#F4F5F8"
@@ -25,7 +30,7 @@ GlassWindow {
     function ask(kind, extra) { var s = extra || {}; s.kind = kind; sheet = s }
     function tracksTop() { var y = 0, out = []; for (var i = 0; i < Backend.tracks.length; i++) { out.push(y); y += rowH(Backend.tracks[i]) + 4 } return out }
     function trackAt(y) { var tops = tracksTop(); for (var i = Backend.tracks.length - 1; i >= 0; i--) if (y >= tops[i]) return Backend.tracks[i]; return Backend.tracks.length ? Backend.tracks[0] : null }
-    function clipColour(c) { return c.kind === "multicam" ? "#22D3EE" : c.kind === "title" ? "#8B5CF6" : c.mediaKind === "audio" || c.audioTrack ? "#10B981" : c.mediaKind === "image" ? "#F59E0B" : "#3B82F6" }
+    function clipColour(c) { return c.kind === "compound" ? "#EC4899" : c.kind === "multicam" ? "#22D3EE" : c.kind === "title" ? "#8B5CF6" : c.mediaKind === "audio" || c.audioTrack ? "#10B981" : c.mediaKind === "image" ? "#F59E0B" : "#3B82F6" }
     function tc(s) { var f = Backend.fps, n = Math.round(s * f), fr = n % f, sec = Math.floor(n / f) % 60, m = Math.floor(n / f / 60); return m + ":" + (sec < 10 ? "0" : "") + sec + ":" + (fr < 10 ? "0" : "") + fr }
     function dropMedia(px, py) {
         var d = dragMedia; dragMedia = null
@@ -63,7 +68,10 @@ GlassWindow {
     Shortcut { sequences: ["=", "+"]; onActivated: Backend.setZoom(win.z * 1.4) }
     Shortcut { sequence: "-"; onActivated: Backend.setZoom(win.z / 1.4) }
     Shortcut { sequence: "Ctrl+E"; onActivated: win.ask("export", { preset: "h264", quality: "high", size: "" }) }
-    Shortcut { sequence: "Escape"; onActivated: { if (win.boxing) win.boxing = false; else if (win.sheet) win.sheet = null; else Backend.pick("", false) } }
+    Shortcut { sequence: "Escape"; onActivated: { if (win.boxing) win.boxing = false; else if (win.picking) win.picking = false; else if (win.sheet) win.sheet = null
+                                                   else if (!win.hasClip && Backend.inside) Backend.closeCompound(); else Backend.pick("", false) } }
+    Shortcut { sequence: "Alt+G"; onActivated: { var why = Backend.makeCompound(); if (why) toast.say(why, true) } }
+    Shortcut { sequence: "Return"; enabled: win.hasClip && win.clip.kind === "compound"; onActivated: Backend.openCompound(win.clip.id) }
     // multicam: 1 to 4 cut to that angle at the playhead (while it plays, too)
     Repeater { model: 4
         Item { required property int index
@@ -211,6 +219,9 @@ GlassWindow {
             Seg { icon: "edit"; text: "Title"; onClicked: { Backend.addTitle("lower", -1); win.tab = "title" } }
             Seg { objectName: "multicamBtn"; visible: Backend.picked.length >= 2 && Backend.picked.length <= 4; icon: "split"; text: "Multicam"
                 tip: "The picked clips are the same moment from different cameras: line them up by their sound"; onClicked: { win.tab = "angles"; Backend.makeMulticam() } }
+            Seg { objectName: "compoundBtn"; visible: Backend.picked.length >= 2 || (Backend.picked.length === 1 && win.clip.kind !== "compound"); text: "Compound"
+                tip: "Alt+G: put the picked clips together as one clip, to move, trim and grade as one, and open to edit inside"
+                onClicked: { var why = Backend.makeCompound(); if (why) toast.say(why, true) } }
             IslandGap {}
             Seg { icon: "download"; text: Backend.exporting ? Math.round(Backend.exportShare * 100) + "%" : "Export"; on: Backend.exporting
                 onClicked: win.ask("export", { preset: "h264", quality: "high", size: "" }) } },
@@ -357,6 +368,44 @@ GlassWindow {
                     color: "transparent"; border.width: 2; border.color: "#FACC15"; radius: 3
                     Rectangle { anchors { left: parent.left; bottom: parent.top; bottomMargin: 3 } width: tbL.width + 10; height: 16; radius: 4; color: "#FACC15"
                         Text { id: tbL; anchors.centerIn: parent; text: win.clip.obscure ? "pixelated" : "followed"; font.pixelSize: 9; font.weight: Font.Bold; color: "#2A2000" } } }
+                // the clip's shape, to move and size (its place is in the clip's own picture: show it where the clip sits)
+                Item { id: shapeBox; objectName: "shapeBox"; anchors.fill: parent; visible: win.hasClip && win.tab === "mask" && !!Backend.shapeNow.on && !win.picking
+                    readonly property var sh: Backend.shapeNow
+                    readonly property var tr: win.clip.transform || ({ scale: 1, x: 0, y: 0 })
+                    property real dx: 0
+                    property real dy: 0
+                    property real gw: 0
+                    property real gh: 0
+                    readonly property real sc: tr.scale || 1
+                    readonly property real cx: ((sh.x || 0.5) - 0.5) * sc + 0.5 + (tr.x || 0) + dx
+                    readonly property real cy: ((sh.y || 0.5) - 0.5) * sc + 0.5 + (tr.y || 0) + dy
+                    readonly property real w: Math.max(0.02, (sh.w || 0.5) * sc + gw)
+                    readonly property real h: Math.max(0.02, (sh.h || 0.6) * sc + gh)
+                    function commit() { Backend.placeShape(win.clip.id, (cx - 0.5 - (tr.x || 0)) / sc + 0.5, (cy - 0.5 - (tr.y || 0)) / sc + 0.5, w / sc, h / sc); dx = 0; dy = 0; gw = 0; gh = 0 }
+                    Rectangle { id: shapeEdge; x: (shapeBox.cx - shapeBox.w / 2) * parent.width; y: (shapeBox.cy - shapeBox.h / 2) * parent.height
+                        width: shapeBox.w * parent.width; height: shapeBox.h * parent.height; radius: 2
+                        color: shapeBox.sh.kind === "rect" ? "#1443D9B8" : "transparent"; border.width: shapeBox.sh.kind === "rect" ? 2 : 0; border.color: "#43D9B8"
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.SizeAllCursor; preventStealing: true
+                            property point from
+                            onPressed: function (m) { from = mapToItem(frameArea, m.x, m.y) }
+                            onPositionChanged: function (m) { var p = mapToItem(frameArea, m.x, m.y); shapeBox.dx = (p.x - from.x) / frameArea.width; shapeBox.dy = (p.y - from.y) / frameArea.height }
+                            onReleased: shapeBox.commit() }
+                        Rectangle { anchors { right: parent.right; bottom: parent.bottom; margins: -7 } width: 14; height: 14; radius: 7; color: "#43D9B8"; border.width: 2; border.color: "#FFFFFF"
+                            MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.SizeFDiagCursor; preventStealing: true
+                                property point from
+                                onPressed: function (m) { from = mapToItem(frameArea, m.x, m.y) }
+                                onPositionChanged: function (m) { var p = mapToItem(frameArea, m.x, m.y); shapeBox.gw = 2 * (p.x - from.x) / frameArea.width; shapeBox.gh = 2 * (p.y - from.y) / frameArea.height }
+                                onReleased: shapeBox.commit() } } }
+                    Canvas { id: shapeLine; visible: shapeBox.sh.kind !== "rect"; x: shapeEdge.x; y: shapeEdge.y; width: shapeEdge.width; height: shapeEdge.height
+                        readonly property string kind: shapeBox.sh.kind || "oval"
+                        onWidthChanged: requestPaint(); onHeightChanged: requestPaint(); onKindChanged: requestPaint()
+                        onPaint: { var c = getContext("2d"); c.reset(); c.strokeStyle = "#43D9B8"; c.fillStyle = "#1443D9B8"; c.lineWidth = 2; c.beginPath()
+                            if (kind === "diamond") { c.moveTo(width / 2, 1); c.lineTo(width - 1, height / 2); c.lineTo(width / 2, height - 1); c.lineTo(1, height / 2); c.closePath() }
+                            else c.ellipse(1, 1, width - 2, height - 2)
+                            c.fill(); c.stroke() } } }
+                MouseArea { objectName: "keyPicker"; anchors.fill: parent; enabled: win.picking; visible: win.picking; cursorShape: Qt.CrossCursor
+                    onClicked: function (m) { win.picking = false; Backend.pickKeyColour(win.clip.id, m.x / width, m.y / height) }
+                    Rectangle { anchors.fill: parent; color: "transparent"; border.width: 2; border.color: "#43D9B8" } }
                 MouseArea { objectName: "boxDrawer"; anchors.fill: parent; enabled: win.boxing; visible: win.boxing; cursorShape: Qt.CrossCursor; preventStealing: true
                     property point from
                     property rect r: Qt.rect(0, 0, 0, 0)
@@ -381,14 +430,20 @@ GlassWindow {
     // ================================================================ the inspector
     Rectangle { id: insp; objectName: "inspector"; x: parent.width - width - 12; y: 64; width: 330; height: win.topH; radius: 18; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine; clip: true
         readonly property var tabs: !win.hasClip ? [] : win.clip.kind === "title" ? [["title", "Title"], ["video", "Place"], ["colour", "Colour"]]
+                                   : win.clip.kind === "compound" ? [["video", "Place"], ["colour", "Colour"], ["mask", "Mask"], ["audio", "Sound"]]
                                    : win.multicam ? [["angles", "Angles"], ["video", "Place"], ["colour", "Colour"], ["audio", "Sound"]]
                                    : win.clip.trackKind === "audio" || win.clip.mediaKind === "audio" ? [["audio", "Sound"], ["speed", "Speed"]]
-                                   : [["video", "Place"], ["colour", "Colour"], ["effects", "Effects"], ["audio", "Sound"], ["speed", "Speed"]]
+                                   : win.clip.mediaKind === "image" ? [["video", "Place"], ["colour", "Colour"], ["effects", "Effects"], ["mask", "Mask"]]
+                                   : [["video", "Place"], ["colour", "Colour"], ["effects", "Effects"], ["mask", "Mask"], ["audio", "Sound"], ["speed", "Speed"]]
         onTabsChanged: { var ok = false; for (var i = 0; i < tabs.length; i++) if (tabs[i][0] === win.tab) ok = true; if (!ok && tabs.length) win.tab = tabs[0][0] }
         Column { x: 16; y: 14; width: parent.width - 32; spacing: 2
-            Label { width: parent.width; elide: Text.ElideRight; text: win.hasClip ? win.clip.name || "Title" : "Project"; font.pixelSize: 15; font.weight: Font.DemiBold }
+            Label { width: parent.width; elide: Text.ElideRight; text: win.hasClip ? win.clip.name || "Title" : Backend.inside ? "Compound clip" : "Project"; font.pixelSize: 15; font.weight: Font.DemiBold }
             Label { visible: win.hasClip; font.pixelSize: 11; secondary: true
-                text: win.hasClip ? win.clip.lengthText + (win.clip.kind === "title" ? "" : "  ·  from " + win.clip.sourceText) + (win.clip.speed !== 1 ? "  ·  " + win.clip.speed + "×" : "") : "" } }
+                text: win.hasClip ? win.clip.lengthText + (win.clip.kind === "title" ? "" : win.clip.kind === "compound" ? "  ·  " + win.clip.count + (win.clip.count === 1 ? " clip inside" : " clips inside")
+                                    : "  ·  from " + win.clip.sourceText) + (win.clip.speed !== 1 ? "  ·  " + win.clip.speed + "×" : "") + (win.clip.ramped ? "  ·  ramped" : "") : "" } }
+        Row { visible: win.hasClip && win.clip.kind === "compound"; anchors { right: parent.right; rightMargin: 14 } y: 14; spacing: 4
+            Seg { objectName: "openCompoundBtn"; text: "Open"; tip: "Return: edit inside it"; onClicked: Backend.openCompound(win.clip.id) }
+            Seg { text: "Break Apart"; tip: "Back into its clips"; onClicked: Backend.breakApart(win.clip.id) } }
         Flow { id: inspTabs; x: 12; y: 58; width: parent.width - 24; spacing: 2; visible: win.hasClip
             Repeater { model: insp.tabs; Seg { required property var modelData; anchors.verticalCenter: undefined; text: modelData[1]; on: win.tab === modelData[0]; onClicked: win.tab = modelData[0] } } }
         Flickable { id: inspScroll; x: 16; y: win.hasClip ? inspTabs.y + inspTabs.height + 10 : 50; width: parent.width - 32; height: parent.height - y - 10; clip: true; contentHeight: inspCol.height + 20
@@ -480,6 +535,12 @@ GlassWindow {
                     Chips { items: [["", "None"]].concat(Backend.lutChoices().map(function (l) { return [l.path, l.name] })); current: win.clip.colour ? win.clip.colour.lut : ""
                         onChosen: function (id) { Backend.set(win.clip.id, "colour.lut", id) } }
                     Label { width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 10; secondary: true; text: ".cube files in Videos/LUTs, Downloads or Documents appear here." }
+                    Label { visible: (win.clip.others || []).length > 0; text: "MATCH ANOTHER SHOT"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true; topPadding: 4 }
+                    Label { visible: (win.clip.others || []).length > 0; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 11; secondary: true
+                        text: win.clip.colour && win.clip.colour.match !== undefined ? "Matched. The grade above goes on top of the match." : "Its light and colour made to sit like the shot you pick, before any grading." }
+                    Chips { objectName: "matchChips"; visible: (win.clip.others || []).length > 0; items: (win.clip.others || []).map(function (o) { return [o.id, o.name + " (" + o.at + ")"] })
+                        current: win.clip.colour && win.clip.colour.matchTo ? win.clip.colour.matchTo : ""; onChosen: function (id) { Backend.matchColour(win.clip.id, id) } }
+                    Btn { visible: !!(win.clip.colour && win.clip.colour.match !== undefined); text: "Take Away the Match"; onClicked: Backend.clearMatch(win.clip.id) }
                     Item { width: 1; height: 4 }
                     Row { width: parent.width; spacing: 6
                         Label { text: "CURVES"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true; anchors.verticalCenter: parent.verticalCenter }
@@ -504,6 +565,51 @@ GlassWindow {
                         Seg { text: "Vectorscope"; onClicked: scopeImg.source = Backend.scope("vectorscope") }
                         Seg { text: "Histogram"; onClicked: scopeImg.source = Backend.scope("histogram") } }
                     Image { id: scopeImg; width: parent.width; height: source != "" ? width * sourceSize.height / Math.max(1, sourceSize.width) : 0; cache: false; fillMode: Image.PreserveAspectFit } }
+
+                // ---- mask: green screen and shapes
+                Column { objectName: "maskTab"; visible: win.hasClip && win.tab === "mask"; width: parent.width; spacing: 6
+                    readonly property var key: win.clip.key || ({ on: false, colour: "#1EC828", strength: 0.35, soft: 0.2, spill: 0.5 })
+                    readonly property var shape: win.clip.shape || ({ on: false, kind: "oval", x: 0.5, y: 0.5, w: 0.5, h: 0.6, soft: 0.15, use: "cut" })
+                    Label { visible: win.clip.kind !== "compound"; text: "GREEN OR BLUE SCREEN"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true }
+                    Row { visible: win.clip.kind !== "compound"; spacing: 10; height: 34
+                        Toggle { objectName: "keyToggle"; anchors.verticalCenter: parent.verticalCenter; on: !!parent.parent.key.on
+                            onToggled: function (v) { if (v && !parent.parent.key.colour) Backend.findKey(win.clip.id); else Backend.set(win.clip.id, "key.on", v) } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: "Key out the screen behind them"; font.pixelSize: 12 } }
+                    Row { visible: win.clip.kind !== "compound"; spacing: 6; height: 34
+                        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 28; height: 28; radius: 8; color: parent.parent.key.colour || "#1EC828"; border.width: 1; border.color: Theme.t.islandLine }
+                        Btn { objectName: "findKeyBtn"; text: "Find It"; onClicked: Backend.findKey(win.clip.id) }
+                        Btn { objectName: "pickKeyBtn"; text: win.picking ? "Click the screen…" : "Pick in the Picture"; primary: win.picking
+                            onClicked: { win.picking = !win.picking; if (win.picking) toast.say("Click the screen's colour in the picture", false) } } }
+                    Knob { visible: win.clip.kind !== "compound" && !!parent.key.on; label: "How much is keyed"; value: parent.key.strength; from: 0; to: 1; zero: 0.35
+                        onMoved: function (v) { Backend.set(win.clip.id, "key.strength", Math.round(v * 100) / 100) } }
+                    Knob { visible: win.clip.kind !== "compound" && !!parent.key.on; label: "Soft edge"; value: parent.key.soft; from: 0; to: 1; zero: 0.2
+                        onMoved: function (v) { Backend.set(win.clip.id, "key.soft", Math.round(v * 100) / 100) } }
+                    Knob { visible: win.clip.kind !== "compound" && !!parent.key.on; label: "Take away the screen's glow on them"; value: parent.key.spill; from: 0; to: 1; zero: 0.5
+                        onMoved: function (v) { Backend.set(win.clip.id, "key.spill", Math.round(v * 100) / 100) } }
+                    Row { visible: win.clip.kind !== "compound" && !!parent.key.on; spacing: 10; height: 34
+                        Toggle { objectName: "matteToggle"; anchors.verticalCenter: parent.verticalCenter; on: Backend.matte === win.clip.id; onToggled: function (v) { Backend.showMatte(win.clip.id, v) } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; width: 230; wrapMode: Text.WordWrap; text: "Show the matte: white stays, black goes"; font.pixelSize: 12 } }
+                    Label { text: "SHAPE"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true; topPadding: 6 }
+                    Row { spacing: 10; height: 34
+                        Toggle { objectName: "shapeToggle"; anchors.verticalCenter: parent.verticalCenter; on: !!parent.parent.shape.on; onToggled: function (v) { Backend.setShape(win.clip.id, v) } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: "Use a shape"; font.pixelSize: 12 } }
+                    Chips { visible: !!parent.shape.on; items: Backend.shapes.map(function (x) { return [x.id, x.name] }); current: parent.shape.kind || "oval"
+                        onChosen: function (id) { Backend.set(win.clip.id, "shape.kind", id) } }
+                    Chips { objectName: "shapeUse"; visible: !!parent.shape.on; items: [["cut", "Show only what's inside"], ["colour", "Colour only inside"]]; current: parent.shape.use || "cut"
+                        onChosen: function (id) { Backend.set(win.clip.id, "shape.use", id) } }
+                    Label { visible: !!parent.shape.on; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 11; secondary: true
+                        text: parent.shape.use === "colour" ? "The Colour tab's grading only reaches inside the shape (a power window)." : "Outside the shape is see-through: what's under it shows." }
+                    Knob { visible: !!parent.shape.on; label: "Width"; value: parent.shape.w; from: 0.02; to: 1.5; zero: 0.5; onMoved: function (v) { Backend.placeShape(win.clip.id, parent.shape.x, parent.shape.y, v, parent.shape.h) } }
+                    Knob { visible: !!parent.shape.on; label: "Height"; value: parent.shape.h; from: 0.02; to: 1.5; zero: 0.6; onMoved: function (v) { Backend.placeShape(win.clip.id, parent.shape.x, parent.shape.y, parent.shape.w, v) } }
+                    Knob { visible: !!parent.shape.on; label: "Soft edge"; value: parent.shape.soft; from: 0; to: 1; zero: 0.15; onMoved: function (v) { Backend.set(win.clip.id, "shape.soft", Math.round(v * 100) / 100) } }
+                    Row { visible: !!parent.shape.on; spacing: 10; height: 34
+                        Toggle { anchors.verticalCenter: parent.verticalCenter; on: !!parent.parent.shape.invert; onToggled: function (v) { Backend.set(win.clip.id, "shape.invert", v) } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: "The other way round (outside it)"; font.pixelSize: 12 } }
+                    Row { visible: !!parent.shape.on && !!win.clip.tracked; spacing: 10; height: 34
+                        Toggle { anchors.verticalCenter: parent.verticalCenter; on: !!parent.parent.shape.follow; onToggled: function (v) { Backend.followShape(win.clip.id, v) } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; width: 230; wrapMode: Text.WordWrap; text: "Go with what's followed (Effects)"; font.pixelSize: 12 } }
+                    Label { visible: !!parent.shape.on; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 10; secondary: true
+                        text: "Drag the shape in the picture to move it, and its corner to size it." } }
 
                 // ---- effects
                 Column { visible: win.hasClip && win.tab === "effects"; width: parent.width; spacing: 6
@@ -561,15 +667,47 @@ GlassWindow {
                         Knob { required property var modelData; label: modelData[1]; value: ((win.clip.sound || {}).eq || {})[modelData[0]] || 0; from: -12; to: 12; zero: 0; unit: " dB"; decimals: 1
                             onMoved: function (v) { Backend.set(win.clip.id, "sound.eq." + modelData[0], Math.round(v * 2) / 2) } } }
                     Knob { visible: !!win.clip.hasAudio; label: "Echo"; value: (win.clip.sound || {}).echo || 0; from: 0; to: 1; zero: 0
-                        onMoved: function (v) { Backend.set(win.clip.id, "sound.echo", Math.round(v * 100) / 100) } } }
+                        onMoved: function (v) { Backend.set(win.clip.id, "sound.echo", Math.round(v * 100) / 100) } }
+                    Label { visible: !!win.clip.hasAudio && win.clip.kind === "media"; text: "THE BEAT"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true; topPadding: 6 }
+                    Label { visible: !!win.clip.hasAudio && win.clip.kind === "media"; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 11; secondary: true
+                        text: win.clip.bpm ? win.clip.bpm + " beats a minute, marked on the clip (taller on each bar). Cuts and clips snap to them."
+                                           : "Mark the music's beat on the clip, to cut to it." }
+                    Row { visible: !!win.clip.hasAudio && win.clip.kind === "media"; spacing: 6
+                        Btn { objectName: "beatBtn"; text: win.clip.bpm ? "Listen Again" : "Mark the Beat"; onClicked: Backend.markBeats(win.clip.id) }
+                        Btn { visible: !!win.clip.bpm; text: "Take Them Away"; onClicked: Backend.clearBeats(win.clip.id) } } }
 
                 // ---- speed
-                Column { visible: win.hasClip && win.tab === "speed"; width: parent.width; spacing: 8
-                    Chips { items: [[0.25, "¼×"], [0.5, "½×"], [0.75, "¾×"], [1, "1×"], [1.5, "1½×"], [2, "2×"], [4, "4×"], [8, "8×"]]; current: String(win.clip.speed || 1)
-                        onChosen: function (id) { Backend.set(win.clip.id, "speed", parseFloat(id)) } }
+                Column { objectName: "speedTab"; visible: win.hasClip && win.tab === "speed"; width: parent.width; spacing: 8
+                    readonly property var segs: win.clip.segments || []
+                    readonly property int segAt: { for (var i = 0; i < segs.length; i++) if (segs[i].k === win.segment) return i; return 0 }
+                    readonly property var seg: segs[segAt] || ({ k: 0, speed: win.clip.speed || 1 })
+                    Label { visible: !!win.clip.ramped; text: "STRETCH " + (parent.segAt + 1) + " OF " + parent.segs.length; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true }
+                    Chips { items: [[0.1, "10%"], [0.25, "¼×"], [0.5, "½×"], [0.75, "¾×"], [1, "1×"], [1.5, "1½×"], [2, "2×"], [4, "4×"], [8, "8×"]]
+                        current: String(win.clip.ramped ? parent.seg.speed : (win.clip.speed || 1))
+                        onChosen: function (id) { if (win.clip.ramped) Backend.setSegmentSpeed(win.clip.id, parent.seg.k, parseFloat(id)); else Backend.set(win.clip.id, "speed", parseFloat(id)) } }
                     Row { spacing: 10; height: 34
                         Toggle { anchors.verticalCenter: parent.verticalCenter; on: win.clip.keepPitch !== false; onToggled: function (v) { Backend.set(win.clip.id, "keepPitch", v) } }
-                        Label { anchors.verticalCenter: parent.verticalCenter; text: "Keep voices sounding natural"; font.pixelSize: 12 } } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: "Keep voices sounding natural"; font.pixelSize: 12 } }
+                    Label { visible: win.clip.mediaKind === "video"; text: "SPEED RAMP"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true; topPadding: 6 }
+                    Label { visible: win.clip.mediaKind === "video"; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 11; secondary: true
+                        text: win.clip.ramped ? "Pick a stretch, then its speed above. The bar under the clip shows them: orange slower, blue faster, red held."
+                                              : "Split the speed at the playhead to give the rest of the clip a speed of its own; split again for a stretch in between." }
+                    Row { visible: win.clip.mediaKind === "video"; spacing: 6
+                        Btn { objectName: "splitSpeedBtn"; text: "Split Speed Here"; onClicked: { var k = Backend.splitSpeed(win.clip.id); if (k >= 0) win.segment = k } }
+                        Btn { objectName: "holdBtn"; text: "Hold This Frame"; onClicked: Backend.holdFrame(win.clip.id) } }
+                    Flow { visible: !!win.clip.ramped; width: parent.width; spacing: 4
+                        Repeater { model: parent.parent.segs
+                            Seg { required property var modelData; required property int index; anchors.verticalCenter: undefined; on: modelData.k === win.segment
+                                text: (index + 1) + " · " + win.speedLabel(modelData.speed); onClicked: { win.segment = modelData.k; Backend.seek(win.clip.at + modelData.from + 0.01) } } } }
+                    Row { visible: !!win.clip.ramped; spacing: 10; height: 34
+                        Toggle { anchors.verticalCenter: parent.verticalCenter; on: win.clip.rampSmooth !== false; onToggled: function (v) { Backend.set(win.clip.id, "rampSmooth", v) } }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: "Glide from one speed to the next"; font.pixelSize: 12 } }
+                    Repeater { model: win.clip.holdsView || []
+                        Knob { required property var modelData; label: "Held at " + modelData.at.toFixed(1) + " s, for"; value: modelData.length; from: 0; to: 10; zero: 2; unit: " s"; decimals: 1
+                            onMoved: function (v) { Backend.setHold(win.clip.id, modelData.k, Math.round(v * 10) / 10) } } }
+                    Row { visible: !!win.clip.ramped; spacing: 6
+                        Btn { visible: parent.parent.seg.k > 0; text: "Join With the One Before"; onClicked: { Backend.removeSpeedChange(win.clip.id, parent.parent.seg.k); win.segment = 0 } }
+                        Btn { text: "Back to One Speed"; onClicked: { Backend.clearRamp(win.clip.id); win.segment = 0 } } } }
 
                 // ---- title
                 Column { visible: win.hasClip && win.tab === "title"; width: parent.width; spacing: 8
@@ -610,6 +748,8 @@ GlassWindow {
             Seg { text: "Ripple"; tip: "Deleting and trimming close the gaps"; on: win.ripple; onClicked: win.ripple = !win.ripple }
             Seg { text: "Cut Here"; tip: "S: cut at the playhead"; onClicked: { if (!Backend.cut()) toast.say("Nothing under the playhead to cut", true) } }
             Seg { text: "Marker"; tip: "M"; onClicked: Backend.addMarker("") }
+            Seg { objectName: "shotsBtn"; visible: win.hasClip && win.clip.kind === "media" && win.clip.mediaKind === "video"; text: "Find Shots"
+                tip: "Cut the picked clip wherever its footage cuts to another shot"; onClicked: Backend.cutAtShots(win.clip.id) }
             IslandGap {}
             Seg { text: "+ Video Track"; onClicked: Backend.addTrack("video") }
             Seg { text: "+ Audio Track"; onClicked: Backend.addTrack("audio") }
@@ -634,6 +774,12 @@ GlassWindow {
                             Pressable { width: 24; height: 24; radius: 6; onClicked: Backend.setTrack(modelData.id, "locked", !modelData.locked)
                                 Glyph { anchors.centerIn: parent; size: 13; name: "lock"; ink: modelData.locked ? Theme.t.accent : Theme.t.icon; opacity: modelData.locked ? 1 : 0.35 } } } } } } }
 
+        // inside a compound clip: the way back out, where the track names start
+        Pressable { objectName: "breadcrumb"; visible: Backend.inside; x: 8; y: 44; width: win.headW - 10; height: 24; radius: 8; color: hovered ? "#55EC4899" : "#33EC4899"
+            border.width: 1; border.color: "#EC4899"; onClicked: Backend.closeCompound()
+            readonly property var above: Backend.path.length > 1 ? Backend.path[Backend.path.length - 2] : ({ name: "" })
+            Label { x: 8; width: parent.width - 14; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font.pixelSize: 11; font.weight: Font.DemiBold
+                text: "‹  " + parent.above.name } }
         // the ruler
         Item { id: ruler; x: win.headW; y: 44; width: parent.width - win.headW - 8; height: 26; clip: true
             readonly property real stepS: win.z > 120 ? 1 : win.z > 40 ? 2 : win.z > 15 ? 5 : win.z > 6 ? 10 : 30
@@ -684,7 +830,17 @@ GlassWindow {
                                             Text { anchors.centerIn: parent; text: parent.parent.modelData[1] + 1; font.pixelSize: 9; font.weight: Font.Bold; color: "#06202A" } } } }
                                 Rectangle { width: parent.width; height: 16; color: Qt.rgba(0, 0, 0, 0.35)
                                     Label { x: 6; width: parent.width - 12; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 10; color: "#FFFFFF"
-                                        text: (cl.modelData.kind === "title" ? "T  " : "") + cl.modelData.name + (cl.modelData.speed !== 1 ? "  " + cl.modelData.speed + "×" : "") + (cl.modelData.keys ? "  ◆" + cl.modelData.keys : "") } }
+                                        text: (cl.modelData.kind === "title" ? "T  " : cl.modelData.kind === "compound" ? "⧉  " : "") + cl.modelData.name
+                                              + (cl.modelData.speed !== 1 && !cl.modelData.bands.length ? "  " + cl.modelData.speed + "×" : "") + (cl.modelData.keys ? "  ◆" + cl.modelData.keys : "")
+                                              + (cl.modelData.keyed ? "  · keyed" : "") + (cl.modelData.shaped ? "  · shape" : "") } }
+                                // the music's beat, marked on the clip
+                                Repeater { model: cl.modelData.beats && cl.modelData.beats.length < 1200 && win.z > 8 ? cl.modelData.beats : []
+                                    Rectangle { required property var modelData; x: modelData[0] * win.z; y: modelData[1] ? 16 : cl.height - 12; width: 1; height: modelData[1] ? cl.height - 16 : 10
+                                        color: "#FFFFFF"; opacity: modelData[1] ? 0.55 : 0.35 } }
+                                // a speed ramp: its stretches, under the clip
+                                Repeater { model: cl.modelData.bands
+                                    Rectangle { required property var modelData; x: modelData[0] * win.z; y: cl.height - 5; width: Math.max(1, (modelData[1] - modelData[0]) * win.z); height: 5
+                                        color: modelData[2] === 0 ? "#EF4444" : modelData[2] < 0.99 ? "#F59E0B" : modelData[2] > 1.01 ? "#3B82F6" : "#9CA3AF" } }
                                 // fades
                                 Canvas { anchors.fill: parent; visible: cl.modelData.fadeIn > 0 || cl.modelData.fadeOut > 0
                                     onPaint: { var c = getContext("2d"); c.reset(); c.fillStyle = "rgba(0,0,0,0.35)"; var fi = cl.modelData.fadeIn * win.z, fo = cl.modelData.fadeOut * win.z
@@ -698,6 +854,7 @@ GlassWindow {
                                         if (win.tool === "blade") { Backend.pick(cl.modelData.id, false); Backend.seek(cl.modelData.at + (m.x + 7) / win.z); Backend.cut(); return }
                                         if (!cl.chosen || (m.modifiers & Qt.ControlModifier)) Backend.pick(cl.modelData.id, (m.modifiers & Qt.ControlModifier)) }
                                     onPositionChanged: function (m) { if (win.tool === "blade") return; var p = mapToItem(lanes.contentItem, m.x, m.y); cl.dx = p.x - from.x; cl.dy = p.y - from.y; moved = Math.abs(cl.dx) + Math.abs(cl.dy) > 3 }
+                                    onDoubleClicked: { if (cl.modelData.kind === "compound") Backend.openCompound(cl.modelData.id) }
                                     onReleased: function (m) {
                                         if (win.tool === "blade") return
                                         if (moved) { var t = win.trackAt(lane.y + 3 + cl.dy + height / 2); var ok = Backend.move(cl.modelData.id, t ? t.id : cl.modelData.track, cl.modelData.at + cl.dx / win.z); if (!ok) toast.say("It doesn't fit there", true) }

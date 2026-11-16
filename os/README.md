@@ -572,7 +572,7 @@ Four apps are being taken, round by round, to the level of the professional tool
 |---|---|---|
 | Easel | Photoshop, Illustrator | 3 |
 | Code | Xcode, VS Code | 3 |
-| Clips | Final Cut Pro, Premiere, DaVinci Resolve | 3 |
+| Clips | Final Cut Pro, Premiere, DaVinci Resolve | 4 |
 | Tempo (first called Studio) | Logic Pro, Ableton Live | 2 |
 
 **Tempo, pro pass one** (`apps/huginn_tempo_engine.py`, `apps/huginn_tempo.py`, `apps/qml/Tempo.qml`)
@@ -676,6 +676,56 @@ Four apps are being taken, round by round, to the level of the professional tool
     standard says; a dull mix at −23.9 LUFS comes out at −14.0 for streaming, −9.1 loud and −16.0 for a podcast,
     peaks never past −1.00 dB, its balance nearer the reference (21.1 dB off before, 13.5 after); 1.5 ms a block.
     On screen: mastering the test song, −18.2 → −14.3 LUFS, what it set.
+
+**Clips, pro round four** (`apps/huginn_clips.py`, `apps/qml/Clips.qml`)
+- *Speed ramps and held frames* (Speed). "Split Speed Here" gives the rest of a clip its own speed; split again
+  for a stretch in between, then pick each stretch's speed (10 % to 8×). Changes glide (the speed moves in a
+  straight line across up to 0.3 s of footage either side, so a ramp eases in and out) or step. "Hold This Frame"
+  holds the picture under the playhead for two seconds (any length after). A bar under the clip shows the stretches:
+  orange slower, blue faster, red held.
+  - Ramps are drawn with MLT's `timeremap` link on a chain: Clips works out which second of footage each frame of
+    the film shows (exactly, both ways: a glide's time is a logarithm) and gives MLT a point wherever the line bends
+    and every frame of a glide. Ramps belong to the footage, so trimming, cutting, tracking and the waveform meters
+    all go through the same mapping; a cut inside a held frame goes to where the hold starts.
+  - A clip that grows past the room after it moves what follows on its track along, rather than refusing.
+- *Green and blue screens* (a new Mask tab): Find It reads the screen's colour from the picture (the middle of the
+  pixels where green or blue stands clear of the others), or pick it in the picture. How much is keyed, a soft
+  edge, and taking away the screen's glow on the subject (FFmpeg's `chromakey` and `despill`). "Show the matte"
+  shows the clip alone as white (stays) and black (goes), to judge the edge.
+- *Shapes* (Mask): an oval, rectangle or diamond, soft-edged, the right way round or inside out, dragged and sized
+  in the picture. Either the clip shows only inside it (what's under shows outside; with a key, both apply), or the
+  Colour tab's grading only reaches inside it: a power window (`mask_start` / `mask_apply` round the grade). A shape
+  can go with what motion tracking followed, keeping its distance from it.
+- *Compound clips* (Compound in the toolbar, Alt+G): the picked clips become one, to move, trim, grade, key and
+  mask as one. Open it (double-click, Return or Open) to edit inside, with the way back above the track names
+  (Esc); it follows its insides' length, moving what's after it along when it grows. Break Apart puts its clips back
+  where they came from, trimmed as it was. Built as a tractor of its own inside the project, on a see-through
+  background so what's under it shows. Undo works inside and out; exporting from inside makes the whole film.
+- *Find Shots* (toolbar): cuts a clip wherever its footage cuts to another shot: a frame whose colours and layout
+  both jump, well above the usual change around it, so pans and busy shots don't count.
+- *The beat* (Sound): marks the music's beat on the clip (spectral flux in bands with the low ones leading, the
+  tempo from the strongest repeat between 70 and 180 a minute, the beats by dynamic programming, then nudged onto
+  where the sound actually jumps). Taller marks on each bar; cuts, trims and moves snap to them, and they go where
+  the clip goes.
+- *Match another shot* (Colour): a clip's light and colour made to sit like another's: a 3D LUT that gives its
+  lightness and two colour axes (CIE Lab) the other shot's average and spread (Reinhard's transfer), sampled over
+  both clips, applied before any other grading.
+- Fixed: exports were 16:15 pixels and pillarboxed (MLT's consumer, given a size and nothing else, assumed PAL's
+  pixel shape): the export now says square pixels and the shape. The timeline's pictures now show the part of the
+  footage a clip uses (trims, speed and ramps), not the whole file.
+- Tested (85 checks, on made-up footage whose frames carry their own number): a stepped ramp 6 s long with every
+  frame the footage it should be (±1 frame), four film frames per footage frame at 25 %, a held second, a glide
+  that only moves forward with no jump in speed, cutting a ramped clip and the pictures unchanged; the screen's
+  colour found (#1EC728 for #1EC828) and blue told apart, the background showing through and the subject kept,
+  less green at the edge with spill taken away, the matte black and white; an oval, a rectangle inside out, a key
+  and a shape together, a power window grey inside and coloured outside, a shape following a tracked thing 96 px
+  in 1.5 s; a compound looking exactly like the clips it was made of, edited inside, growing and moving what
+  follows, undone, trimmed and broken apart into the same pictures, see-through on top, graded as one; the two
+  cuts of a three-shot clip and none in a busy pan, 120.2 and 95.2 beats a minute with every beat within 18 ms of
+  the kick and none on the hats, in 0.1 s for 30 s; a warm shot matched to a cool one 97 % of the way on average;
+  and a real export of all of it (640×360, square pixels, the right length, with sound). On screen: the key and the
+  oval with its outline, dragging it, the matte, a ramp's stretches and slowing one, opening and leaving a compound
+  clip, Find Shots, matching a shot, the beat on a music clip.
 
 ## From power-on to the desktop
 

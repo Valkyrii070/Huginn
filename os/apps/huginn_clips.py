@@ -226,6 +226,9 @@ def blank_title(cid: str, track: str, at: float, length: float, text: str, style
 
 
 def clip_len(c: dict) -> float:
+    if ramped(c):
+        r = Remap(c)
+        return max(0.0, r.out(float(c["out"])) - r.out(float(c["in"])))
     return max(0.0, (c["out"] - c["in"]) / max(0.01, c.get("speed", 1.0)))
 
 
@@ -259,9 +262,17 @@ def fits(p: dict, tid: str, at: float, length: float, ignore: str = "") -> bool:
 
 
 def accepts(track: dict, clip: dict, media: dict) -> bool:
+    if clip.get("kind") == "compound":
+        return track.get("kind") == compound_content(clip) and track.get("role") != "captions"
     if track.get("kind") == "audio":
         return clip["kind"] == "media" and media.get("kind") in ("audio", "video") and (media.get("kind") == "audio" or media.get("audio"))
     return clip["kind"] == "title" or media.get("kind") in ("video", "image")
+
+
+def beats_in(c: dict) -> list:
+    """A clip's marked beats as seconds into the clip (those inside it), with which start a bar."""
+    lo, hi = float(c.get("in", 0)), float(c.get("out", 0))
+    return [[round(out_of(c, b), 3), k % 4 == 0] for k, b in enumerate(c.get("beats") or []) if lo <= b < hi]
 
 
 def snap(p: dict, t: float, within: float, ignore: str = "", playhead: float = -1) -> float:
@@ -269,6 +280,8 @@ def snap(p: dict, t: float, within: float, ignore: str = "", playhead: float = -
     for c in p["clips"]:
         if c["id"] != ignore:
             points += [c["at"], clip_end(c)]
+        if c.get("beats"):
+            points += [c["at"] + u for u, _ in beats_in(c)]
     best = min(points, key=lambda x: abs(x - t), default=t)
     return best if abs(best - t) <= within else t
 
@@ -285,8 +298,9 @@ def blade(p: dict, t: float, ids: list = None) -> list:
             second = copy.deepcopy(c)
             second["id"] = f"c{p['next']}"
             p["next"] += 1
-            src = c["in"] + (t - c["at"]) * c.get("speed", 1.0)
-            c["out"], second["in"], second["at"] = round(src, 4), round(src, 4), round(t, 4)
+            src = src_of(c, t - c["at"])
+            c["out"], second["in"] = round(src, 4), round(src, 4)
+            second["at"] = round(c["at"] + clip_len(c), 4) if ramped(c) else round(t, 4)   # a cut in a held frame goes before it
             c["fadeOut"], second["fadeIn"] = 0.0, 0.0
             c["transition"] = None
             cut = t - c["at"]
@@ -658,12 +672,392 @@ def whisper_command(tool: dict, wav: str, base: str, language: str = "") -> list
     return [_sys.executable, "-c", code, wav, base, language]
 
 
+# ------------------------------------------------------------------ round four: speed ramps and holds
+RAMP_SMOOTH = 0.3            # seconds of footage a smooth change of speed takes on either side of where it's set
+SPEED_CHOICES = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0]
+HOLD_LENGTH = 2.0
+
+
+def ramped(c: dict) -> bool:
+    return c.get("kind") == "media" and bool(c.get("ramp") or c.get("holds"))
+
+
+def _run_len(s0: float, s1: float, v0: float, v1: float) -> float:
+    """Seconds of film for the footage s0..s1 when the speed goes in a straight line from v0 to v1 across it."""
+    ds = s1 - s0
+    if ds <= 0:
+        return 0.0
+    if abs(v1 - v0) < 1e-9:
+        return ds / v0
+    return ds / (v1 - v0) * math.log(v1 / v0)
+
+
+class Remap:
+    """How a clip's footage is laid out in the film: speeds set from points in the footage on (gliding across
+    each point when smooth) and frames held for a while. out(s) is the film's seconds from the footage's start
+    to its second s; src(a) is the other way round. Only holds between the clip's in and out count."""
+
+    def __init__(self, c: dict):
+        base = max(0.05, min(16.0, float(c.get("speed") or 1.0)))
+        pts = {}
+        for s, v in c.get("ramp") or []:
+            pts[round(max(0.0, float(s)), 4)] = max(0.05, min(16.0, float(v)))
+        if 0.0 in pts:
+            base = pts.pop(0.0)
+        starts, speeds = [0.0] + sorted(pts), [base] + [pts[s] for s in sorted(pts)]
+        n = len(starts)
+        half = [0.0] * (n + 1)
+        if c.get("rampSmooth", True):
+            for k in range(1, n):
+                if abs(speeds[k] - speeds[k - 1]) > 1e-9:
+                    right = starts[k + 1] - starts[k] if k + 1 < n else 1e9
+                    half[k] = max(0.0, min(RAMP_SMOOTH, 0.45 * (starts[k] - starts[k - 1]), 0.45 * right))
+        runs, at = [], 0.0
+        for k in range(n):
+            end = starts[k + 1] - half[k + 1] if k + 1 < n else 1e9
+            if end > at + 1e-9:
+                runs.append((at, end, speeds[k], speeds[k]))
+            if k + 1 < n:
+                if half[k + 1] > 0:
+                    runs.append((starts[k + 1] - half[k + 1], starts[k + 1] + half[k + 1], speeds[k], speeds[k + 1]))
+                at = starts[k + 1] + half[k + 1]
+        lo, hi = float(c.get("in", 0)), float(c.get("out", 1e9))
+        holds = sorted((float(h), max(0.0, float(d))) for h, d in (c.get("holds") or []) if lo - 1e-6 <= float(h) < hi and float(d) > 0)
+        self.starts, self.speeds = starts, speeds
+        self.segs, a, i = [], 0.0, 0                  # (s0, s1, v0, v1, a0, a1); a hold has s0 == s1
+        for s0, s1, v0, v1 in runs:
+            cut = s0
+            while i < len(holds) and holds[i][0] < s1:
+                h, d = holds[i]
+                if h > cut:
+                    vc, vh = self._v(s0, s1, v0, v1, cut), self._v(s0, s1, v0, v1, h)
+                    du = _run_len(cut, h, vc, vh)
+                    self.segs.append((cut, h, vc, vh, a, a + du))
+                    a, cut = a + du, h
+                self.segs.append((h, h, 0.0, 0.0, a, a + d))
+                a += d
+                i += 1
+            vc = self._v(s0, s1, v0, v1, cut)
+            du = _run_len(cut, s1, vc, v1)
+            self.segs.append((cut, s1, vc, v1, a, a + du))
+            a += du
+
+    @staticmethod
+    def _v(s0, s1, v0, v1, s):
+        return v0 if s1 <= s0 else v0 + (v1 - v0) * (s - s0) / (s1 - s0)
+
+    def speed_at(self, s: float) -> float:
+        for s0, s1, v0, v1, _, _ in self.segs:
+            if s1 > s0 and s0 <= s < s1:
+                return self._v(s0, s1, v0, v1, s)
+        return self.speeds[-1]
+
+    def out(self, s: float) -> float:
+        if s <= 0:
+            return s / self.speeds[0]
+        for s0, s1, v0, v1, a0, a1 in self.segs:
+            if s1 > s0 and s0 < s <= s1:
+                return a0 + _run_len(s0, s, v0, self._v(s0, s1, v0, v1, s))
+        return self.segs[-1][5]
+
+    def src(self, a: float) -> float:
+        if a <= 0:
+            return a * self.speeds[0]
+        for s0, s1, v0, v1, a0, a1 in self.segs:
+            if a0 <= a < a1:
+                if s1 <= s0:
+                    return s0
+                if abs(v1 - v0) < 1e-9:
+                    return s0 + v0 * (a - a0)
+                k = (v1 - v0) / (s1 - s0)
+                return s0 + v0 * (math.exp(k * (a - a0)) - 1) / k
+        return self.segs[-1][1]
+
+    def time_map(self, frames: int, fps: int, longest: float) -> str:
+        """For MLT's timeremap link: the footage's second to show at each of the film's frames, at every frame
+        where the line bends (and every frame of a glide); straight in between."""
+        want = {0, max(0, frames - 1)}
+        for s0, s1, v0, v1, a0, a1 in self.segs:
+            f0, f1 = math.ceil(a0 * fps - 1e-6), math.floor(a1 * fps - 1e-6)
+            if f0 > frames:
+                break
+            want.update(f for f in (f0, f1, f1 + 1) if 0 <= f < frames)
+            if s1 > s0 and abs(v1 - v0) > 1e-9:
+                want.update(range(max(0, f0), min(frames, f1 + 1)))
+        last = max(0.0, longest - 0.5 / max(1, fps))
+        return ";".join(f"{f}={min(last, max(0.0, self.src(f / fps))):.5f}" for f in sorted(want))
+
+
+def src_of(c: dict, u: float) -> float:
+    """The footage's second shown `u` seconds into the clip (before or after it too)."""
+    if ramped(c):
+        r = Remap(c)
+        return r.src(r.out(float(c["in"])) + u)
+    return float(c["in"]) + u * float(c.get("speed") or 1.0)
+
+
+def out_of(c: dict, s: float) -> float:
+    """How many seconds into the clip the footage's second `s` is shown (where a held frame first shows)."""
+    if ramped(c):
+        r = Remap(c)
+        return r.out(s) - r.out(float(c["in"]))
+    return (s - float(c["in"])) / float(c.get("speed") or 1.0)
+
+
+def speed_bands(c: dict) -> list:
+    """The clip's stretches as [from, to, speed] in seconds into the clip; a held frame has speed 0."""
+    if not ramped(c):
+        return [[0.0, clip_len(c), float(c.get("speed") or 1.0)]]
+    r = Remap(c)
+    a_in, a_out = r.out(float(c["in"])), r.out(float(c["out"]))
+    out = []
+    for s0, s1, v0, v1, a0, a1 in r.segs:
+        x0, x1 = max(a0, a_in), min(a1, a_out)
+        if x1 - x0 > 1e-4:
+            out.append([round(x0 - a_in, 4), round(x1 - a_in, 4), 0.0 if s1 <= s0 else round((v0 + v1) / 2, 3)])
+    return out
+
+
+# ------------------------------------------------------------------ round four: keying
+def screen_colour(rgb: np.ndarray) -> str:
+    """The colour of the green or blue screen in a picture (rows × columns × RGB): the middle of the pixels where
+    green (or blue) stands well clear of the other two, whichever covers more."""
+    px = rgb.reshape(-1, 3).astype(np.float32)
+    r, g, b = px[:, 0], px[:, 1], px[:, 2]
+    green = (g > 50) & (g > r * 1.25 + 10) & (g > b * 1.15 + 10)
+    blue = (b > 50) & (b > r * 1.25 + 10) & (b > g * 1.1 + 10)
+    pick = green if green.sum() >= blue.sum() else blue
+    if pick.sum() < px.shape[0] * 0.02:
+        return ""
+    med = np.median(px[pick], axis=0)
+    return "#%02X%02X%02X" % tuple(int(round(v)) for v in med)
+
+
+def key_hue(colour: str) -> str:
+    try:
+        r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+    except (ValueError, TypeError):
+        return "green"
+    return "blue" if b > g else "green"
+
+
+def frame_of(path: str, at: float, width: int = 320) -> np.ndarray:
+    """One picture of a file at `at` seconds, `width` across, as rows × columns × RGB (or an empty array)."""
+    try:
+        info = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", path],
+                              capture_output=True, text=True, timeout=20)
+        s = (json.loads(info.stdout or "{}").get("streams") or [{}])[0]
+        h = max(2, int(round(width * int(s.get("height") or 9) / max(1, int(s.get("width") or 16)) / 2)) * 2)
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0.0, at):.3f}", "-i", path, "-frames:v", "1", "-vf", f"scale={width}:{h}",
+                              "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return np.zeros((0, 0, 3), np.uint8)
+    if len(raw) < width * h * 3:
+        return np.zeros((0, 0, 3), np.uint8)
+    return np.frombuffer(raw[:width * h * 3], np.uint8).reshape(h, width, 3)
+
+
+SHAPES = {"oval": ("Oval", 0.3), "rect": ("Rectangle", 0.0), "diamond": ("Diamond", 0.9)}
+
+
+# ------------------------------------------------------------------ round four: compound clips
+def inner_view(root: dict, c: dict) -> dict:
+    """A compound clip's insides as a project of their own: its tracks, clips and markers, with the film's media,
+    bins and settings (shared, so media added inside are the film's)."""
+    inner = c.setdefault("inner", {"tracks": [], "clips": [], "markers": []})
+    v = {k: val for k, val in root.items() if k not in ("tracks", "clips", "markers", "name")}
+    v.update(tracks=inner["tracks"], clips=inner["clips"], markers=inner.setdefault("markers", []), name=c.get("name") or "Compound clip")
+    return v
+
+
+def compound_content(c: dict) -> str:
+    """"video" when anything inside is seen, else "audio"."""
+    tracks = {t["id"]: t for t in (c.get("inner") or {}).get("tracks", [])}
+    return "video" if any(tracks.get(x["track"], {}).get("kind") == "video" for x in (c.get("inner") or {}).get("clips", [])) else "audio"
+
+
+# ------------------------------------------------------------------ round four: shots, beats, matching colour
+def frames_between(path: str, start: float, end: float, width: int = 64, fps: float = 0) -> tuple:
+    """Small pictures of a file from `start` to `end` (every frame, or `fps` a second) -> (frames, their times)."""
+    try:
+        info = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "json", path],
+                              capture_output=True, text=True, timeout=20)
+        s = (json.loads(info.stdout or "{}").get("streams") or [{}])[0]
+        a, b = (s.get("avg_frame_rate") or "30/1").split("/")
+        rate = fps or (float(a) / float(b) if float(b) else 30.0)
+        h = max(2, int(round(width * int(s.get("height") or 9) / max(1, int(s.get("width") or 16)) / 2)) * 2)
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-i", path, "-t", f"{max(0.04, end - start):.3f}",
+                              "-vf", f"fps={rate:.5f},scale={width}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=900).stdout
+    except (OSError, subprocess.SubprocessError, ValueError, ZeroDivisionError):
+        return np.zeros((0, 2, width, 3), np.uint8), np.zeros(0)
+    n = len(raw) // (width * h * 3)
+    frames = np.frombuffer(raw[:n * width * h * 3], np.uint8).reshape(n, h, width, 3)
+    return frames, start + np.arange(n) / rate
+
+
+def shot_changes(frames: np.ndarray, times: np.ndarray, least: float = 0.4) -> list:
+    """Where the picture cuts to another shot: frames whose colours and layout both jump, well above the usual
+    change between neighbouring frames there (so a busy shot doesn't count as a cut)."""
+    if len(frames) < 3:
+        return []
+    f = frames.astype(np.float32)
+    diff = np.abs(f[1:] - f[:-1]).mean(axis=(1, 2, 3)) / 255.0               # the layout moved
+    hist = np.stack([np.stack([np.histogram(x[..., ch], bins=16, range=(0, 256))[0] for ch in range(3)]) for x in frames]).astype(np.float32)
+    hist /= max(1.0, float(frames.shape[1] * frames.shape[2]))
+    hd = np.abs(hist[1:] - hist[:-1]).sum(axis=(1, 2)) / 6.0                 # the colours changed (0..1)
+    score = 0.5 * diff + 0.5 * hd
+    out, last = [], -1e9
+    for i, v in enumerate(score):
+        around = np.concatenate([score[max(0, i - 15):i], score[i + 1:i + 16]])
+        usual = float(np.median(around)) if around.size else 0.0
+        if v > 0.12 and v > 4 * usual + 0.03 and times[i + 1] - last >= least:
+            out.append(float(times[i + 1]))
+            last = times[i + 1]
+    return out
+
+
+BEAT_BANDS = [(0, 120, 2.0), (120, 250, 1.5), (250, 500, 1.0), (500, 1000, 1.0), (1000, 2000, 0.8), (2000, 4000, 0.6), (4000, 22050, 0.5)]
+
+
+def onset_envelope(x: np.ndarray, rate: int, hop: int = 128) -> np.ndarray:
+    """How much new sound starts in each short moment: spectral flux of the log spectrum in bands, each band
+    evened out on its own and the low ones counted more, so kicks and snares lead and hi-hats don't."""
+    n = 1024
+    if x.size < n * 2:
+        return np.zeros(0)
+    x = x.astype(np.float32) / 32768.0
+    frames = np.lib.stride_tricks.sliding_window_view(x, n)[::hop] * np.hanning(n).astype(np.float32)
+    mag = np.log1p(100 * np.abs(np.fft.rfft(frames, axis=1)))
+    rise = np.maximum(0, np.diff(mag, axis=0))
+    freqs = np.fft.rfftfreq(n, 1 / rate)
+    k = max(1, int(rate / hop * 0.5))
+    env = np.zeros(rise.shape[0], np.float32)
+    for lo, hi, w in BEAT_BANDS:
+        sel = (freqs >= lo) & (freqs < hi)
+        if not sel.any():
+            continue
+        band = rise[:, sel].sum(axis=1)
+        band = np.maximum(0, band - np.convolve(band, np.ones(2 * k + 1) / (2 * k + 1), mode="same"))   # take away the slow swell
+        sd = float(band.std())
+        if sd > 1e-9:
+            env += w * band / sd
+    env = np.concatenate([[0.0], env])
+    sd = float(env.std()) or 1.0
+    return env / sd
+
+
+def beat_times(x: np.ndarray, rate: int, hop: int = 128) -> tuple:
+    """The music's beat: (beats a minute, the beats in seconds). The tempo is the strongest repeat in the
+    onsets between 70 and 180 a minute, leaning towards 120; the beats are then found by dynamic programming
+    (Ellis 2007): each beat sits on a strong onset about one beat after the last."""
+    env = onset_envelope(x, rate, hop)
+    fr = rate / hop
+    if env.size < fr * 4:
+        return 0.0, []
+    ac = np.correlate(env, env, mode="full")[env.size - 1:]
+    lags = np.arange(int(fr * 60 / 180), int(fr * 60 / 70) + 1)
+    lags = lags[lags < ac.size]
+    bpms = 60 * fr / lags
+    weight = np.exp(-0.5 * (np.log2(bpms / 120) / 0.9) ** 2)
+    period = float(lags[np.argmax(ac[lags] * weight)])
+    lo, hi = max(1, int(period * 0.9)), int(period * 1.1) + 1                # refine the period to a fraction of a frame
+    best, bp = -1e9, period
+    for p in np.linspace(lo, hi, 41):
+        idx = (np.arange(0, env.size - 1, p)).astype(int)
+        sc = max(env[np.clip(idx + o, 0, env.size - 1)].sum() for o in range(int(p)))
+        if sc > best:
+            best, bp = sc, p
+    period = bp
+    score, back = env.copy(), np.full(env.size, -1)
+    a0, a1 = int(round(period * 0.5)), int(round(period * 2))
+    for t in range(a1, env.size):
+        prev = np.arange(t - a1, t - a0)
+        pen = -100.0 * np.log((t - prev) / period) ** 2
+        cand = score[prev] + pen
+        j = int(np.argmax(cand))
+        if cand[j] > 0:
+            score[t] = env[t] + cand[j]
+            back[t] = prev[j]
+    t = int(np.argmax(score[-int(period * 2):])) + env.size - int(period * 2)
+    beats = []
+    while t >= 0:
+        beats.append(t)
+        t = int(back[t])
+    beats = np.array(sorted(beats), float)
+    if beats.size > 4:                                                         # the stretch before the first found beat
+        first = beats[0] - period
+        while first >= 0:
+            beats = np.concatenate([[first], beats])
+            first -= period
+    times = beats / fr + (1024 / 2) / rate
+    # The long window hears a beat early. Where does the sound actually jump, beat by beat? Move them all by the
+    # usual difference (one shift for all, so the beat stays even).
+    e = np.convolve(x.astype(np.float32) ** 2, np.ones(256) / 256, mode="same")[::32]
+    de = np.diff(np.log(e + 1e-3))
+    shifts = []
+    for t in times:
+        a, z = int((t - 0.03) * rate / 32), int((t + 0.12) * rate / 32)
+        if 0 <= a < z < de.size:
+            shifts.append((a + int(np.argmax(de[a:z]))) * 32 / rate - t)
+    if len(shifts) >= 4:
+        times = times + float(np.median(shifts))
+    return round(60 * fr / period, 1), [round(float(t), 3) for t in times if t >= 0]
+
+
+def _lab(rgb: np.ndarray) -> np.ndarray:
+    """sRGB (0..1) to CIE Lab (D65)."""
+    c = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    m = np.array([[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.1191920, 0.9503041]])
+    xyz = c @ m.T / np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 216 / 24389, np.cbrt(xyz), (24389 / 27 * xyz + 16) / 116)
+    return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], axis=-1)
+
+
+def _rgb(lab: np.ndarray) -> np.ndarray:
+    fy = (lab[..., 0] + 16) / 116
+    fx, fz = fy + lab[..., 1] / 500, fy - lab[..., 2] / 200
+    f = np.stack([fx, fy, fz], axis=-1)
+    xyz = np.where(f ** 3 > 216 / 24389, f ** 3, (116 * f - 16) / (24389 / 27)) * np.array([0.95047, 1.0, 1.08883])
+    m = np.array([[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 0.0415560], [0.0556434, -0.2040259, 1.0572252]])
+    c = np.clip(xyz @ m.T, 0, 1)
+    return np.clip(np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055), 0, 1)
+
+
+def colour_stats(frames: np.ndarray) -> tuple:
+    """Mean and spread of lightness and colour (Lab) over some pictures, leaving out clipped blacks and whites."""
+    px = frames.reshape(-1, 3).astype(np.float32) / 255.0
+    lum = px.mean(axis=1)
+    px = px[(lum > 0.02) & (lum < 0.98)] if ((lum > 0.02) & (lum < 0.98)).sum() > 100 else px
+    lab = _lab(px)
+    return lab.mean(axis=0), lab.std(axis=0) + 1e-3
+
+
+def match_cube(src: tuple, ref: tuple, path: str, size: int = 33, amount: float = 1.0) -> str:
+    """A 3D LUT (.cube) that moves the colours of one shot to sit like another's (Reinhard's transfer in Lab:
+    each of lightness and the two colour axes takes the other shot's average and spread)."""
+    (ms, ss), (mr, sr) = src, ref
+    scale = np.clip(sr / ss, 0.5, 2.0)
+    g = np.linspace(0, 1, size)
+    b_, g_, r_ = np.meshgrid(g, g, g, indexing="ij")                          # .cube: red changes fastest
+    rgb = np.stack([r_, g_, b_], axis=-1).reshape(-1, 3)
+    lab = _lab(rgb)
+    moved = (lab - ms) * scale + mr
+    out = _rgb(lab + (moved - lab) * max(0.0, min(1.0, amount)))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(f"TITLE \"Clips colour match\"\nLUT_3D_SIZE {size}\n")
+        fh.write("\n".join(f"{r:.5f} {gg:.5f} {bb:.5f}" for r, gg, bb in out) + "\n")
+    return path
+
+
 # ============================================================================================ to MLT
 class Builder:
     """Writes the project as an MLT XML document at a given size (the viewer's or the export's)."""
 
-    def __init__(self, p: dict, width: int, height: int, proxies: dict = None, font_for=None, has_cairo: bool = True):
+    def __init__(self, p: dict, width: int, height: int, proxies: dict = None, font_for=None, has_cairo: bool = True, matte: str = "", pre: str = ""):
         self.p, self.W, self.H, self.fps = p, width, height, int(p.get("fps") or 30)
+        self.pre = pre                                        # before every id, for a compound clip's insides
+        self.matte = matte                                    # a clip shown alone as its see-through (white keeps, black goes)
         self.proxies, self.font_for, self.cairo = proxies or {}, font_for or (lambda fam: font_file(fam)), has_cairo
         self.out, self.ids = [], 0
 
@@ -689,6 +1083,15 @@ class Builder:
             props.update({"mlt_service": "color", "resource": "#00000000", "mlt_image_format": "rgba", "length": length_f + 2})
             pin, plen = 0, length_f + 2
             filters += self.title_filter(c)
+        elif c["kind"] == "compound":                         # its insides, as a tractor of their own
+            inner = Builder(inner_view(self.p, c), self.W, self.H, self.proxies, self.font_for, self.cairo, pre=f"{pid}_")
+            filters = [f for f in self.picture_filters(c, upper) + self.sound_filters(c, 0, length_f) if f]
+            pin = int(round(float(c["in"]) * fps))
+            span = (pin, pin + length_f - 1)
+            filters = [part for f in filters for part in f.split("\x00") if part]
+            filters = [f.replace("<filter>", f'<filter in="{span[0]}" out="{span[1]}">', 1) for f in filters]
+            parts, tractor, end = inner.tractor(pid, transparent=True, extra="".join(filters), at_least=pin + length_f)
+            return "".join(parts) + tractor, pin, end
         else:
             m = media_of(p, c["media"])
             path = self.proxies.get(m.get("id"), m.get("path", ""))
@@ -696,9 +1099,23 @@ class Builder:
             if steady > 0.01 and m.get("kind") == "video" and stab_path(m.get("path", ""), steady).is_file():
                 path = str(stab_path(m.get("path", ""), steady))      # the steadied copy (same length, same sound)
             track = track_of(p, c["track"])
+            link = ""
             if m.get("kind") == "image":
                 props.update({"mlt_service": "pixbuf", "resource": path, "ttl": 1, "length": length_f + 2, "aspect_ratio": 1})
                 pin, plen = 0, length_f + 2
+            elif ramped(c):                                   # speed ramps and holds: a chain through MLT's timeremap link
+                r = Remap(c)
+                longest = float(m.get("duration") or c["out"])
+                plen = max(1, int(math.floor(r.out(longest) * fps)))
+                pin = int(round(r.out(float(c["in"])) * fps))
+                props.update({"mlt_service": "avformat-novalidate", "resource": path, "length": plen})
+                link = ("<link>" + self.prop("mlt_service", "timeremap") + self.prop("time_map", r.time_map(plen, fps, longest))
+                        + self.prop("pitch", 1 if c.get("keepPitch", True) else 0) + self.prop("image_mode", "nearest") + "</link>")
+                if track.get("kind") == "audio" or c.get("soundOnly"):
+                    props["video_index"] = -1
+                heard = (track in sounding(p)) if track else bool(c.get("heard", True))
+                if c.get("mute") or not m.get("audio") or not heard:
+                    props["audio_index"] = -1
             else:
                 media_f = max(1, int(math.floor(float(m.get("duration") or clip_len(c)) * fps / speed)))
                 if abs(speed - 1.0) > 1e-3:
@@ -717,8 +1134,16 @@ class Builder:
         span = (pin, pin + length_f - 1)
         filters = [part for f in filters if f for part in f.split("\x00") if part]
         filters = [f.replace("<filter>", f'<filter in="{span[0]}" out="{span[1]}">', 1) for f in filters]
-        xml = f'<producer id="{pid}" in="0" out="{plen - 1}">' + "".join(self.prop(k, v) for k, v in props.items()) + "".join(filters) + "</producer>"
+        tag = "chain" if c["kind"] != "title" and link else "producer"
+        xml = (f'<{tag} id="{pid}" in="0" out="{plen - 1}">' + "".join(self.prop(k, v) for k, v in props.items()) + (link if tag == "chain" else "")
+               + "".join(filters) + f"</{tag}>")
         return xml, pin, plen
+
+    def pframe(self, c: dict, s: float) -> int:
+        """The producer's frame showing the footage's second `s` (speed, ramps and holds included)."""
+        if ramped(c):
+            return int(round(Remap(c).out(s) * self.fps))
+        return int(round(s * self.fps / max(0.1, float(c.get("speed") or 1))))
 
     def title_filter(self, c: dict) -> list:
         st = c.get("style") or {}
@@ -751,7 +1176,19 @@ class Builder:
             w, h = int(m.get("width") or self.W), int(m.get("height") or self.H)
             l, t, r, b = (max(0.0, min(0.45, float(v))) for v in crop)
             out.append(self.filt("crop", {"left": int(w * l), "right": int(w * r), "top": int(h * t), "bottom": int(h * b), "center": 0}))
+        key = c.get("key") or {}
+        if key.get("on"):                                    # green or blue screen
+            colour = (key.get("colour") or "#1EC828").lstrip("#")[:6]
+            out.append(self.filt("avfilter.chromakey", {"av.color": "0x" + colour, "av.similarity": f"{0.02 + 0.38 * float(key.get('strength', 0.35)):.3f}",
+                                                        "av.blend": f"{0.3 * float(key.get('soft', 0.2)):.3f}"}))
+            if float(key.get("spill", 0.5)) > 0.01:
+                out.append(self.filt("avfilter.despill", {"av.type": key_hue("#" + colour), "av.mix": f"{float(key.get('spill', 0.5)):.2f}", "av.expand": 0}))
+        shape = c.get("shape") or {}
+        window = bool(shape.get("on")) and shape.get("use") == "colour"
+        graded = len(out)
         col = c.get("colour") or {}
+        if col.get("match") and os.path.isfile(col["match"]):     # matched to another shot, before any other grading
+            out.append(self.filt("avfilter.lut3d", {"av.file": col["match"], "av.interp": "tetrahedral"}))
         if abs(float(col.get("exposure", 0))) > 1e-3:
             out.append(self.filt("avfilter.exposure", {"av.exposure": f"{float(col['exposure']):.3f}"}))
         con, sat = float(col.get("contrast", 1)), float(col.get("saturation", 1))
@@ -773,6 +1210,9 @@ class Builder:
         curves = {ch: pts for ch, pts in (col.get("curves") or {}).items() if ch in CURVE_CHANNELS and not curve_plain(pts)}
         if curves:
             out.append(self.filt("avfilter.curves", {CURVE_CHANNELS[ch]: curve_arg(pts) for ch, pts in curves.items()}))
+        if window and len(out) > graded:                     # the grade only inside the shape (or outside it)
+            out.insert(graded, self.filt("mask_start", {"filter": "frei0r.alphaspot", **{f"filter.{k}": v for k, v in self.shape_props(c, shape, masked=True).items()}}))
+            out.append(self.filt("mask_apply", {"transition": "frei0r.cairoblend" if self.cairo else "affine"}))
         fx = c.get("effects") or {}
         steady = float(fx.get("stabilise") or 0)
         if steady > 0.01 and not stab_path(m.get("path", ""), steady).is_file():
@@ -794,17 +1234,46 @@ class Builder:
             W, H = self.W, self.H                              # MLT measures the area in the project's own size
             boxes = tr["boxes"]
             step = max(1, len(boxes) // 120)                   # a filter for each short stretch, the box moving across it
-            rate = self.fps / max(0.1, float(c.get("speed") or 1))
-            lo, hi = int(round(float(c["in"]) * rate)), int(round(float(c["out"]) * rate)) - 1
+            lo, hi = self.pframe(c, float(c["in"])), self.pframe(c, float(c["out"])) - 1
             block = max(8, W // 40)
             rect = lambda q: f"{int(q[1] * W)}/{int(q[2] * H)}:{max(2, int(q[3] * W))}x{max(2, int(q[4] * H))}:{block}x{block}"
             pairs = list(zip(boxes[::step], boxes[step::step])) or [(boxes[0], boxes[0])]
             for k, (a, b) in enumerate(pairs):
-                fa, fb = max(lo, int(round(a[0] * rate))), min(hi, int(round(b[0] * rate)) - (0 if k == len(pairs) - 1 else 1))
+                fa, fb = max(lo, self.pframe(c, a[0])), min(hi, self.pframe(c, b[0]) - (0 if k == len(pairs) - 1 else 1))
                 if fb >= fa:
                     out.append(self.filt("obscure", {"start": rect(a), "end": rect(b)}, fa, fb))
+        if shape.get("on") and shape.get("use", "cut") == "cut":   # see-through outside the shape
+            out.append(self.filt("frei0r.alphaspot", self.shape_props(c, shape)))
+        if self.matte and self.matte == c.get("id"):
+            out.append(self.filt("avfilter.alphaextract", {}))
         out.append(self.transform_filter(c, upper))
         return [x for x in out if x]
+
+    def shape_props(self, c: dict, shape: dict, masked: bool = False) -> dict:
+        """frei0r's alphaspot for a clip's shape: where it is (following what was tracked, when asked), its size,
+        softness and which side is kept. Inside mask_start, frames count from the producer's start, not the clip's."""
+        inv = bool(shape.get("invert"))
+        x, y = float(shape.get("x", 0.5)), float(shape.get("y", 0.5))
+        props = {"0": SHAPES.get(shape.get("kind", "oval"), SHAPES["oval"])[1], "1": f"{x:.4f}", "2": f"{y:.4f}",
+                 "3": f"{max(0.005, min(1.0, float(shape.get('w', 0.5)) / 2)):.4f}", "4": f"{max(0.005, min(1.0, float(shape.get('h', 0.5)) / 2)):.4f}",
+                 "5": 0.5, "6": f"{max(0.0, min(1.0, float(shape.get('soft', 0.15)))) * 0.5:.4f}", "7": 1 if inv else 0, "8": 0 if inv else 1,
+                 "9": 0.0 if masked else 0.5}                # write the mask; on the clip itself, keep the less see-through (a key stays)
+        boxes = (c.get("tracking") or {}).get("boxes") or []
+        if shape.get("follow") and boxes:
+            dx = float(shape.get("dx", x - (boxes[0][1] + boxes[0][3] / 2)))       # how far from the thing it was put
+            dy = float(shape.get("dy", y - (boxes[0][2] + boxes[0][4] / 2)))
+            base = self.pframe(c, float(c["in"])) if masked else 0
+            xs, ys, seen = [], [], set()
+            for t, bx, by, bw, bh in boxes[::2]:
+                f = base + int(round(out_of(c, t) * self.fps))
+                if f in seen or f - base < 0:
+                    continue
+                seen.add(f)
+                xs.append(f"{f}={max(0.0, min(1.0, bx + bw / 2 + dx)):.4f}")
+                ys.append(f"{f}={max(0.0, min(1.0, by + bh / 2 + dy)):.4f}")
+            if xs:
+                props["1"], props["2"] = ";".join(xs), ";".join(ys)
+        return props
 
     def transform_filter(self, c: dict, upper: bool) -> str:
         """Size, place, turn and see-through, with keyframes; fades are see-through on upper tracks, black on V1."""
@@ -850,7 +1319,7 @@ class Builder:
 
     def sound_filters(self, c: dict, pin: int, n: int) -> list:
         m = media_of(self.p, c.get("media", ""))
-        if not m.get("audio") or c.get("mute"):
+        if not (m.get("audio") or c.get("kind") == "compound") or c.get("mute"):
             return []
         out = []
         fps, length = self.fps, clip_len(c)
@@ -913,15 +1382,22 @@ class Builder:
     def build(self, loudness: bool = False) -> str:
         p, fps = self.p, self.fps
         W, H = self.W, self.H
-        num, den = W, H
-        g = math.gcd(num, den)
-        end = max(1, self.f(total(p)) + 1)
+        g = math.gcd(W, H)
         head = (f'<?xml version="1.0" encoding="utf-8"?>\n<mlt LC_NUMERIC="C" version="7.0.0" title="{escape(p.get("name", ""))}" producer="main">'
                 f'<profile description="clips" width="{W}" height="{H}" progressive="1" sample_aspect_num="1" sample_aspect_den="1" '
-                f'display_aspect_num="{num // g}" display_aspect_den="{den // g}" frame_rate_num="{fps}" frame_rate_den="1" colorspace="709"/>')
-        parts = [head, f'<producer id="black" in="0" out="{end - 1}">' + self.prop("mlt_service", "color") + self.prop("resource", "#FF000000")
+                f'display_aspect_num="{W // g}" display_aspect_den="{H // g}" frame_rate_num="{fps}" frame_rate_den="1" colorspace="709"/>')
+        extra = self.filt("avfilter.loudnorm", {"av.I": -16, "av.TP": -1.5, "av.LRA": 11}) if loudness else ""
+        parts, tractor, _ = self.tractor("main", extra=extra)
+        return head + "".join(parts) + tractor + "</mlt>\n"
+
+    def tractor(self, tid: str, transparent: bool = False, extra: str = "", at_least: int = 0) -> tuple:
+        """The tracks, stacked: -> (what goes before it, the tractor itself, its length in frames). A compound
+        clip's insides go on a see-through background, so what's under the clip shows where nothing is."""
+        p, pre, W, H = self.p, self.pre, self.W, self.H
+        end = max(1, self.f(total(p)) + 1, at_least)
+        parts = [f'<producer id="{pre}black" in="0" out="{end - 1}">' + self.prop("mlt_service", "color") + self.prop("resource", "#00000000" if transparent else "#FF000000")
                  + self.prop("length", end) + self.prop("mlt_image_format", "rgba") + "</producer>",
-                 f'<playlist id="background"><entry producer="black" in="0" out="{end - 1}"/></playlist>']
+                 f'<playlist id="{pre}background"><entry producer="{pre}black" in="0" out="{end - 1}"/></playlist>']
         videos = [t for t in p["tracks"] if t["kind"] == "video"]
         audios = [t for t in p["tracks"] if t["kind"] == "audio"]
         order = list(reversed(videos)) + audios                # V1 first above the background, then V2…, then audio
@@ -938,7 +1414,7 @@ class Builder:
             parts += pid_xml
             parts.append(play)
             track_ids.append(vt)
-        parts.append(f'<tractor id="main" in="0" out="{end - 1}"><track producer="background"/>')
+        tr = [f'<tractor id="{tid}" in="0" out="{end - 1}"><track producer="{pre}background"/>']
         heard = [x["id"] for x in sounding(p)]
         heard += [f"mc_{c['id']}" for c in p.get("clips", []) if c.get("kind") == "multicam" and c["track"] in heard]
         for i, t in enumerate(track_ids, start=1):
@@ -947,19 +1423,17 @@ class Builder:
                 hide = ' hide="both"' if silent else ' hide="video"'
             else:
                 hide = (' hide="both"' if silent else ' hide="video"') if t.get("hidden") else (' hide="audio"' if silent else "")
-            parts.append(f'<track producer="pl_{t["id"]}"{hide}/>')
+            tr.append(f'<track producer="{pre}pl_{t["id"]}"{hide}/>')
         for i, t in enumerate(track_ids, start=1):
-            parts.append(f'<transition>{self.prop("mlt_service", "mix")}{self.prop("a_track", 0)}{self.prop("b_track", i)}{self.prop("always_active", 1)}{self.prop("sum", 1)}</transition>')
+            tr.append(f'<transition>{self.prop("mlt_service", "mix")}{self.prop("a_track", 0)}{self.prop("b_track", i)}{self.prop("always_active", 1)}{self.prop("sum", 1)}</transition>')
             if t["kind"] == "video":
                 if self.cairo:
-                    parts.append(f'<transition>{self.prop("mlt_service", "frei0r.cairoblend")}{self.prop("a_track", 0)}{self.prop("b_track", i)}{self.prop("always_active", 1)}</transition>')
+                    tr.append(f'<transition>{self.prop("mlt_service", "frei0r.cairoblend")}{self.prop("a_track", 0)}{self.prop("b_track", i)}{self.prop("always_active", 1)}</transition>')
                 else:
-                    parts.append(f'<transition>{self.prop("mlt_service", "affine")}{self.prop("a_track", 0)}{self.prop("b_track", i)}{self.prop("always_active", 1)}'
-                                 f'{self.prop("fill", 1)}{self.prop("distort", 0)}{self.prop("rect", f"0 0 {W} {H} 1")}</transition>')
-        if loudness:
-            parts.append(self.filt("avfilter.loudnorm", {"av.I": -16, "av.TP": -1.5, "av.LRA": 11}))
-        parts.append("</tractor></mlt>\n")
-        return "".join(parts)
+                    tr.append(f'<transition>{self.prop("mlt_service", "affine")}{self.prop("a_track", 0)}{self.prop("b_track", i)}{self.prop("always_active", 1)}'
+                              f'{self.prop("fill", 1)}{self.prop("distort", 0)}{self.prop("rect", f"0 0 {W} {H} 1")}</transition>')
+        tr.append(extra + "</tractor>")
+        return parts, "".join(tr), end
 
     def expand(self, clips: list) -> list:
         """Multicam clips become the pieces of each angle between its cuts (pictures only: their sound comes from
@@ -1007,10 +1481,12 @@ class Builder:
     def playlist(self, t: dict, upper: bool, clips: list = None) -> tuple:
         """One track: its clips' producers and the playlist placing them, with same-track transitions as small tractors."""
         clips = self.expand(on_track(self.p, t["id"])) if clips is None else clips
+        if self.matte:
+            clips = [c for c in clips if c["id"] == self.matte]
         xmls, entries, cursor = [], [], 0
         info = []
         for i, c in enumerate(clips):
-            pid = f"p_{c['id']}"
+            pid = f"{self.pre}p_{c['id']}"
             xml, pin, plen = self.producer(c, pid, upper)
             xmls.append(xml)
             info.append({"c": c, "pid": pid, "pin": pin, "plen": plen, "start": self.f(c["at"]), "n": max(1, self.f(clip_len(c)))})
@@ -1042,7 +1518,7 @@ class Builder:
                 nxt = info[i + 1]
                 kind = (c.get("transition") or {}).get("kind", "dissolve")
                 luma = TRANSITIONS.get(kind, TRANSITIONS["dissolve"])[1]
-                tid = f"tr_{c['id']}"
+                tid = f"{self.pre}tr_{c['id']}"
                 L = 2 * h_after
                 lp = {"mlt_service": "luma", "a_track": 0, "b_track": 1, "softness": 0.15}
                 if luma and (LUMAS / luma).is_file():
@@ -1055,7 +1531,7 @@ class Builder:
                             + self.prop("start", 0) + self.prop("end", 1) + "</transition></tractor>")
                 entries.append(f'<entry producer="{tid}" in="0" out="{L - 1}"/>')
                 cursor += L
-        return xmls, f'<playlist id="pl_{t["id"]}">' + "".join(entries) + "</playlist>"
+        return xmls, f'<playlist id="{self.pre}pl_{t["id"]}">' + "".join(entries) + "</playlist>"
 
 
 def melt_has(kind: str, name: str) -> bool:
@@ -1074,7 +1550,9 @@ def export_command(project_file: str, target: str, preset: str, quality: str, wi
     if pr.get("crf"):
         args.append(f"crf={pr['crf'].get(quality, list(pr['crf'].values())[1])}")
     if "vn=1" not in pr["args"]:
-        args += [f"width={width}", f"height={height}", f"frame_rate_num={fps}", "frame_rate_den=1"]
+        g = math.gcd(width, height)                            # square pixels: given only a size, the consumer assumed PAL's 16:15
+        args += [f"width={width}", f"height={height}", "sample_aspect_num=1", "sample_aspect_den=1", f"display_aspect_num={width // g}",
+                 f"display_aspect_den={height // g}", f"frame_rate_num={fps}", "frame_rate_den=1"]
     args += [f"real_time=-{max(1, threads or min(8, os.cpu_count() or 2))}", "ar=48000", "channels=2"]
     return args
 
@@ -1223,6 +1701,7 @@ class Clips(QObject):
         self._demo, self._provider = demo, provider
         self._file = STORE / "project.json"
         self._p = new_project()
+        self._root, self._path = self._p, []                # the film, and the compound clips opened inside it
         self._undo, self._redo = [], []
         self._picked, self._head, self._frame_no = [], 0.0, 0
         self._zoom = 60.0                                   # pixels a second on the timeline
@@ -1237,12 +1716,14 @@ class Clips(QObject):
         self._steadying = {}                               # clip id -> share done (0..1), while a steadied copy is made
         self._mixing = None
         self._words = {"busy": False, "step": "", "proc": None}  # speech to captions
+        self._matte = ""                                   # a clip shown alone as its matte, while keying
         if demo:
             self._demo_fill()
         else:
             self._load()
             if target:
                 QTimer.singleShot(0, lambda: self.importFiles([str(target)]))
+        self._root, self._path = self._p, []
         self._refresh_media()
         QTimer.singleShot(0, self._show_frame)
 
@@ -1256,11 +1737,12 @@ class Clips(QObject):
 
     def _keep(self, undoable: bool = True) -> None:
         self._dirty_xml = True
+        self._sync()
         if not self._demo:
             try:
                 STORE.mkdir(parents=True, exist_ok=True)
                 tmp = self._file.with_suffix(".saving")
-                tmp.write_text(json.dumps(self._p), encoding="utf-8")
+                tmp.write_text(json.dumps(self._root), encoding="utf-8")
                 os.replace(tmp, self._file)
             except OSError as e:
                 self.said.emit(f"Couldn't save the project: {e.strerror or e}", True)
@@ -1271,22 +1753,27 @@ class Clips(QObject):
 
     def _before(self) -> None:
         self._mixing = None
-        self._undo.append(copy.deepcopy(self._p))
+        self._sync()
+        self._undo.append((copy.deepcopy(self._root), list(self._path)))
         del self._undo[:-80]
         self._redo = []
 
     @Slot()
     def undo(self) -> None:
         if self._undo:
-            self._redo.append(copy.deepcopy(self._p))
-            self._p = self._undo.pop()
+            self._sync()
+            self._redo.append((copy.deepcopy(self._root), list(self._path)))
+            self._root = self._undo.pop()[0]             # where the editing is stays put, as long as it still exists
+            self._view()
             self._keep()
 
     @Slot()
     def redo(self) -> None:
         if self._redo:
-            self._undo.append(copy.deepcopy(self._p))
-            self._p = self._redo.pop()
+            self._sync()
+            self._undo.append((copy.deepcopy(self._root), list(self._path)))
+            self._root = self._redo.pop()[0]             # where the editing is stays put, as long as it still exists
+            self._view()
             self._keep()
 
     def _demo_fill(self) -> None:
@@ -1533,9 +2020,19 @@ class Clips(QObject):
             sp = float(c.get("speed") or 1)
             face.update(kind="multicam", name=f"Multicam · {len(ang)} angles", cuts=[[max(0.0, (cut[0] - c["in"]) / sp), cut[1]] for cut in sorted(c.get("cuts", []))], mediaKind="video")
             return face
+        if c.get("kind") == "compound":                      # its first picture's thumbnails, its name and how many clips
+            inner = (c.get("inner") or {}).get("clips") or []
+            first = next((x for x in sorted(inner, key=lambda q: q["at"]) if media_of(self._p, x.get("media", "")).get("kind") in ("video", "image")), None)
+            face = self._face(dict(c, kind="media", media=first["media"] if first else ""))
+            face.update(kind="compound", name=f"{c.get('name') or 'Compound clip'} · {len(inner)} clip{'' if len(inner) == 1 else 's'}", mediaKind="compound", wave=[],
+                        audio=any(media_of(self._p, x.get("media", "")).get("audio") for x in inner))
+            return face
         m = media_of(self._p, c.get("media", ""))
         t = track_of(self._p, c["track"])
         thumbs = self._thumbs.get(m.get("id", ""), [])
+        if len(thumbs) > 1 and m.get("duration") and c.get("kind") == "media":   # the pictures of the part used (trims, speeds, ramps)
+            n, length, d = len(thumbs), clip_len(c), float(m["duration"])
+            thumbs = [thumbs[max(0, min(n - 1, int(src_of(c, length * (k + 0.5) / n) / d * n)))] for k in range(n)]
         wave = self._waves.get(m.get("id", ""), [])
         if wave and m.get("duration"):
             per = len(wave) / m["duration"]
@@ -1548,7 +2045,9 @@ class Clips(QObject):
                 "media": c.get("media", ""), "mediaKind": "title" if c["kind"] == "title" else m.get("kind", ""), "thumbs": thumbs, "wave": wave,
                 "speed": c.get("speed", 1.0), "mute": bool(c.get("mute")), "fadeIn": c.get("fadeIn", 0), "fadeOut": c.get("fadeOut", 0),
                 "transition": tr.get("kind", ""), "transitionLength": tr.get("length", 0),
-                "audio": bool(m.get("audio")) and not c.get("mute"), "keys": sum(len(v) for v in (c.get("keys") or {}).values()), "audioTrack": t.get("kind") == "audio"}
+                "audio": bool(m.get("audio")) and not c.get("mute"), "keys": sum(len(v) for v in (c.get("keys") or {}).values()), "audioTrack": t.get("kind") == "audio",
+                "bands": speed_bands(c) if ramped(c) else [], "keyed": bool((c.get("key") or {}).get("on")), "shaped": bool((c.get("shape") or {}).get("on")),
+                "beats": beats_in(c)[:3000] if c.get("beats") else []}
 
     def _get_tracks(self) -> list:
         vids = [t for t in self._p["tracks"] if t["kind"] == "video"]
@@ -1576,6 +2075,13 @@ class Clips(QObject):
             out["showing"] = showing
             c = dict(c, media=ang[0].get("media", ""))
         m = media_of(self._p, c.get("media", ""))
+        if c["kind"] == "compound":
+            out.update(name=c.get("name") or "Compound clip", mediaKind="compound", length=clip_len(c), lengthText=clock(clip_len(c)),
+                       sourceText=f"{clock(c['in'])}–{clock(c['out'])}", hasAudio=True, trackKind=track_of(self._p, c["track"]).get("kind", "video"),
+                       keyTimes=sorted({k[0] for v in (c.get("keys") or {}).values() for k in v}), ease=c.get("ease", "linear"), sound={},
+                       count=len((c.get("inner") or {}).get("clips") or []), inner=None,
+                       shape=dict({"on": False, "kind": "oval", "x": 0.5, "y": 0.5, "w": 0.5, "h": 0.6, "soft": 0.15, "use": "cut", "invert": False}, **(c.get("shape") or {})))
+            return out
         out.update(name=c.get("text", "") if c["kind"] == "title" else ("Multicam" if out.get("kind") == "multicam" else m.get("name", "")), mediaKind=m.get("kind", "title"), length=clip_len(c),
                    lengthText=clock(clip_len(c)), sourceText=f"{clock(c['in'])}–{clock(c['out'])}", hasAudio=bool(m.get("audio")),
                    trackKind=track_of(self._p, c["track"]).get("kind", "video"), keyTimes=sorted({k[0] for v in (c.get("keys") or {}).values() for k in v}),
@@ -1583,6 +2089,12 @@ class Clips(QObject):
                    obscure=bool((c.get("tracking") or {}).get("obscure")),
                    followable=[{"id": x["id"], "name": media_of(self._p, x.get("media", "")).get("name", "")} for x in self._p["clips"]
                                if x["id"] != c["id"] and (x.get("tracking") or {}).get("boxes") and x["at"] < clip_end(c) and c["at"] < clip_end(x)])
+        if c.get("kind") == "media" and m.get("kind") == "video":
+            out.update(self._ramp_view(c))
+        if c.get("kind") == "media" and m.get("kind") in ("video", "image"):
+            out["others"] = self._others(c)
+        out.update(key=dict({"on": False, "colour": "#1EC828", "strength": 0.35, "soft": 0.2, "spill": 0.5}, **(c.get("key") or {})),
+                   shape=dict({"on": False, "kind": "oval", "x": 0.5, "y": 0.5, "w": 0.5, "h": 0.6, "soft": 0.15, "use": "cut", "invert": False}, **(c.get("shape") or {})))
         return out
 
     def _angle_now(self) -> int:
@@ -1598,7 +2110,7 @@ class Clips(QObject):
         boxes = ((c or {}).get("tracking") or {}).get("boxes") or []
         if not boxes or not c["at"] - EPS <= self._head <= clip_end(c) + EPS:
             return {}
-        tau = float(c["in"]) + (self._head - c["at"]) * float(c.get("speed") or 1)
+        tau = src_of(c, self._head - c["at"])
         if tau < boxes[0][0] - 0.05 or tau > boxes[-1][0] + 0.05:
             return {}
         b = min(boxes, key=lambda q: abs(q[0] - tau))
@@ -1682,7 +2194,10 @@ class Clips(QObject):
 
     # ---------------------------------------------------------------- the viewer
     def _xml(self, width: int, height: int, export: bool = False) -> str:
-        return Builder(self._p, width, height, proxies={} if export else self._proxies, has_cairo=self._cairo).build(loudness=export and self._p.get("loudness"))
+        if export:
+            self._sync()
+        return Builder(self._root if export else self._p, width, height, proxies={} if export else self._proxies, has_cairo=self._cairo,
+                       matte="" if export else self._matte).build(loudness=export and self._p.get("loudness"))
 
     def _preview_size(self) -> tuple:
         W, H = SIZES.get(self._p.get("size"), SIZES["1080p"])[:2]
@@ -1722,7 +2237,8 @@ class Clips(QObject):
             (work / "p.mlt").write_text(xml, encoding="utf-8")
             out = work / "frame.png"
             out.unlink(missing_ok=True)
-            subprocess.run(["melt", str(work / "p.mlt"), f"in={n}", f"out={n}", "-consumer", f"avformat:{out}", "vcodec=png", "f=image2", "update=1", "an=1"],
+            subprocess.run(["melt", str(work / "p.mlt"), f"in={n}", f"out={n}", "-consumer", f"avformat:{out}", "vcodec=png", "f=image2", "update=1", "an=1",
+                            f"width={size[0]}", f"height={size[1]}", "sample_aspect_num=1", "sample_aspect_den=1"],
                            capture_output=True, timeout=60)
             return QImage(str(out)) if out.exists() else None
 
@@ -1847,24 +2363,25 @@ class Clips(QObject):
         if not c or track_of(self._p, c["track"]).get("locked"):
             return False
         m = media_of(self._p, c.get("media", ""))
-        speed = c.get("speed", 1.0)
         longest = float(m.get("duration") or 3600) if m.get("kind") in ("video", "audio") else 3600.0
+        if c.get("kind") == "compound":
+            longest = total(c.get("inner") or {"clips": []})
         t = snap(self._p, t, 8.0 / self._zoom, ignore=cid, playhead=self._head)
         self._before()
         old_end = clip_end(c)
         if edge == "in":
-            new_in = c["in"] + (t - c["at"]) * speed
-            new_in = max(0.0, min(new_in, c["out"] - 0.1))
-            new_at = c["at"] + (new_in - c["in"]) / speed
-            if new_at < 0 or not fits(self._p, c["track"], new_at, (c["out"] - new_in) / speed, ignore=cid):
+            new_in = max(0.0, min(src_of(c, t - c["at"]), c["out"] - 0.1))
+            new_len = clip_len(dict(c, **{"in": new_in}))
+            new_at = old_end - new_len                       # the end stays put
+            if new_at < 0 or not fits(self._p, c["track"], new_at, new_len, ignore=cid):
                 self._undo.pop()
                 return False
             c["at"], c["in"] = round(new_at, 4), round(new_in, 4)
         else:
-            new_out = c["in"] + (t - c["at"]) * speed
-            new_out = max(c["in"] + 0.1, min(new_out, longest))
-            grow = (new_out - c["out"]) / speed
-            if not ripple and not fits(self._p, c["track"], c["at"], (new_out - c["in"]) / speed, ignore=cid):
+            new_out = max(c["in"] + 0.1, min(src_of(c, t - c["at"]), longest))
+            new_len = clip_len(dict(c, out=new_out))
+            grow = new_len - clip_len(c)
+            if not ripple and not fits(self._p, c["track"], c["at"], new_len, ignore=cid):
                 self._undo.pop()
                 return False
             c["out"] = round(new_out, 4)
@@ -1938,7 +2455,7 @@ class Clips(QObject):
         if path == "speed":
             value = max(0.1, min(16.0, float(value)))
             old_len = clip_len(c)
-            new_len = (c["out"] - c["in"]) / value
+            new_len = clip_len(dict(c, speed=value))
             if new_len > old_len + EPS and not fits(self._p, c["track"], c["at"], new_len, ignore=cid):
                 self._undo.pop()
                 self.said.emit("Slower won't fit: something comes right after it on the track.", True)
@@ -2097,6 +2614,7 @@ class Clips(QObject):
         self.pause()
         self._before()
         self._p = new_project()
+        self._root, self._path = self._p, []
         self._picked, self._head = [], 0.0
         self._keep()
 
@@ -2241,7 +2759,7 @@ class Clips(QObject):
             self.said.emit("Pick a video clip, then draw a box round what to follow.", True)
             return
         m = media_of(self._p, c["media"])
-        start = float(c["in"]) + max(0.0, self._head - c["at"]) * float(c.get("speed") or 1)
+        start = src_of(c, max(0.0, self._head - c["at"]))
         end = float(c["out"])
         if end - start < 0.2:
             return
@@ -2292,10 +2810,9 @@ class Clips(QObject):
         if not c or not f or not (c.get("tracking") or {}).get("boxes"):
             return
         self._before()
-        speed = float(c.get("speed") or 1)
         xs, ys = [], []
         for t, bx, by, bw, bh in c["tracking"]["boxes"][::2]:
-            at = c["at"] + (t - float(c["in"])) / speed - f["at"]       # the follower's own time
+            at = c["at"] + out_of(c, t) - f["at"]                      # the follower's own time
             if -EPS <= at <= clip_len(f) + EPS:
                 xs.append([round(at, 3), round(bx + bw / 2 - 0.5, 4)])
                 ys.append([round(at, 3), round(by + bh / 2 - 0.5, 4)])
@@ -2309,9 +2826,8 @@ class Clips(QObject):
         if not c or not (c.get("tracking") or {}).get("boxes"):
             return ""
         b = c["tracking"]["boxes"]
-        speed = float(c.get("speed") or 1)
-        at = c["at"] + (b[0][0] - float(c["in"])) / speed
-        length = (b[-1][0] - b[0][0]) / speed
+        at = c["at"] + out_of(c, b[0][0])
+        length = out_of(c, b[-1][0]) - out_of(c, b[0][0])
         tid = self._free_video_track(at, length)
         self._before()
         t = blank_title(f"c{self._p['next']}", tid, at, length, "Here", "lower")
@@ -2348,7 +2864,7 @@ class Clips(QObject):
                     wave = self._waves.get(m.get("id", ""), [])
                     if not wave or not m.get("duration"):
                         continue
-                    src = c["in"] + (self._head - c["at"]) * float(c.get("speed") or 1)
+                    src = src_of(c, self._head - c["at"])
                     i = int(src * len(wave) / m["duration"])
                     peak = max(wave[max(0, i - 1):i + 2] or [0]) / 1.4
                     if peak <= 0:
@@ -2712,6 +3228,579 @@ class Clips(QObject):
             return f"Couldn't save it: {e.strerror or e}"
         self.said.emit(f"Saved {target.name} in Videos/Clips (Shotcut opens it too)", False)
         return ""
+
+    # ---------------------------------------------------------------- round four: speed ramps and holds
+    def _grow(self, c: dict, change: dict) -> bool:
+        """Change a clip's timing. When it gets longer than the room after it, what follows on its track moves along."""
+        old_len, old_end = clip_len(c), clip_end(c)
+        new_len = clip_len(dict(c, **change))
+        self._before()
+        c.update(change)
+        if new_len > old_len + EPS and not fits(self._p, c["track"], c["at"], new_len, ignore=c["id"]):
+            for o in self._p["clips"]:
+                if o["track"] == c["track"] and o["id"] != c["id"] and o["at"] >= old_end - EPS:
+                    o["at"] = round(o["at"] + new_len - old_len, 4)
+            self.said.emit("What came after it on the track moved along to make room.", False)
+        self._keep()
+        return True
+
+    def _rampable(self, cid: str):
+        c = self._c(cid)
+        if not c or c.get("kind") != "media" or media_of(self._p, c.get("media", "")).get("kind") != "video":
+            return None
+        return c
+
+    @Slot(str, result=int)
+    def splitSpeed(self, cid: str) -> int:
+        """A new stretch of speed from the playhead on, at the speed it already had; returns its number."""
+        c = self._rampable(cid)
+        if not c:
+            return -1
+        u = self._head - c["at"]
+        if u <= 0.05 or u >= clip_len(c) - 0.05:
+            self.said.emit("Put the playhead inside the clip, where the speed should change.", True)
+            return -1
+        s = round(src_of(c, u), 4)
+        r = Remap(c)
+        k = max(i for i, x in enumerate(r.starts) if x <= s + 1e-9)
+        pts = sorted([p for p in (c.get("ramp") or []) if abs(float(p[0]) - s) > 0.02] + [[s, r.speeds[k]]])
+        self._before()
+        c["ramp"] = pts
+        c.setdefault("rampSmooth", True)
+        self._keep()
+        return 1 + [p[0] for p in pts].index(s)
+
+    @Slot(str, int, float)
+    def setSegmentSpeed(self, cid: str, k: int, speed: float) -> None:
+        """Speed of one stretch (0: from the clip's start, or the whole clip when it has no ramp)."""
+        c = self._rampable(cid)
+        if not c:
+            return
+        speed = max(0.1, min(16.0, float(speed)))
+        if k <= 0:
+            self._grow(c, {"speed": speed})
+            return
+        pts = copy.deepcopy(sorted(c.get("ramp") or []))
+        if k - 1 >= len(pts):
+            return
+        pts[k - 1][1] = speed
+        self._grow(c, {"ramp": pts})
+
+    @Slot(str, int)
+    def removeSpeedChange(self, cid: str, k: int) -> None:
+        """Take away where stretch k starts: it goes at the speed before it."""
+        c = self._rampable(cid)
+        pts = sorted((c or {}).get("ramp") or [])
+        if c and 1 <= k <= len(pts):
+            self._grow(c, {"ramp": pts[:k - 1] + pts[k:]})
+
+    @Slot(str)
+    def holdFrame(self, cid: str) -> None:
+        """Hold the picture under the playhead for two seconds (longer if there's one there already)."""
+        c = self._rampable(cid)
+        if not c:
+            return
+        u = self._head - c["at"]
+        if u < 0 or u > clip_len(c):
+            self.said.emit("Put the playhead on the picture to hold.", True)
+            return
+        s = round(min(src_of(c, u), float(c["out"]) - 0.5 / int(self._p.get("fps", 30))), 4)
+        holds = copy.deepcopy(c.get("holds") or [])
+        near = next((h for h in holds if abs(float(h[0]) - s) < 0.02), None)
+        if near:
+            near[1] = round(float(near[1]) + HOLD_LENGTH, 3)
+        else:
+            holds.append([s, HOLD_LENGTH])
+        self._grow(c, {"holds": sorted(holds)})
+
+    @Slot(str, int, float)
+    def setHold(self, cid: str, k: int, seconds: float) -> None:
+        c = self._rampable(cid)
+        holds = copy.deepcopy(sorted((c or {}).get("holds") or []))
+        if not c or not 0 <= k < len(holds):
+            return
+        if seconds < 0.05:
+            del holds[k]
+        else:
+            holds[k][1] = round(min(60.0, float(seconds)), 3)
+        self._grow(c, {"holds": holds})
+
+    @Slot(str)
+    def clearRamp(self, cid: str) -> None:
+        c = self._c(cid)
+        if c and (c.get("ramp") or c.get("holds")):
+            self._grow(c, {"ramp": [], "holds": []})
+
+    def _ramp_view(self, c: dict) -> dict:
+        """The Speed tab's view of a clip: its stretches and held frames, in seconds into the clip."""
+        r = Remap(c)
+        lo, hi = float(c["in"]), float(c["out"])
+        segs, here = [], 0
+        u = self._head - c["at"]
+        for k, start in enumerate(r.starts):
+            end = r.starts[k + 1] if k + 1 < len(r.starts) else 1e9
+            if end <= lo or start >= hi:
+                continue
+            a, b = out_of(c, max(start, lo)), out_of(c, min(end, hi))
+            segs.append({"k": k, "from": round(a, 3), "to": round(b, 3), "speed": r.speeds[k]})
+            if a - EPS <= u:
+                here = k
+        holds = [{"k": k, "at": round(out_of(c, float(h)), 3), "length": float(d)} for k, (h, d) in enumerate(sorted(c.get("holds") or []))
+                 if lo - 1e-6 <= float(h) < hi]
+        return {"segments": segs, "holdsView": holds, "segmentHere": here, "ramped": ramped(c), "rampSmooth": c.get("rampSmooth", True)}
+
+    # ---------------------------------------------------------------- round four: keying and shapes
+    def _clip_point(self, c: dict, fx: float, fy: float) -> tuple:
+        """A point on the film's picture (fractions) as a point on the clip's own picture, undoing its size and place."""
+        tr = c.get("transform") or {}
+        s = max(0.05, float(tr.get("scale", 1.0)))
+        return (max(0.0, min(1.0, (fx - 0.5 - float(tr.get("x", 0))) / s + 0.5)), max(0.0, min(1.0, (fy - 0.5 - float(tr.get("y", 0))) / s + 0.5)))
+
+    def _keyable(self, cid: str):
+        c = self._c(cid)
+        if not c or c.get("kind") != "media" or media_of(self._p, c.get("media", "")).get("kind") not in ("video", "image"):
+            return None
+        return c
+
+    def _set_key(self, cid: str, colour: str) -> None:
+        c = self._c(cid)
+        if not c:
+            return
+        self._before()
+        key = c.setdefault("key", {})
+        key.update(on=True, colour=colour)
+        for k, v in (("strength", 0.35), ("soft", 0.2), ("spill", 0.5)):
+            key.setdefault(k, v)
+        self._keep()
+        self.said.emit(f"Keyed out {'blue' if key_hue(colour) == 'blue' else 'green'} ({colour}).", False)
+
+    @Slot(str)
+    def findKey(self, cid: str) -> None:
+        """Find the screen's colour in the picture under the playhead and key it out."""
+        c = self._keyable(cid)
+        if not c:
+            return
+        if self._demo:
+            self._set_key(cid, "#1EC828")
+            return
+        m = media_of(self._p, c["media"])
+        at = src_of(c, max(0.0, min(clip_len(c), self._head - c["at"])))
+
+        def work():
+            colour = screen_colour(frame_of(m["path"], at if m.get("kind") == "video" else 0))
+            self._back.emit(lambda: self._set_key(cid, colour) if colour else self.said.emit("No green or blue screen found in this picture: pick its colour instead.", True))
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(str, float, float)
+    def pickKeyColour(self, cid: str, fx: float, fy: float) -> None:
+        """Key out the colour at a point of the picture (a small patch's middle, so noise doesn't decide)."""
+        c = self._keyable(cid)
+        if not c:
+            return
+        if self._demo:
+            self._set_key(cid, "#1EC828")
+            return
+        m = media_of(self._p, c["media"])
+        at = src_of(c, max(0.0, min(clip_len(c), self._head - c["at"])))
+        px, py = self._clip_point(c, fx, fy)
+
+        def work():
+            f = frame_of(m["path"], at if m.get("kind") == "video" else 0)
+            colour = ""
+            if f.size:
+                h, w = f.shape[:2]
+                x, y = int(px * (w - 1)), int(py * (h - 1))
+                patch = f[max(0, y - 3):y + 4, max(0, x - 3):x + 4].reshape(-1, 3)
+                colour = "#%02X%02X%02X" % tuple(int(v) for v in np.median(patch, axis=0))
+            self._back.emit(lambda: self._set_key(cid, colour) if colour else self.said.emit("Couldn't read the picture there.", True))
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(str, bool)
+    def showMatte(self, cid: str, on: bool) -> None:
+        self._matte = cid if on else ""
+        self._dirty_xml = True
+        self.changed.emit()
+        self._show_frame()
+
+    @Slot(str, bool)
+    def setShape(self, cid: str, on: bool) -> None:
+        c = self._keyable(cid) or (self._c(cid) if (self._c(cid) or {}).get("kind") == "compound" else None)
+        if not c:
+            return
+        self._before()
+        sh = c.setdefault("shape", {})
+        for k, v in (("kind", "oval"), ("x", 0.5), ("y", 0.5), ("w", 0.5), ("h", 0.6), ("soft", 0.15), ("use", "cut"), ("invert", False)):
+            sh.setdefault(k, v)
+        sh["on"] = bool(on)
+        self._keep()
+
+    @Slot(str, float, float, float, float)
+    def placeShape(self, cid: str, x: float, y: float, w: float, h: float) -> None:
+        """Where the shape is and how big (fractions of the clip's picture), from dragging it in the viewer."""
+        c = self._c(cid)
+        if not c or not c.get("shape"):
+            return
+        self._before()
+        sh = c["shape"]
+        sh.update(x=round(max(0.0, min(1.0, x)), 4), y=round(max(0.0, min(1.0, y)), 4), w=round(max(0.02, min(2.0, w)), 4), h=round(max(0.02, min(2.0, h)), 4))
+        if sh.get("follow"):
+            self._anchor_shape(c)
+        self._keep()
+
+    def _anchor_shape(self, c: dict) -> None:
+        """Remember how far the shape is from the tracked thing, as seen at the playhead."""
+        boxes = (c.get("tracking") or {}).get("boxes") or []
+        if not boxes:
+            return
+        tau = src_of(c, self._head - c["at"])
+        b = min(boxes, key=lambda q: abs(q[0] - tau))
+        sh = c["shape"]
+        sh["dx"], sh["dy"] = round(float(sh.get("x", 0.5)) - (b[1] + b[3] / 2), 4), round(float(sh.get("y", 0.5)) - (b[2] + b[4] / 2), 4)
+
+    @Slot(str, bool)
+    def followShape(self, cid: str, on: bool) -> None:
+        c = self._c(cid)
+        if not c or not c.get("shape"):
+            return
+        if on and not (c.get("tracking") or {}).get("boxes"):
+            self.said.emit("Follow something first (Effects), then the shape can go with it.", True)
+            return
+        self._before()
+        c["shape"]["follow"] = bool(on)
+        if on:
+            self._anchor_shape(c)
+        self._keep()
+
+    def _shape_now(self) -> dict:
+        """The picked clip's shape as it is under the playhead (where it's followed to), for the viewer."""
+        c = self._c(self._picked[0]) if len(self._picked) == 1 else None
+        sh = dict((c or {}).get("shape") or {})
+        if not sh.get("on"):
+            return {}
+        boxes = (c.get("tracking") or {}).get("boxes") or []
+        if sh.get("follow") and boxes and "dx" in sh:
+            tau = src_of(c, self._head - c["at"])
+            b = min(boxes, key=lambda q: abs(q[0] - tau))
+            sh["x"], sh["y"] = b[1] + b[3] / 2 + float(sh["dx"]), b[2] + b[4] / 2 + float(sh["dy"])
+        return sh
+
+    shapeNow = Property("QVariantMap", _shape_now, notify=frameChanged)
+    matte = Property(str, lambda self: self._matte, notify=changed)
+    speedChoices = Property("QVariantList", lambda self: SPEED_CHOICES, constant=True)
+    shapes = Property("QVariantList", lambda self: [{"id": k, "name": v[0]} for k, v in SHAPES.items()], constant=True)
+
+    # ---------------------------------------------------------------- round four: compound clips
+    def _sync(self) -> None:
+        """Put what's being edited inside a compound clip back into it, then let each compound clip on the way out
+        follow its insides' length (unless its end was trimmed), moving what comes after it along if it grew."""
+        if not self._path:
+            self._root = self._p
+            return
+        level, chain = self._root, []
+        for cid in self._path:
+            c = next((x for x in level["clips"] if x["id"] == cid), None)
+            if c is None:
+                break
+            chain.append((level, c))
+            level = inner_view(self._root, c)
+        if len(chain) != len(self._path):
+            return
+        _, deepest = chain[-1]
+        deepest["inner"] = {"tracks": self._p["tracks"], "clips": self._p["clips"], "markers": self._p["markers"]}
+        if self._p.get("name") and self._p["name"] != deepest.get("name"):     # renamed from inside
+            deepest["name"] = self._p["name"]
+        for k, v in self._p.items():                       # media, bins, settings and the id counter are the film's
+            if k not in ("tracks", "clips", "markers", "name"):
+                self._root[k] = v
+        for container, c in reversed(chain):
+            was, now = float(c.get("innerLength", c["out"])), total(inner_view(self._root, c))
+            if abs(now - was) < 1e-4:
+                continue
+            old_len, old_end = clip_len(c), clip_end(c)
+            c["out"] = round(now if abs(float(c["out"]) - was) < 1e-3 else min(float(c["out"]), now), 4)
+            c["in"] = round(max(0.0, min(float(c["in"]), float(c["out"]) - 0.1)), 4)
+            c["innerLength"] = round(now, 4)
+            grow = clip_len(c) - old_len
+            if grow > EPS and not fits(container, c["track"], c["at"], clip_len(c), ignore=c["id"]):
+                for o in container["clips"]:
+                    if o["track"] == c["track"] and o["id"] != c["id"] and o["at"] >= old_end - EPS:
+                        o["at"] = round(o["at"] + grow, 4)
+
+    def _view(self) -> None:
+        """Make self._p the level being edited: the film, or the insides of the compound clips on the path."""
+        p, path = self._root, []
+        for cid in self._path:
+            c = next((x for x in p["clips"] if x["id"] == cid and x.get("kind") == "compound"), None)
+            if c is None:
+                break
+            path.append(cid)
+            p = inner_view(self._root, c)
+        self._path, self._p = path, p
+
+    @Slot(result=str)
+    def makeCompound(self) -> str:
+        """The picked clips become one compound clip, which can be opened and edited like a film of its own."""
+        picked = [c for c in self._p["clips"] if c["id"] in self._picked]
+        if not picked:
+            return "Pick the clips to put together first."
+        if any(track_of(self._p, c["track"]).get("locked") for c in picked):
+            return "Some of them are on a locked track."
+        start = min(c["at"] for c in picked)
+        end = max(clip_end(c) for c in picked)
+        used = {c["track"] for c in picked}
+        tracks = [copy.deepcopy(t) for t in self._p["tracks"] if t["id"] in used]
+        for t in tracks:
+            t["locked"] = False
+        vids = [t for t in tracks if t["kind"] == "video" and t.get("role") != "captions"]
+        target = vids[-1]["id"] if vids else tracks[0]["id"]            # the lowest picture track it came from
+        self._before()
+        inner_clips = []
+        for c in picked:
+            x = copy.deepcopy(c)
+            x["at"] = round(c["at"] - start, 4)
+            inner_clips.append(x)
+        self._p["clips"] = [c for c in self._p["clips"] if c["id"] not in self._picked]
+        n = sum(1 for c in self._p["clips"] if c.get("kind") == "compound") + 1
+        comp = blank_clip(f"c{self._p['next']}", "", target, start, 0.0, end - start)
+        self._p["next"] += 1
+        comp.update(kind="compound", name=f"Compound clip {n}", inner={"tracks": tracks, "clips": inner_clips, "markers": []}, innerLength=round(end - start, 4))
+        comp.pop("media", None)
+        if not fits(self._p, target, start, end - start):
+            if compound_content(comp) == "video":
+                target = self._free_video_track(start, end - start, above=target)
+            else:
+                self._p["clips"] += picked
+                self._undo.pop()
+                return "There's something else on that track meanwhile: pick it too, or move it."
+        comp["track"] = target
+        self._p["clips"].append(comp)
+        self._picked = [comp["id"]]
+        self._keep()
+        return ""
+
+    @Slot(str)
+    def openCompound(self, cid: str) -> None:
+        c = self._c(cid)
+        if not c or c.get("kind") != "compound":
+            return
+        self.pause()
+        self._sync()
+        self._head = max(0.0, self._head - c["at"] + float(c["in"]))
+        self._path.append(cid)
+        self._view()
+        self._picked = []
+        self._matte = ""
+        self._keep(False)
+
+    @Slot()
+    def closeCompound(self) -> None:
+        if not self._path:
+            return
+        self.pause()
+        self._sync()
+        cid = self._path.pop()
+        self._view()
+        c = self._c(cid)
+        if c:
+            self._head = max(0.0, c["at"] + self._head - float(c["in"]))
+            self._picked = [cid]
+        self._keep(False)
+
+    @Slot(str)
+    def breakApart(self, cid: str) -> None:
+        """A compound clip back into its clips, on the tracks they came from (or free ones), trimmed as it was."""
+        c = self._c(cid)
+        if not c or c.get("kind") != "compound":
+            return
+        inside = copy.deepcopy(inner_view(self._root, c))
+        inside["next"] = self._p["next"]
+        lo, hi = float(c["in"]), float(c["out"])
+        blade(inside, lo)
+        blade(inside, hi)
+        keep = [x for x in inside["clips"] if x["at"] >= lo - 1e-3 and clip_end(x) <= hi + 1e-3]
+        self._before()
+        self._p["next"] = inside["next"]
+        self._p["clips"] = [x for x in self._p["clips"] if x["id"] != cid]
+        made = []
+        for x in sorted(keep, key=lambda q: q["at"]):
+            kind = track_of(inside, x["track"]).get("kind", "video")
+            x["at"] = round(c["at"] + x["at"] - lo, 4)
+            x["id"] = f"c{self._p['next']}"
+            self._p["next"] += 1
+            ours = track_of(self._p, x["track"])
+            if not (ours and ours["kind"] == kind and not ours.get("locked") and fits(self._p, ours["id"], x["at"], clip_len(x))):
+                if kind == "video":
+                    x["track"] = self._free_video_track(x["at"], clip_len(x), above="")
+                else:
+                    free = next((t["id"] for t in self._p["tracks"] if t["kind"] == "audio" and not t.get("locked") and fits(self._p, t["id"], x["at"], clip_len(x))), "")
+                    if not free:
+                        free = f"a{sum(1 for t in self._p['tracks'] if t['kind'] == 'audio') + 1}x{self._p['next']}"
+                        self._p["next"] += 1
+                        self._p["tracks"].append({"id": free, "kind": "audio", "name": "Sound", "role": "", "muted": False, "locked": False})
+                    x["track"] = free
+            self._p["clips"].append(x)
+            made.append(x["id"])
+        for mk in inside.get("markers") or []:
+            if lo <= mk["t"] <= hi:
+                self._p["markers"].append(dict(mk, t=round(c["at"] + mk["t"] - lo, 3)))
+        self._picked = made
+        self._keep()
+
+    path = Property("QVariantList", lambda self: [{"id": "", "name": self._root.get("name") or "Film"}] + [{"id": cid, "name": n} for cid, n in self._path_names()], notify=changed)
+    inside = Property(bool, lambda self: bool(self._path), notify=changed)
+
+    def _path_names(self) -> list:
+        out, p = [], self._root
+        for cid in self._path:
+            c = next((x for x in p["clips"] if x["id"] == cid), None)
+            if not c:
+                break
+            out.append((cid, c.get("name") or "Compound clip"))
+            p = inner_view(self._root, c)
+        return out
+
+    # ---------------------------------------------------------------- round four: shots, beats, matching colour
+    @Slot(str)
+    def cutAtShots(self, cid: str) -> None:
+        """Find where the footage cuts to another shot and cut the clip there (a long recording, a finished film)."""
+        c = self._c(cid)
+        m = media_of(self._p, (c or {}).get("media", ""))
+        if not c or c.get("kind") != "media" or m.get("kind") != "video":
+            self.said.emit("Pick a video clip to find its shots.", True)
+            return
+        lo, hi = float(c["in"]), float(c["out"])
+        if self._demo:
+            self._shots_found(cid, [lo + (hi - lo) * k / 3 for k in (1, 2)])
+            return
+        self.said.emit("Looking for the shots…", False)
+
+        def work():
+            found, at = [], lo
+            while at < hi:                                  # two minutes at a time, a second overlapping
+                frames, times = frames_between(m["path"], max(lo, at - 1.0), min(hi, at + 120.0), 48)
+                found += [t for t in shot_changes(frames, times) if not found or t - found[-1] > 0.3]
+                at += 120.0
+            self._back.emit(lambda: self._shots_found(cid, found))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _shots_found(self, cid: str, cuts: list) -> None:
+        c = self._c(cid)
+        if not c:
+            return
+        times = sorted({round(c["at"] + out_of(c, s), 3) for s in cuts if float(c["in"]) < s < float(c["out"])})
+        times = [t for t in times if c["at"] + 0.1 < t < clip_end(c) - 0.1]
+        if not times:
+            self.said.emit("It's one shot all the way through: nothing to cut.", False)
+            return
+        self._before()
+        for t in reversed(times):
+            blade(self._p, t, [cid])
+        self._keep()
+        self.said.emit(f"Cut into {len(times) + 1} shots.", False)
+
+    @Slot(str)
+    def markBeats(self, cid: str) -> None:
+        """Mark the beat of a clip's music along the timeline, so cuts can snap to it."""
+        c = self._c(cid)
+        m = media_of(self._p, (c or {}).get("media", ""))
+        if not c or c.get("kind") != "media" or not m.get("audio"):
+            self.said.emit("Pick a clip with music in it.", True)
+            return
+        lo, hi = float(c["in"]), float(c["out"])
+        if self._demo:
+            self._beats_found(cid, 120.0, [lo + 0.5 * k for k in range(int((hi - lo) * 2))])
+            return
+        self.said.emit("Listening for the beat…", False)
+
+        def work():
+            rate = 11025
+            try:
+                raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{lo:.3f}", "-i", m["path"], "-t", f"{hi - lo:.3f}", "-vn", "-ac", "1", "-ar", str(rate),
+                                      "-f", "s16le", "-"], capture_output=True, timeout=600).stdout
+                bpm, beats = beat_times(np.frombuffer(raw[:len(raw) // 2 * 2], np.int16), rate)
+            except (OSError, subprocess.SubprocessError):
+                bpm, beats = 0.0, []
+            self._back.emit(lambda: self._beats_found(cid, bpm, [lo + b for b in beats]))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _beats_found(self, cid: str, bpm: float, beats: list) -> None:
+        c = self._c(cid)
+        if not c:
+            return
+        if not beats:
+            self.said.emit("Couldn't hear a steady beat in it.", True)
+            return
+        self._before()
+        c["beats"], c["bpm"] = [round(float(b), 3) for b in beats], bpm      # in the footage's own time: they go where the clip goes
+        self._keep()
+        n = sum(1 for b in beats if float(c["in"]) <= b < float(c["out"]))
+        self.said.emit(f"{bpm:g} beats a minute: {n} beats marked. Cuts and clips snap to them.", False)
+
+    @Slot(str)
+    def clearBeats(self, cid: str) -> None:
+        c = self._c(cid)
+        if c and c.get("beats"):
+            self._before()
+            c.pop("beats", None)
+            c.pop("bpm", None)
+            self._keep()
+
+    def _sample_frames(self, c: dict, n: int = 6) -> np.ndarray:
+        m = media_of(self._p, c.get("media", ""))
+        if m.get("kind") == "image":
+            f = frame_of(m["path"], 0, 128)
+            return f[None] if f.size else np.zeros((0, 2, 2, 3), np.uint8)
+        lo, hi = float(c["in"]), float(c["out"])
+        frames, _ = frames_between(m["path"], lo, hi, 128, fps=max(0.2, n / max(0.2, hi - lo)))
+        return frames
+
+    @Slot(str, str)
+    def matchColour(self, cid: str, ref: str) -> None:
+        """Make a clip's colours sit like another shot's (its lightness and colour, average and spread)."""
+        c, r = self._c(cid), self._c(ref)
+        if not c or not r or cid == ref:
+            return
+        if any(x.get("kind") != "media" or media_of(self._p, x.get("media", "")).get("kind") not in ("video", "image") for x in (c, r)):
+            self.said.emit("Both need to be pictures.", True)
+            return
+        if self._demo:
+            self._matched(cid, ref, "")
+            return
+        self.said.emit("Matching the colour…", False)
+        target = CACHE / "matched" / f"{cid}-{hashlib.sha1(json.dumps([c.get('media'), c['in'], c['out'], r.get('media'), r['in'], r['out']]).encode()).hexdigest()[:10]}.cube"
+
+        def work():
+            a, b = self._sample_frames(c), self._sample_frames(r)
+            path = match_cube(colour_stats(a), colour_stats(b), str(target)) if len(a) and len(b) else ""
+            self._back.emit(lambda: self._matched(cid, ref, path))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _matched(self, cid: str, ref: str, path: str) -> None:
+        c, r = self._c(cid), self._c(ref)
+        if not c:
+            return
+        if not path and not self._demo:
+            self.said.emit("Couldn't read the pictures to match.", True)
+            return
+        self._before()
+        c.setdefault("colour", {}).update(match=path, matchTo=ref)
+        self._keep()
+        self.said.emit(f"Matched to {media_of(self._p, (r or {}).get('media', '')).get('name', 'the other shot')}. Grade on top of it as usual.", False)
+
+    @Slot(str)
+    def clearMatch(self, cid: str) -> None:
+        c = self._c(cid)
+        if c and (c.get("colour") or {}).get("match") is not None:
+            self._before()
+            c["colour"].pop("match", None)
+            c["colour"].pop("matchTo", None)
+            self._keep()
+
+    def _others(self, c: dict) -> list:
+        """Other picture clips to match this one to, nearest first."""
+        out = [x for x in self._p["clips"] if x["id"] != c["id"] and x.get("kind") == "media" and media_of(self._p, x.get("media", "")).get("kind") in ("video", "image")]
+        out.sort(key=lambda x: abs(x["at"] - c["at"]))
+        return [{"id": x["id"], "name": media_of(self._p, x["media"]).get("name", ""), "at": clock(x["at"])} for x in out[:8]]
 
     def leaving(self) -> None:
         self._engine.stop()
