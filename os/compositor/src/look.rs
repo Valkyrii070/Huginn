@@ -1260,25 +1260,68 @@ void main() {
 }
 "#;
 
-type HdrShared = RefCell<Option<Option<(u32, i32, i32, i32)>>>;
+/// The other way, on a screen not in HDR: an app's HDR picture (PQ, BT.2020: color.rs) shown in sRGB. Brightness
+/// above a knee is rolled off so the picture's brightest just reaches the screen's white (the app's reference white
+/// lands a little under it, leaving room for highlights); wider colours are brought into sRGB's.
+const SDR_FRAG: &str = r#"#version 100
+precision highp float;
+uniform sampler2D tex;
+uniform vec4 lum; // reference white (nits), the picture's brightest (nits), PQ? 1/0, BT.2020? 1/0
+varying vec2 uv;
+vec3 linear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 unpq(vec3 e) {
+    vec3 p = pow(clamp(e, 0.0, 1.0), vec3(1.0 / 78.84375));
+    return 10000.0 * pow(max(p - 0.8359375, vec3(0.0)) / (18.8515625 - 18.6875 * p), vec3(1.0 / 0.1593017578125));
+}
+vec3 srgb(vec3 l) { return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, l)); }
+void main() {
+    vec3 e = texture2D(tex, uv).rgb;
+    vec3 w = lum.w > 0.5 ? vec3(0.2627, 0.6780, 0.0593) : vec3(0.2126, 0.7152, 0.0722);
+    vec3 c;
+    if (lum.z > 0.5) {
+        c = unpq(e) / lum.x;
+        float m = lum.y / lum.x;
+        float y = dot(c, w);
+        float k = 0.6;
+        if (m > 1.0 && y > k) {
+            float x = (y - k) / (1.0 - k);
+            float xm = (m - k) / (1.0 - k);
+            c *= (k + (1.0 - k) * x * (1.0 + x / (xm * xm)) / (1.0 + x)) / y;
+        }
+    } else {
+        c = linear(e);
+    }
+    if (lum.w > 0.5) {
+        c = mat3(1.6605, -0.1246, -0.0182, -0.5876, 1.1329, -0.1006, -0.0728, -0.0083, 1.1187) * c;
+    }
+    gl_FragColor = vec4(srgb(clamp(c, 0.0, 1.0)), 1.0);
+}
+"#;
 
-/// (program, tex, sdr, pos)
-fn hdr_program(frame: &mut GlesFrame<'_, '_>) -> Option<(u32, i32, i32, i32)> {
+/// The two HDR shaders, linked once per GPU: (program, tex, its own uniform: sdr or lum, pos)
+#[derive(Default)]
+struct PassShared {
+    to_hdr: std::cell::Cell<Option<Option<(u32, i32, i32, i32)>>>,
+    from_hdr: std::cell::Cell<Option<Option<(u32, i32, i32, i32)>>>,
+}
+
+fn pass_program(frame: &mut GlesFrame<'_, '_>, to_hdr: bool) -> Option<(u32, i32, i32, i32)> {
+    let pick = |s: &PassShared| if to_hdr { s.to_hdr.get() } else { s.from_hdr.get() };
     let ud = frame.egl_context().user_data();
-    ud.insert_if_missing(|| HdrShared::new(None));
-    if let Some(done) = *ud.get::<HdrShared>().unwrap().borrow() {
+    ud.insert_if_missing(PassShared::default);
+    if let Some(done) = pick(ud.get::<PassShared>().unwrap()) {
         return done;
     }
+    let (frag, name) = if to_hdr { (HDR_FRAG, c"sdr") } else { (SDR_FRAG, c"lum") };
     let made = frame
-        .with_context(|gl| unsafe {
-            link(gl, HDR_FRAG).map(|(p, tex, _, _, pos)| (p, tex, gl.GetUniformLocation(p, c"sdr".as_ptr()), pos))
-        })
+        .with_context(|gl| unsafe { link(gl, frag).map(|(p, tex, _, _, pos)| (p, tex, gl.GetUniformLocation(p, name.as_ptr()), pos)) })
         .ok()
         .flatten();
     if made.is_none() {
-        warn!("no HDR shader on this GPU: HDR stays off");
+        warn!(to_hdr, "no shader for HDR on this GPU");
     }
-    *frame.egl_context().user_data().get::<HdrShared>().unwrap().borrow_mut() = Some(made);
+    let shared = frame.egl_context().user_data().get::<PassShared>().unwrap();
+    if to_hdr { shared.to_hdr.set(Some(made)) } else { shared.from_hdr.set(Some(made)) }
     made
 }
 
@@ -1286,15 +1329,28 @@ fn hdr_program(frame: &mut GlesFrame<'_, '_>) -> Option<(u32, i32, i32, i32)> {
 pub struct HdrElement {
     id: Id,
     whole: Rectangle<i32, Physical>,
-    sdr: f32,
-    /// HDR pictures from apps (color.rs), with nothing over them: left as they are
-    skip: Vec<Rectangle<i32, Physical>>,
+    pass: Pass,
+}
+
+#[derive(Debug)]
+enum Pass {
+    /// everything into the screen's HDR signal, SDR white at `sdr` nits; HDR pictures from apps (color.rs) with
+    /// nothing over them left as they are
+    ToHdr { sdr: f32, skip: Vec<Rectangle<i32, Physical>> },
+    /// on a screen not in HDR: apps' HDR (or wide-colour) pictures into sRGB, each with its [reference white,
+    /// brightest, PQ?, BT.2020?]
+    FromHdr(Vec<(Rectangle<i32, Physical>, [f32; 4])>),
 }
 
 impl HdrElement {
     /// `id`: the screen's own, kept from frame to frame (only what changed is converted)
     pub fn new(id: Id, whole: Rectangle<i32, Physical>, sdr: f64, skip: Vec<Rectangle<i32, Physical>>) -> Self {
-        Self { id, whole, sdr: sdr as f32, skip }
+        Self { id, whole, pass: Pass::ToHdr { sdr: sdr as f32, skip } }
+    }
+
+    /// On a screen not in HDR: apps' HDR pictures (color.rs: sdr_parts) shown in sRGB.
+    pub fn from_hdr(id: Id, whole: Rectangle<i32, Physical>, parts: Vec<(Rectangle<i32, Physical>, [f32; 4])>) -> Self {
+        Self { id, whole, pass: Pass::FromHdr(parts) }
     }
 }
 
@@ -1333,18 +1389,30 @@ impl<R: Look> RenderElement<R> for HdrElement {
         if damage.is_empty() || !gles.capabilities().contains(&Capability::Blit) {
             return Ok(());
         }
-        let Some(p) = hdr_program(gles) else { return Ok(()) };
+        let Some(p) = pass_program(gles, matches!(self.pass, Pass::ToHdr { .. })) else { return Ok(()) };
         let Some(to) = to_gl(gles, self.whole.to_f64()) else { return Ok(()) };
-        let damaged = damage.iter().map(|d| Rectangle::new(d.loc + dst.loc, d.size));
-        let rects: Vec<[f32; 4]> = Rectangle::subtract_rects_many(damaged, self.skip.iter().copied())
-            .into_iter()
-            .filter_map(|d| to_gl(gles, d.to_f64()))
-            .collect();
-        if rects.is_empty() {
+        let damaged: Vec<Rectangle<i32, Physical>> = damage.iter().map(|d| Rectangle::new(d.loc + dst.loc, d.size)).collect();
+        // what to draw over (GL coordinates), with the uniform for it
+        let jobs: Vec<(Vec<[f32; 4]>, [f32; 4])> = match &self.pass {
+            Pass::ToHdr { sdr, skip } => vec![(
+                Rectangle::subtract_rects_many(damaged.iter().copied(), skip.iter().copied())
+                    .into_iter()
+                    .filter_map(|d| to_gl(gles, d.to_f64()))
+                    .collect(),
+                [*sdr, 0.0, 0.0, 0.0],
+            )],
+            Pass::FromHdr(parts) => parts
+                .iter()
+                .map(|(r, u)| {
+                    (damaged.iter().filter_map(|d| d.intersection(*r)).filter_map(|d| to_gl(gles, d.to_f64())).collect(), *u)
+                })
+                .collect(),
+        };
+        if jobs.iter().all(|(rects, _)| rects.is_empty()) {
             return Ok(());
         }
         let instancing = gles.capabilities().contains(&Capability::Instancing);
-        let sdr = self.sdr;
+        let to_hdr = matches!(self.pass, Pass::ToHdr { .. });
         gles.with_context(|gl| unsafe {
             let (tx, ty, tw, th) = (to[0] as i32, to[1] as i32, to[2] as i32, to[3] as i32);
             let mut fbo = 0;
@@ -1371,7 +1439,6 @@ impl<R: Look> RenderElement<R> for HdrElement {
             gl.UseProgram(p.0);
             gl.BindTexture(ffi::TEXTURE_2D, copy.tex);
             gl.Uniform1i(p.1, 0);
-            gl.Uniform1f(p.2, sdr);
             gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
             let pos = p.3 as u32;
             gl.EnableVertexAttribArray(pos);
@@ -1379,9 +1446,16 @@ impl<R: Look> RenderElement<R> for HdrElement {
                 gl.VertexAttribDivisor(pos, 0);
             }
             gl.VertexAttribPointer(pos, 2, ffi::FLOAT, ffi::FALSE, 0, QUAD.as_ptr() as *const _);
-            for r in &rects {
-                gl.Scissor(r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32 + 1, r[3].ceil() as i32 + 1);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            for (rects, u) in &jobs {
+                if to_hdr {
+                    gl.Uniform1f(p.2, u[0]);
+                } else {
+                    gl.Uniform4f(p.2, u[0], u[1], u[2], u[3]);
+                }
+                for r in rects {
+                    gl.Scissor(r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32 + 1, r[3].ceil() as i32 + 1);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
             }
             gl.DisableVertexAttribArray(pos);
             gl.DeleteFramebuffers(1, &copy.fbo);

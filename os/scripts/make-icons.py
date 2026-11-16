@@ -31,7 +31,9 @@ PICS = {
     "mail": f'<rect {W} x="52" y="78" width="152" height="104" rx="18"/><path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" d="M68 98l60 44 60-44"/>',
     "settings": "".join(f'<rect {W} x="116" y="52" width="24" height="40" rx="8" transform="rotate({a} 128 128)"/>' for a in range(0, 360, 45))
                 + f'<circle {W} cx="128" cy="128" r="50"/><circle fill="{{c}}" cx="128" cy="128" r="20"/>',
-    "monitor": f'<path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" d="M52 136h30l16-44 24 84 20-58 12 18h50"/>',
+    "monitor": f'<rect {W} x="44" y="64" width="168" height="128" rx="26"/>'
+               + "".join(f'<rect fill="{{c}}" opacity=".16" x="60" y="{y}" width="136" height="3" rx="1.5"/>' for y in (96, 128, 160))
+               + f'<path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" d="M62 132h24l14-34 22 66 18-48 12 16h42"/>',
     "store": f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" d="M98 102V90a30 30 0 0 1 60 0v12"/><path {W} d="M70 98h116l10 86a12 12 0 0 1-12 14H72a12 12 0 0 1-12-14z"/>'
              f'<circle fill="{{c}}" cx="100" cy="124" r="8"/><circle fill="{{c}}" cx="156" cy="124" r="8"/>',
     "video": f'<rect {W} x="52" y="80" width="152" height="96" rx="20"/><path fill="{{c}}" d="M114 104l40 24-40 24z"/>',
@@ -45,7 +47,9 @@ PICS = {
                   + "".join(f'<circle fill="{{c}}" opacity="{1 if (i, j) == (2, 2) else 0.55}" cx="{100 + i * 28}" cy="{124 + j * 26}" r="9"/>' for j in range(3) for i in range(3)),
     "clock": f'<circle {W} cx="128" cy="128" r="70"/><path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" d="M128 84v44l30 18"/><circle fill="{{c}}" cx="128" cy="128" r="8"/>',
     "terminal": f'<rect fill="#0E1319" x="44" y="66" width="168" height="124" rx="20"/><path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M72 104l28 24-28 24"/><rect {W} x="116" y="146" width="52" height="12" rx="6"/>',
-    "screenshot": f'<path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" d="M60 96V76a16 16 0 0 1 16-16h20M160 60h20a16 16 0 0 1 16 16v20M196 160v20a16 16 0 0 1-16 16h-20M96 196H76a16 16 0 0 1-16-16v-20"/><circle {W} cx="128" cy="128" r="24"/>',
+    "screenshot": f'<rect {W} x="50" y="50" width="156" height="156" rx="38"/>'
+                  f'<path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" d="M80 110V98a18 18 0 0 1 18-18h12M146 80h12a18 18 0 0 1 18 18v12M176 146v12a18 18 0 0 1-18 18h-12M110 176H98a18 18 0 0 1-18-18v-12"/>'
+                  f'<circle fill="{{c}}" cx="128" cy="128" r="17"/>',
     "archives": f'<rect {W} x="64" y="102" width="128" height="90" rx="14"/><rect {W} opacity=".8" x="52" y="68" width="152" height="40" rx="12"/>'
                 + "".join(f'<rect fill="{{c}}" x="{122 if i % 2 else 126}" y="{78 + i * 16}" width="10" height="9" rx="3"/>' for i in range(6)),
     "welcome": f'<path {W} d="M128 48c9 46 34 71 80 80-46 9-71 34-80 80-9-46-34-71-80-80 46-9 71-34 80-80z"/><circle {W} opacity=".8" cx="190" cy="70" r="10"/>',
@@ -54,21 +58,32 @@ PICS = {
               f'<path fill="none" stroke="{{c}}" stroke-width="7" opacity=".8" d="M52 102h152M52 146h152M102 64v128M154 64v128"/>',
     "slides": f'<rect {W} x="48" y="62" width="160" height="104" rx="16"/><rect {W} x="122" y="162" width="12" height="30"/><rect {W} x="92" y="188" width="72" height="12" rx="6"/>'
               + "".join(f'<rect fill="{{c}}" opacity=".85" x="{80 + i * 28}" y="{142 - h}" width="16" height="{h}" rx="4"/>' for i, h in enumerate([28, 46, 36, 58])),
-    "passwords": f'<circle fill="none" stroke="#fff" stroke-width="18" cx="96" cy="128" r="32"/><rect {W} x="124" y="119" width="88" height="18" rx="9"/><rect {W} x="172" y="130" width="14" height="28" rx="5"/><rect {W} x="196" y="130" width="14" height="20" rx="5"/>',
-    "contacts": f'<circle {W} cx="128" cy="100" r="34"/><path {W} d="M64 200a64 54 0 0 1 128 0z"/>',
+    "passwords": f'<circle {W} cx="92" cy="128" r="44"/><rect {W} x="122" y="115" width="94" height="26" rx="13"/><rect {W} x="168" y="128" width="17" height="36" rx="6"/>'
+                 f'<rect {W} x="193" y="128" width="17" height="26" rx="6"/><circle fill="{{c}}" cx="80" cy="128" r="13"/>'
+                 f'<circle fill="none" stroke="{{c}}" stroke-opacity=".35" stroke-width="5" cx="92" cy="128" r="31"/>',
+    "contacts": f'<rect {W} x="56" y="48" width="144" height="160" rx="30"/><rect {W} opacity=".55" x="200" y="78" width="10" height="34" rx="5"/>'
+                f'<rect {W} opacity=".55" x="200" y="124" width="10" height="34" rx="5"/>'
+                f'<circle fill="{{c}}" cx="128" cy="110" r="27"/><path fill="{{c}}" d="M84 186a44 40 0 0 1 88 0z"/>',
     "weather": f'<circle fill="#FFE08A" cx="100" cy="100" r="34"/><circle {W} cx="108" cy="164" r="30"/><circle {W} cx="150" cy="148" r="40"/><circle {W} cx="186" cy="168" r="26"/><rect {W} x="108" y="166" width="78" height="28"/>',
-    "backup": f'<path fill="none" stroke="#fff" stroke-width="15" stroke-linecap="round" d="M128 70a58 58 0 1 1-54 37"/><path {W} d="M134 42l-38 26 36 28z"/><path fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" d="M128 104v26l18 12"/>',
+    "backup": f'<circle {W} cx="128" cy="128" r="78"/>'
+              f'<path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" d="M128 84a44 44 0 1 1-41 28"/>'
+              f'<path fill="{{c}}" d="M133 62l-30 20 28 22z"/>'
+              f'<path fill="none" stroke="{{c}}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" d="M128 108v22l15 10"/>',
     "disks": f'<circle {W} cx="128" cy="128" r="72"/><circle fill="{{c}}" opacity=".25" cx="128" cy="128" r="50"/><circle fill="{{c}}" cx="128" cy="128" r="22"/><circle {W} cx="128" cy="128" r="7"/>',
     "camera": f'<rect {W} x="98" y="66" width="60" height="30" rx="10"/><rect {W} x="48" y="84" width="160" height="110" rx="22"/><circle fill="{{c}}" cx="128" cy="140" r="34"/><circle {W} opacity=".45" cx="128" cy="140" r="16"/><circle fill="{{c}}" cx="184" cy="106" r="7"/>',
     "recorder": f'<rect {W} x="102" y="48" width="52" height="94" rx="26"/><path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" d="M80 124a48 48 0 0 0 96 0"/><rect {W} x="122" y="170" width="12" height="26"/><rect {W} x="98" y="192" width="60" height="13" rx="6.5"/>',
-    "reminders": f'<circle {W} cx="84" cy="90" r="17"/><path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M76 90l6 7 11-13"/>'
-                 + "".join(f'<circle fill="none" stroke="#fff" stroke-width="9" cx="84" cy="{y}" r="13"/>' for y in (130, 170))
-                 + "".join(f'<rect {W} opacity="{o}" x="114" y="{y}" width="{w}" height="14" rx="7"/>' for y, w, o in ((83, 82, 0.6), (123, 82, 1), (163, 56, 1))),
+    "reminders": "".join(f'<circle {W} cx="80" cy="{y}" r="18"/>' for y in (88, 128, 168))
+                 + f'<path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M72 88l6 7 11-13"/>'
+                 + "".join(f'<circle fill="{{c}}" opacity=".9" cx="80" cy="{y}" r="7"/>' for y in (128, 168))
+                 + "".join(f'<rect {W} x="110" y="{y}" width="{w}" height="16" rx="8"/>' for y, w in ((80, 88), (120, 88), (160, 60))),
     "phone": f'<rect {W} x="84" y="44" width="88" height="168" rx="22"/><rect fill="{{c}}" x="96" y="64" width="64" height="118" rx="10"/><rect {W} opacity=".5" x="112" y="76" width="32" height="8" rx="4"/><circle fill="{{c}}" cx="128" cy="196" r="7"/>',
     "print": f'<rect {W} opacity=".8" x="84" y="52" width="88" height="48" rx="8"/><rect {W} x="48" y="92" width="160" height="76" rx="18"/><circle fill="{{c}}" cx="182" cy="116" r="7"/>'
              f'<rect {W} stroke="{{c}}" stroke-width="5" x="80" y="140" width="96" height="64" rx="8"/><rect fill="{{c}}" opacity=".7" x="96" y="160" width="64" height="8" rx="4"/><rect fill="{{c}}" opacity=".7" x="96" y="178" width="40" height="8" rx="4"/>',
     "maps": f'<path {W} d="M128 46a54 54 0 0 1 54 54c0 40-54 110-54 110S74 140 74 100a54 54 0 0 1 54-54z"/><circle fill="{{c}}" cx="128" cy="100" r="21"/>',
-    "podcasts": f'<path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" d="M82 158a58 58 0 1 1 92 0"/><path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" d="M104 142a31 31 0 1 1 48 0"/><circle {W} cx="128" cy="122" r="13"/><rect {W} x="119" y="146" width="18" height="62" rx="9"/>',
+    "podcasts": f'<circle {W} cx="128" cy="128" r="78"/>'
+                f'<path fill="none" stroke="{{c}}" stroke-width="10" stroke-linecap="round" d="M92 158a48 48 0 1 1 72 0"/>'
+                f'<path fill="none" stroke="{{c}}" stroke-width="10" stroke-linecap="round" d="M110 144a25 25 0 1 1 36 0"/>'
+                f'<circle fill="{{c}}" cx="128" cy="124" r="11"/><rect fill="{{c}}" x="121" y="142" width="14" height="46" rx="7"/>',
     "books": f'<path {W} d="M124 84c-22-16-46-18-72-10v104c26-8 50-6 72 10z"/><path {W} opacity=".8" d="M132 84c22-16 46-18 72-10v104c-26-8-50-6-72 10z"/>'
              + "".join(f'<path fill="none" stroke="{{c}}" stroke-width="6" stroke-linecap="round" opacity=".7" d="M70 {y}c14-3 26-2 38 3"/>' for y in (102, 124, 146)),
     "games": f'<path {W} d="M84 84h88c38 0 56 36 56 68 0 34-30 42-48 20l-12-16H88l-12 16c-18 22-48 14-48-20 0-32 18-68 56-68z"/><rect fill="{{c}}" x="62" y="114" width="44" height="13" rx="6.5"/><rect fill="{{c}}" x="77.5" y="98.500" width="13" height="44" rx="6.5"/><circle fill="{{c}}" cx="160" cy="130" r="9"/><circle fill="{{c}}" cx="184" cy="110" r="9"/>',
@@ -132,11 +147,13 @@ DETAIL = {
     "notes": f'<path {W} d="M80 56h96a16 16 0 0 1 16 16v88l-40 40H80a16 16 0 0 1-16-16V72a16 16 0 0 1 16-16z"/><path fill="{{c}}" opacity=".35" d="M152 200v-28a12 12 0 0 1 12-12h28z"/>'
              f'<path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M82 88l8 8 14-16"/><rect fill="{{c}}" opacity=".8" x="114" y="84" width="58" height="10" rx="5"/>'
              f'<rect fill="{{c}}" opacity=".8" x="86" y="114" width="84" height="10" rx="5"/><rect fill="{{c}}" opacity=".8" x="86" y="138" width="52" height="10" rx="5"/>',
-    "writer": f'<rect {W} opacity=".4" x="58" y="62" width="96" height="124" rx="12"/><rect fill="{{c}}" opacity=".5" x="72" y="80" width="56" height="7" rx="3.5"/><rect fill="{{c}}" opacity=".5" x="72" y="96" width="40" height="7" rx="3.5"/>'
-              f'<path {W} d="M168 64l30 30-84 84-42 8 8-42z"/><path fill="{{c}}" d="M156 76l30 30-8 8-30-30z"/><path fill="{{c}}" d="M80 186l6-30 24 24z"/>',
-    "terminal": f'<rect fill="#0E1319" x="44" y="66" width="168" height="124" rx="20"/><path fill="#fff" opacity=".12" d="M64 66h128a20 20 0 0 1 20 20v8H44v-8a20 20 0 0 1 20-20z"/>'
-                + "".join(f'<circle fill="#fff" opacity=".7" cx="{x}" cy="80" r="4.5"/>' for x in (62, 76, 90))
-                + f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M72 112l26 22-26 22"/><rect {W} x="114" y="150" width="30" height="12" rx="6"/><rect {W} opacity=".7" x="152" y="142" width="14" height="22" rx="3"/>',
+    "writer": f'<rect {W} x="52" y="54" width="116" height="148" rx="18"/>'
+              + "".join(f'<rect fill="{{c}}" opacity=".8" x="70" y="{y}" width="{w}" height="9" rx="4.5"/>' for y, w in ((78, 64), (98, 76), (118, 52), (138, 64)))
+              + f'<path fill="#16191E" opacity=".35" d="M178 72l32 32-82 82-46 10 10-46z"/>'
+              f'<path fill="{{c}}" d="M174 66l32 32-82 82-42 8 8-42z"/><path {W} d="M162 78l32 32-9 9-32-32z"/><path {W} d="M86 188l5-28 23 23z"/>',
+    "terminal": f'<rect {W} x="42" y="62" width="172" height="132" rx="24"/><path fill="{{c}}" opacity=".16" d="M66 62h124a24 24 0 0 1 24 24v8H42v-8a24 24 0 0 1 24-24z"/>'
+                + "".join(f'<circle fill="{{c}}" opacity=".85" cx="{x}" cy="78" r="5"/>' for x in (62, 78, 94))
+                + f'<path fill="none" stroke="{{c}}" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" d="M72 116l26 22-26 22"/><rect fill="{{c}}" x="114" y="154" width="36" height="13" rx="6.5"/>',
     "weather": f'<circle fill="#FFE08A" cx="100" cy="100" r="30"/>'
                + "".join(f'<rect fill="#FFE08A" x="96" y="50" width="8" height="16" rx="4" transform="rotate({a} 100 100)"/>' for a in range(0, 360, 45))
                + f'<circle {W} cx="108" cy="164" r="30"/><circle {W} cx="150" cy="148" r="40"/><circle {W} cx="186" cy="168" r="26"/><rect {W} x="108" y="166" width="78" height="28"/>',
@@ -401,6 +418,43 @@ def theme(colours: dict) -> int:
     return len(FOLDERS) + len(KINDS)
 
 
+# Every picture is brought to the same visual size and centred, as Apple's icon grid does by eye: what's measured is
+# how much it covers (its ink) and how far it reaches (its box), half each, so a sparse picture (a list, a bolt)
+# grows a little and a heavy one (a wallet, a controller) shrinks a little. Never more than a quarter either way, and
+# never wider or taller than KEEP_INSIDE. Centred halfway between its box's middle and its ink's middle.
+VISUAL_SIZE, KEEP_INSIDE, MOST = 144.0, 164.0, 1.25
+
+
+def fit(pic: str) -> str:
+    from PySide6.QtCore import QByteArray, QRectF, Qt
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtSvg import QSvgRenderer
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">{pic.replace("{c}", "#fff")}</svg>'
+    img = QImage(256, 256, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    painter = QPainter(img)
+    painter.setRenderHint(QPainter.Antialiasing)
+    QSvgRenderer(QByteArray(svg.encode("utf-8"))).render(painter, QRectF(0, 0, 256, 256))
+    painter.end()
+    alpha = bytes(img.constBits())[3::4]          # ARGB32 is B, G, R, A in memory
+    rows = [max(alpha[y * 256:(y + 1) * 256]) > 38 for y in range(256)]
+    cols = [max(alpha[x::256]) > 38 for x in range(256)]
+    if not any(rows):
+        return pic
+    y0, y1 = rows.index(True), 256 - rows[::-1].index(True)
+    x0, x1 = cols.index(True), 256 - cols[::-1].index(True)
+    ink = sum(alpha) / 255
+    mx = sum(x * sum(alpha[x::256]) for x in range(256)) / 255 / ink
+    my = sum(y * sum(alpha[y * 256:(y + 1) * 256]) for y in range(256)) / 255 / ink
+    w, h = x1 - x0, y1 - y0
+    size = (ink ** 0.5 + (w * h) ** 0.5) / 2
+    scale = min(max(VISUAL_SIZE / size, 1 / MOST), MOST, KEEP_INSIDE / max(w, h))
+    cx, cy = ((x0 + x1) / 2 + mx + 0.5) / 2, ((y0 + y1) / 2 + my + 0.5) / 2
+    if abs(scale - 1) < 0.02 and abs(cx - 128) < 2 and abs(cy - 128) < 2:
+        return pic
+    return f'<g transform="translate({128 - cx * scale:.2f} {128 - cy * scale:.2f}) scale({scale:.4f})">{pic}</g>'
+
+
 def main() -> int:
     colours = json.loads((ROOT / "tokens" / "tokens.json").read_text(encoding="utf-8"))
 
@@ -446,6 +500,8 @@ def main() -> int:
         return True
 
     for name in PICS:
+        if name != "calendar":          # the dock writes today's date at fixed places on it (AppIcon.qml)
+            PICS[name] = fit(PICS[name])
         if not write(f"huginn-{name}", icon(name, *colours[name])):
             return 1
     # the calendar without its date: the dock and the launcher write today's over it (AppIcon.qml)

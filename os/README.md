@@ -1148,7 +1148,13 @@ over when the side island would reach them (`GlassWindow.middleX`).
   events when HDR or SDR brightness changes, and a PQ window's pixels unchanged while the rest is converted.
   (wayland-backend fills in a new object's data after the request that made it, so the information object, which
   its own `done` ends, is answered from an idle callback: answering at once was a use-after-free.)
-  An app that sends PQ to a screen not in HDR isn't tone-mapped; apps that ask first (mpv, games) don't.
+  On a screen not in HDR, an app's HDR (or BT.2020) picture is shown in sRGB instead of washed out (`look.rs`:
+  the HDR element's other pass): PQ decoded, brightness above a knee rolled off so the picture's brightest (its
+  content light level, else the mastering display's, else what its luminances say) just reaches white, colours
+  brought into sRGB's. It's drawn under the pointer and under zoom, and goes into screen pictures. Checked: a PQ
+  grey of 128 comes out at 181 as worked out by hand, and switching HDR on and off while it's open swaps between
+  that and passing it through. Subsurfaces count (players often put the picture in one), and a window filling the
+  screen is found where it's drawn.
 - **KWin and Plasma's workspace are out of the image** (`config/not-wanted.list`): Huginn's compositor is the only
   session (`/usr/bin/huginn-session`, "Huginn OS" at sign-in) and draws the sign-in screen too (SDDM's
   `CompositorCommand`). Screen sharing goes through xdg-desktop-portal-wlr, everything else through KDE's portal.
@@ -1156,6 +1162,13 @@ over when the side island would reach them (`GlassWindow.middleX`).
   What Plasma's workspace used to bring that's still used is listed now (plasma-integration, geoclue, hwdata), and
   every listed package is marked as installed on purpose, so `apt autoremove` keeps it.
 - "Lock when waking" in Settings › Privacy & Security is honoured by the compositor (it was KDE's locker's).
+- **Icons, polished**: every picture is brought to the same visual size and centred (`fit()` in make-icons.py:
+  half how much it covers, half how far it reaches, at most a quarter bigger or smaller, never past 164 of 256),
+  so a list or a bolt no longer looks small beside a wallet or a controller. The pictures that were only lines
+  are solid objects with white details now, like the rest: Activity Monitor's screen, the Passwords key, the
+  Screenshot frame, Podcasts and Backup as discs, Contacts as a card, Reminders' bullets. Writer's page is solid
+  (it was see-through, murky on the dark glass) and Terminal's window is in its colour (it was black on black).
+  Calendar keeps its exact drawing: the dock writes the date at fixed places on it.
 - **Signing out** goes through the compositor (`org.huginn.Compositor.SignOut`): every window is asked to close, and
   once they've gone the compositor ends the session itself. Ending it through logind (as before) also ended SDDM's
   helper, which SDDM takes for a crash: no sign-in screen came back. A window still open after 20 seconds (an app

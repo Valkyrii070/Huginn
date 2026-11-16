@@ -414,6 +414,13 @@ where
         let size = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
         let skip = crate::color::hdr_parts(space, output, (-1000.0, -1000.0).into());
         elements.insert(0, OutputRenderElements::Hdr(crate::look::HdrElement::new(crate::displays::hdr_of(output).id.clone(), Rectangle::from_size(size), sdr, skip)));
+    } else {
+        // apps' HDR pictures on a screen not in HDR, shown in sRGB (as on a real screen: udev.rs)
+        let parts = crate::color::sdr_parts(space, output);
+        if !parts.is_empty() {
+            let size = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
+            elements.insert(0, OutputRenderElements::Hdr(crate::look::HdrElement::from_hdr(crate::displays::hdr_of(output).id.clone(), Rectangle::from_size(size), parts)));
+        }
     }
     damage_tracker.render_output(renderer, framebuffer, age, &elements, clear_color)
 }

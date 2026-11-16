@@ -44,19 +44,22 @@ pub struct Desc {
     pub bt2020: bool,
     /// min (0.0001 cd/m²), max, reference white (cd/m²)
     pub lum: (u32, u32, u32),
+    /// the brightest the picture actually gets (cd/m²), when the app says (its content light level, or the display
+    /// it was mastered on): what's rolled off to fit a screen that isn't in HDR
+    pub peak: Option<u32>,
 }
 
 static NEXT: AtomicU32 = AtomicU32::new(10_000);
 
 fn fresh(pq: bool, bt2020: bool, lum: (u32, u32, u32)) -> Desc {
-    Desc { id: NEXT.fetch_add(1, Ordering::Relaxed), pq, bt2020, lum }
+    Desc { id: NEXT.fetch_add(1, Ordering::Relaxed), pq, bt2020, lum, peak: None }
 }
 
 /// What a screen wants: HDR (PQ, BT.2020, its SDR white) while HDR is on, else sRGB.
 pub fn screen_desc(output: &Output) -> Desc {
     match crate::displays::hdr_sdr(output) {
-        Some(sdr) => Desc { id: 2000 + sdr.round() as u32, pq: true, bt2020: true, lum: (50, 1000, sdr.round() as u32) },
-        None => Desc { id: 1, pq: false, bt2020: false, lum: (2000, 80, 80) },
+        Some(sdr) => Desc { id: 2000 + sdr.round() as u32, pq: true, bt2020: true, lum: (50, 1000, sdr.round() as u32), peak: None },
+        None => Desc { id: 1, pq: false, bt2020: false, lum: (2000, 80, 80), peak: None },
     }
 }
 
@@ -65,7 +68,7 @@ struct SurfaceDesc(Mutex<Option<Desc>>);
 
 /// Whether this surface's pixels are HDR (PQ).
 pub fn is_hdr(surface: &WlSurface) -> bool {
-    with_states(surface, |s| s.data_map.get::<SurfaceDesc>().and_then(|d| *d.0.lock().unwrap()).is_some_and(|d| d.pq))
+    desc_of(surface).is_some_and(|d| d.pq)
 }
 
 /// Objects to tell when a screen's description changes.
@@ -93,38 +96,118 @@ pub fn screen_changed(output: &Output) {
     }
 }
 
-/// On an HDR screen: the parts of HDR surfaces with nothing over them (physical, the screen's own coordinates),
-/// which the HDR pass leaves as they are.
-pub fn hdr_parts(space: &smithay::desktop::Space<crate::shell::WindowElement>, output: &Output, pointer: smithay::utils::Point<f64, smithay::utils::Logical>) -> Vec<Rectangle<i32, Physical>> {
+/// The surface's own description, if it set one.
+pub fn desc_of(surface: &WlSurface) -> Option<Desc> {
+    with_states(surface, |s| s.data_map.get::<SurfaceDesc>().and_then(|d| *d.0.lock().unwrap()))
+}
+
+/// On a screen: the parts of windows' surfaces (subsurfaces too: a video player's picture often is one) that say
+/// what their pictures are, with nothing over them, and what each says (physical, the screen's own coordinates).
+///
+/// `pointer`: where the pointer is, when the pass using these is drawn over it (it's left out, as it's drawn in sRGB).
+pub fn described_parts(
+    space: &smithay::desktop::Space<crate::shell::WindowElement>,
+    output: &Output,
+    pointer: Option<smithay::utils::Point<f64, smithay::utils::Logical>>,
+) -> Vec<(Rectangle<i32, Physical>, Desc)> {
     use smithay::{
+        backend::renderer::utils::RendererSurfaceStateUserData,
         desktop::{layer_map_for_output, space::SpaceElement},
-        wayland::shell::wlr_layer::Layer,
+        utils::{Logical, Point},
+        wayland::{compositor::{TraversalAction, with_surface_tree_downward}, shell::wlr_layer::Layer},
     };
     let Some(geo) = space.output_geometry(output) else { return Vec::new() };
     let scale = output.current_scale().fractional_scale();
-    let local = |r: Rectangle<i32, smithay::utils::Logical>| Rectangle::new(r.loc - geo.loc, r.size).to_physical_precise_round(scale);
+    let local = |r: Rectangle<i32, Logical>| Rectangle::new(r.loc - geo.loc, r.size).to_physical_precise_round(scale);
     // over everything: the pointer, the bar, the dock, notifications
-    let mut over: Vec<Rectangle<i32, Physical>> =
-        vec![local(Rectangle::new(pointer.to_i32_round() - smithay::utils::Point::from((8, 8)), (72, 72).into()))];
-    let map = layer_map_for_output(output);
-    for layer in map.layers().filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay)) {
-        if let Some(g) = map.layer_geometry(layer) {
-            over.push(Rectangle::new(g.loc, g.size).to_physical_precise_round(scale));
+    let mut over: Vec<Rectangle<i32, Physical>> = pointer
+        .map(|p| local(Rectangle::new(p.to_i32_round() - Point::from((8, 8)), (72, 72).into())))
+        .into_iter()
+        .collect();
+    // a window filling the screen is drawn alone, at the screen's corner (render.rs)
+    let full = output.user_data().get::<crate::shell::FullscreenSurface>().and_then(|f| f.get());
+    if full.is_none() {
+        let map = layer_map_for_output(output);
+        for layer in map.layers().filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay)) {
+            if let Some(g) = map.layer_geometry(layer) {
+                over.push(Rectangle::new(g.loc, g.size).to_physical_precise_round(scale));
+            }
         }
     }
     let mut parts = Vec::new();
-    let windows: Vec<_> = space.elements_for_output(output).collect();
+    let windows: Vec<crate::shell::WindowElement> = match &full {
+        Some(w) => vec![w.clone()],
+        None => space.elements_for_output(output).cloned().collect(),
+    };
+    // front to back: each window's parts lose what's in front of them
     for w in windows.iter().rev() {
-        let Some(loc) = space.element_location(w) else { continue };
-        let hdr = w.wl_surface().is_some_and(|s| is_hdr(&s));
-        if hdr {
-            let g = w.geometry();
-            let mine = local(Rectangle::new(loc + g.loc, g.size));
-            parts.extend(Rectangle::subtract_rects_many([mine], over.iter().copied()));
+        let loc = match &full {
+            Some(_) => geo.loc + w.geometry().loc,
+            None => match space.element_location(w) {
+                Some(loc) => loc,
+                None => continue,
+            },
+        };
+        if let Some(root) = w.wl_surface() {
+            let mut found: Vec<(Rectangle<i32, Logical>, Desc)> = Vec::new();
+            with_surface_tree_downward(
+                &root,
+                loc - w.geometry().loc,
+                |surface, states, at: &Point<i32, Logical>| {
+                    let view = states.data_map.get::<RendererSurfaceStateUserData>().and_then(|d| d.lock().unwrap().view());
+                    match view {
+                        Some(view) => {
+                            let at = *at + view.offset;
+                            if let Some(d) = states.data_map.get::<SurfaceDesc>().and_then(|d| *d.0.lock().unwrap()) {
+                                if d.pq || d.bt2020 {
+                                    found.push((Rectangle::new(at, view.dst), d));
+                                }
+                            }
+                            let _ = surface;
+                            TraversalAction::DoChildren(at)
+                        }
+                        None => TraversalAction::SkipChildren,
+                    }
+                },
+                |_, _, _| {},
+                |_, _, _| true,
+            );
+            for (r, d) in found {
+                for part in Rectangle::subtract_rects_many([local(r)], over.iter().copied()) {
+                    parts.push((part, d));
+                }
+            }
         }
-        over.push(local(Rectangle::new(loc + w.bbox().loc, w.bbox().size)));
+        if let Some(bbox) = space.element_bbox(w).filter(|_| full.is_none()) {
+            over.push(local(bbox));
+        }
     }
     parts
+}
+
+/// On an HDR screen: the parts of HDR (PQ) pictures with nothing over them, which the HDR pass leaves as they are.
+pub fn hdr_parts(
+    space: &smithay::desktop::Space<crate::shell::WindowElement>,
+    output: &Output,
+    pointer: smithay::utils::Point<f64, smithay::utils::Logical>,
+) -> Vec<Rectangle<i32, Physical>> {
+    described_parts(space, output, Some(pointer)).into_iter().filter(|(_, d)| d.pq).map(|(r, _)| r).collect()
+}
+
+/// On a screen not in HDR: pictures that aren't plain sRGB (HDR, or BT.2020's wider colours) and what to do to
+/// each to show it in sRGB: [reference white (nits), the picture's brightest (nits), PQ? 1/0, BT.2020? 1/0].
+pub fn sdr_parts(
+    space: &smithay::desktop::Space<crate::shell::WindowElement>,
+    output: &Output,
+) -> Vec<(Rectangle<i32, Physical>, [f32; 4])> {
+    described_parts(space, output, None)
+        .into_iter()
+        .map(|(r, d)| {
+            let reference = if d.lum.2 > 0 { d.lum.2 as f32 } else { 203.0 };
+            let peak = d.peak.unwrap_or(d.lum.1) as f32;
+            (r, [reference, peak.max(reference), d.pq as u8 as f32, d.bt2020 as u8 as f32])
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------------------------------------- the protocol
@@ -134,7 +217,15 @@ pub struct OutputData;
 pub struct SurfaceData(Weak<WlSurface>);
 pub struct FeedbackData(Weak<WlSurface>);
 #[derive(Default)]
-pub struct ParamsData(Mutex<(Option<bool>, Option<bool>, Option<(u32, u32, u32)>)>);
+pub struct ParamsData(Mutex<Params>);
+#[derive(Default)]
+pub struct Params {
+    pq: Option<bool>,
+    bt2020: Option<bool>,
+    lum: Option<(u32, u32, u32)>,
+    max_cll: Option<u32>,
+    mastering_max: Option<u32>,
+}
 pub struct IccData;
 /// An image description; `info`: whether the app may ask what's in it (those from screens and preferences).
 pub struct DescData(pub Desc, pub bool);
@@ -313,6 +404,7 @@ impl<B: Backend + 'static> Dispatch2<WpColorManagementSurfaceFeedbackV1, HuginnS
                 pq: false,
                 bt2020: false,
                 lum: (2000, 80, 80),
+                peak: None,
             });
             (id, d)
         };
@@ -353,7 +445,7 @@ impl<B: Backend + 'static> Dispatch2<WpImageDescriptionCreatorParamsV1, HuginnSt
                         return;
                     }
                 };
-                p.0 = Some(pq);
+                p.pq = Some(pq);
             }
             Request::SetPrimariesNamed { primaries } => {
                 let bt2020 = match primaries {
@@ -364,21 +456,25 @@ impl<B: Backend + 'static> Dispatch2<WpImageDescriptionCreatorParamsV1, HuginnSt
                         return;
                     }
                 };
-                p.1 = Some(bt2020);
+                p.bt2020 = Some(bt2020);
             }
-            Request::SetLuminances { min_lum, max_lum, reference_lum } => p.2 = Some((min_lum, max_lum, reference_lum)),
+            Request::SetLuminances { min_lum, max_lum, reference_lum } => p.lum = Some((min_lum, max_lum, reference_lum)),
             Request::SetTfPower { .. } | Request::SetPrimaries { .. } => {
                 resource.post_error(Error::UnsupportedFeature, "only named transfer functions and primaries are supported");
             }
             // mastering display, content light levels: taken, not needed (the screen's own metadata is used)
-            Request::SetMasteringDisplayPrimaries { .. } | Request::SetMasteringLuminance { .. } | Request::SetMaxCll { .. } | Request::SetMaxFall { .. } => {}
+            Request::SetMaxCll { max_cll } => p.max_cll = (max_cll > 0).then_some(max_cll),
+            Request::SetMasteringLuminance { max_lum, .. } => p.mastering_max = (max_lum > 0).then_some(max_lum),
+            // the mastering display's colours, the average light level: taken, not needed
+            Request::SetMasteringDisplayPrimaries { .. } | Request::SetMaxFall { .. } => {}
             Request::Create { image_description } => {
-                let (Some(pq), Some(bt2020)) = (p.0, p.1) else {
+                let (Some(pq), Some(bt2020)) = (p.pq, p.bt2020) else {
                     resource.post_error(Error::IncompleteSet, "a transfer function and primaries are needed");
                     return;
                 };
-                let lum = p.2.unwrap_or(if pq { (50, 10000, 203) } else { (2000, 80, 80) });
-                ready(data_init, image_description, fresh(pq, bt2020, lum), false);
+                let lum = p.lum.unwrap_or(if pq { (50, 10000, 203) } else { (2000, 80, 80) });
+                let desc = Desc { peak: p.max_cll.or(p.mastering_max), ..fresh(pq, bt2020, lum) };
+                ready(data_init, image_description, desc, false);
             }
             _ => {}
         }

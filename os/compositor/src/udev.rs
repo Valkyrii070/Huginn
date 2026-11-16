@@ -1947,11 +1947,29 @@ fn render_surface<'a>(
                 crate::displays::hdr_of(output).id.clone(),
                 smithay::utils::Rectangle::from_size(size),
                 sdr,
-                crate::color::hdr_parts(space, output, pointer_location),
+                if view.active() { Vec::new() } else { crate::color::hdr_parts(space, output, pointer_location) },
             )),
         );
     }
-    let frame_mode = if hdr.is_some() { FrameFlags::empty() } else { frame_mode };
+    // apps' HDR pictures on a screen not in HDR: shown in sRGB (color.rs), under the pointer, and under zoom so it
+    // magnifies what's been converted (where it is, screen pictures without the pointer still get it)
+    let from_hdr =
+        if hdr.is_none() && lock.is_none() && !view.active() { crate::color::sdr_parts(space, output) } else { Vec::new() };
+    let converting = !from_hdr.is_empty();
+    if converting {
+        let size = output.current_mode().map(|m| output.current_transform().transform_size(m.size)).unwrap_or_default();
+        let at = (cursor_n + (view.zoom > 1.0) as usize).min(elements.len());
+        elements.insert(
+            at,
+            OutputRenderElements::Hdr(crate::look::HdrElement::from_hdr(
+                crate::displays::hdr_of(output).id.clone(),
+                smithay::utils::Rectangle::from_size(size),
+                from_hdr,
+            )),
+        );
+    }
+    // both passes draw from the framebuffer, so nothing may go straight to the screen
+    let frame_mode = if hdr.is_some() || converting { FrameFlags::empty() } else { frame_mode };
     let (rendered, states) = surface
         .drm_output
         .render_frame(renderer, &elements, clear_color, frame_mode)
