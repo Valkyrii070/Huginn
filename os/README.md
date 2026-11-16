@@ -1086,8 +1086,9 @@ over when the side island would reach them (`GlassWindow.middleX`).
   Turning a screen off and choosing the main screen are still to come there.
 - **Night light** there too: the session daemon reads Settings' night light (kwinrc's [NightColor], as KWin does)
   and sets every screen's gamma through the compositor, easing in and out over half an hour.
-- Icons: Huginn OS's and the browser's ravens in the same smoked glass as the apps, and Calendar's tile shows
-  today's date.
+- Icons: the pictures inside the smoked glass are solid now, as macOS and iOS draw theirs (the app's colour with
+  white details, a soft shadow, no glow; `STYLE` in make-icons.py). Huginn OS's and the browser's ravens are in the
+  same glass, and Calendar's tile shows today's date.
 
 ## Huginn, the browser
 

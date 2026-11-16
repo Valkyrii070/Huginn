@@ -184,7 +184,11 @@ RAVEN = (f'<path {W} d="M14 200 C36 164 66 132 104 110 C108 80 126 56 152 56 C16
 MARKS = {"huginn-os": ("#3DD6B5", "#7B61FF", ("#B9F5E8", "#7B61FF")), "huginn-browser": ("#8E7BFF", "#5B3FD6", ("#D9D2FF", "#7B61FF"))}
 
 
-def icon(app: str, bright: str, deep: str, pic: str | None = None, ink: tuple | None = None, clip: bool = False) -> str:
+STYLE = "lit"         # what the pictures inside the glass look like (picture()): solid, as macOS and iOS draw them
+
+
+def icon(app: str, bright: str, deep: str, pic: str | None = None, ink: tuple | None = None, clip: bool = False,
+         style: str = STYLE) -> str:
     pic = PICS[app] if pic is None else pic
 
     def paint(white: str, detail: str) -> str:
@@ -219,13 +223,32 @@ def icon(app: str, bright: str, deep: str, pic: str | None = None, ink: tuple | 
             f'</defs>'
             f'<path d="{TILE}" fill="#000" opacity=".5" filter="url(#drop)"/>'
             f'<path d="{TILE}" fill="url(#tile)"/><path d="{TILE}" fill="url(#spec)"/><path d="{TILE}" fill="url(#glow)"/><path d="{TILE}" fill="url(#sheen)"/>'
-            f'<g{inside}><g filter="url(#halo)" opacity=".55">{paint(bright, bright)}</g>{paint("url(#ink)", cut)}'
-            f'<rect width="256" height="256" fill="url(#gloss)" mask="url(#shape)"/><rect width="256" height="256" fill="url(#foot)" mask="url(#shape)"/></g>'
+            f'<g{inside}>{picture(paint, style, bright, deep, cut)}</g>'
             f'<path d="{TILE}" fill="none" stroke="url(#rim)" stroke-width="3"/>'
             f'<g clip-path="url(#inside)"><path d="{INNER}" fill="none" stroke="url(#hi)" stroke-width="5"/><path d="{INNER}" fill="none" stroke="url(#lo)" stroke-width="6"/></g>'
             f'<g clip-path="url(#low)"><path d="{TILE}" fill="none" stroke="url(#ring)" stroke-width="9" filter="url(#soft)" opacity=".9"/>'
             f'<path d="{TILE}" fill="none" stroke="url(#ring)" stroke-width="3.5"/></g>'
             f'</svg>\n')
+
+
+def picture(paint, style: str, bright: str, deep: str, cut: str) -> str:
+    """The picture inside the glass. glass: glowing, glossy (the first look). The others are solid, as macOS and iOS
+    draw theirs: an even gradient, a soft shadow under it, no glow. solid: the app's colour with dark details;
+    paper: white with details in the colour; lit: the colour with white details."""
+    if style == "glass":
+        return (f'<g filter="url(#halo)" opacity=".55">{paint(bright, bright)}</g>{paint("url(#ink)", cut)}'
+                f'<rect width="256" height="256" fill="url(#gloss)" mask="url(#shape)"/><rect width="256" height="256" fill="url(#foot)" mask="url(#shape)"/>')
+    hi, lo = mix(bright, "#FFFFFF", 0.22), mix(bright, deep, 0.35)
+    body, detail = {"solid": ("url(#solid)", cut), "paper": ("url(#paper)", bright), "lit": ("url(#solid)", "#FFFFFF")}[style]
+    return (f'<defs><linearGradient id="solid" gradientUnits="userSpaceOnUse" x1="0" y1="60" x2="0" y2="200">'
+            f'<stop offset="0" stop-color="{hi}"/><stop offset="1" stop-color="{lo}"/></linearGradient>'
+            f'<linearGradient id="paper" gradientUnits="userSpaceOnUse" x1="0" y1="60" x2="0" y2="200">'
+            f'<stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#DADDE3"/></linearGradient>'
+            f'<filter id="under" x="-30%" y="-30%" width="160%" height="170%"><feGaussianBlur stdDeviation="5"/><feOffset dy="5"/></filter>'
+            f'<linearGradient id="edge" gradientUnits="userSpaceOnUse" x1="0" y1="56" x2="0" y2="96">'
+            f'<stop offset="0" stop-color="#fff" stop-opacity=".45"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>'
+            f'<g opacity=".55" filter="url(#under)">{paint("#000", "#000")}</g>{paint(body, detail)}'
+            f'<rect width="256" height="256" fill="url(#edge)" mask="url(#shape)" opacity=".5"/>')
 
 
 # ------------------------------------------------------------------------------------------------ folders and files

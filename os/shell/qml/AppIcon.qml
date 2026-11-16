@@ -28,7 +28,7 @@ Rectangle {
     Text {
         visible: tile.calendar && tile.own !== ""
         readonly property real k: pic.width / 256           // the picture's own units (make-icons.py draws in 256)
-        text: tile.day; color: "#16191E"; font.family: "Inter"; font.weight: Font.Bold; font.pixelSize: Math.max(6, Math.round(64 * k))
+        text: tile.day; color: "#FFFFFF"; font.family: "Inter"; font.weight: Font.Bold; font.pixelSize: Math.max(6, Math.round(64 * k))
         x: pic.x + 128 * k - width / 2; y: pic.y + 174 * k - baselineOffset
     }
     Glyph { visible: tile.glyph !== "" && tile.own === ""; anchors.centerIn: parent; name: tile.glyph; size: Math.round(tile.size * 0.5); ink: tile.brand ? "#0B1512" : Theme.t.icon }
