@@ -343,7 +343,7 @@ GlassWindow {
             ListView { id: layerList; x: 8; y: sideTop.y + sideTop.height + 8; width: parent.width - 16; height: parent.height - y - 10; clip: true; spacing: 2
                 boundsBehavior: Flickable.StopAtBounds; model: Backend.layers
                 delegate: Pressable { required property var modelData; required property int index; width: layerList.width; height: 50; radius: 11
-                    color: modelData.active ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.2) : (hovered ? Theme.t.hover : "transparent")
+                    color: modelData.active ? Qt.alpha(Theme.t.accent, 0.2) : (hovered ? Theme.t.hover : "transparent")
                     onClicked: Backend.selectLayer(modelData.id)
                     onDoubleClicked: win.open("rename", { id: modelData.id, name: modelData.name })
                     Glyph { x: 8; anchors.verticalCenter: parent.verticalCenter; name: "eye"; size: 15; ink: modelData.visible ? Theme.t.icon : Theme.t.text_tertiary; opacity: modelData.visible ? 1 : 0.4

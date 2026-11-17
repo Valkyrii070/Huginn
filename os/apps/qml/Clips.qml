@@ -274,7 +274,7 @@ GlassWindow {
                 Column { visible: card.kind === "export"; x: 24; y: 56; width: parent.width - 48; spacing: 10
                     Repeater { model: Backend.presets
                         Pressable { required property var modelData; readonly property bool on: win.sheet && win.sheet.preset === modelData.id; width: parent.width; height: 44; radius: 10
-                            color: on ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.2) : hovered ? Theme.t.hover : "transparent"; border.width: on ? 1 : 0; border.color: Theme.t.accent
+                            color: on ? Qt.alpha(Theme.t.accent, 0.2) : hovered ? Theme.t.hover : "transparent"; border.width: on ? 1 : 0; border.color: Theme.t.accent
                             onClicked: win.sheet = Object.assign({}, win.sheet, { preset: modelData.id })
                             Label { x: 12; y: 5; text: modelData.name; font.weight: Font.DemiBold }
                             Label { x: 12; y: 23; text: modelData.detail; font.pixelSize: 11; secondary: true } } }

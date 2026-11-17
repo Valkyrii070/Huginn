@@ -165,9 +165,9 @@ Item {
         opacity: tour.running && tour.phase === "pages" ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: tour.motion ? 500 : 150; easing.type: Easing.OutCubic } }
         gradient: Gradient {
-            GradientStop { position: 0; color: Qt.rgba(Theme.t.glowB.r * 0.12, Theme.t.glowB.g * 0.12, Theme.t.glowB.b * 0.15, 0.97) }
+            GradientStop { position: 0; color: Qt.rgba(Qt.color(Theme.t.glowB).r * 0.12, Qt.color(Theme.t.glowB).g * 0.12, Qt.color(Theme.t.glowB).b * 0.15, 0.97) }
             GradientStop { position: 0.6; color: Qt.rgba(0.03, 0.04, 0.05, 0.97) }
-            GradientStop { position: 1; color: Qt.rgba(Theme.t.glowA.r * 0.22, Theme.t.glowA.g * 0.22, Theme.t.glowA.b * 0.22, 0.97) }
+            GradientStop { position: 1; color: Qt.rgba(Qt.color(Theme.t.glowA).r * 0.22, Qt.color(Theme.t.glowA).g * 0.22, Qt.color(Theme.t.glowA).b * 0.22, 0.97) }
         }
         MouseArea { anchors.fill: parent }
         Column {   // 1 · Welcome
@@ -288,8 +288,8 @@ Item {
                 Rectangle {   // the thing to try, or that it's done
                     visible: !!tour.cur["try"]
                     width: tryRow.width + 20; height: 28; radius: 10
-                    color: tour.done ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.16) : Qt.rgba(1, 1, 1, 0.06)
-                    border.width: 1; border.color: tour.done ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.55) : Qt.rgba(1, 1, 1, 0.14)
+                    color: tour.done ? Qt.alpha(Theme.t.accent, 0.16) : Qt.rgba(1, 1, 1, 0.06)
+                    border.width: 1; border.color: tour.done ? Qt.alpha(Theme.t.accent, 0.55) : Qt.rgba(1, 1, 1, 0.14)
                     Row {
                         id: tryRow; anchors.centerIn: parent; spacing: 7
                         Label { visible: tour.done; text: "✓"; color: Theme.t.accent; font.pixelSize: 13; font.weight: Font.Bold; anchors.verticalCenter: parent.verticalCenter }

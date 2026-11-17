@@ -169,8 +169,8 @@ Item {
         width: parent.width; height: parent.height * 0.5; y: parent.height; opacity: 0
         gradient: Gradient {
             GradientStop { position: 0; color: "transparent" }
-            GradientStop { position: 0.5; color: Qt.rgba(Theme.t.glowA.r, Theme.t.glowA.g, Theme.t.glowA.b, 0.22) }
-            GradientStop { position: 0.75; color: Qt.rgba(Theme.t.glowB.r, Theme.t.glowB.g, Theme.t.glowB.b, 0.16) }
+            GradientStop { position: 0.5; color: Qt.alpha(Theme.t.glowA, 0.22) }
+            GradientStop { position: 0.75; color: Qt.alpha(Theme.t.glowB, 0.16) }
             GradientStop { position: 1; color: "transparent" }
         }
         SequentialAnimation {

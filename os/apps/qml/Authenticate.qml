@@ -29,14 +29,14 @@ Window {
             NumberAnimation { target: nudge; property: "x"; to: 6; duration: 60 } NumberAnimation { target: nudge; property: "x"; to: 0; duration: 50 } }
         // the realm's glow along the top edge
         Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top; margins: 1 } height: 70; radius: 20
-            gradient: Gradient { GradientStop { position: 0; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.16) } GradientStop { position: 1; color: "transparent" } } }
+            gradient: Gradient { GradientStop { position: 0; color: Qt.alpha(Theme.t.accent, 0.16) } GradientStop { position: 1; color: "transparent" } } }
         MouseArea { anchors.fill: parent; property point p0
             onPressed: function (m) { p0 = Qt.point(m.x, m.y) }
             onPositionChanged: function (m) { win.x += m.x - p0.x; win.y += m.y - p0.y } }      // drag it by its card
 
         Column { id: col; x: 22; y: 22; width: parent.width - 44; spacing: 12
             Row { spacing: 14; width: parent.width
-                Rectangle { width: 46; height: 46; radius: 15; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.18)
+                Rectangle { width: 46; height: 46; radius: 15; color: Qt.alpha(Theme.t.accent, 0.18)
                     Glyph { anchors.centerIn: parent; name: "lock"; size: 24; ink: Theme.t.accent } }
                 Column { width: parent.width - 60; spacing: 3; anchors.verticalCenter: parent.verticalCenter
                     Label { objectName: "title"; width: parent.width; wrapMode: Text.WordWrap; text: Agent.title; font.pixelSize: 15; font.weight: Font.DemiBold }

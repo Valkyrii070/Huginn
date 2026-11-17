@@ -16,7 +16,7 @@ Item {
             width: parent.width * 0.45; height: parent.height * 2; y: -parent.height / 2; rotation: 18
             gradient: Gradient { orientation: Gradient.Horizontal
                 GradientStop { position: 0; color: "transparent" }
-                GradientStop { position: 0.5; color: Qt.rgba(Theme.t.glowA.r, Theme.t.glowA.g, Theme.t.glowA.b, 0.22) }
+                GradientStop { position: 0.5; color: Qt.alpha(Theme.t.glowA, 0.22) }
                 GradientStop { position: 1; color: "transparent" } }
             NumberAnimation on x { from: -light.width; to: sh.width + light.width; duration: 1400; loops: Animation.Infinite; running: light.visible }
         }

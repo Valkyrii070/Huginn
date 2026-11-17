@@ -28,7 +28,7 @@ Column {
                 readonly property var l: pg.logical(modelData)
                 x: (map.width - map.box.w * map.k) / 2 + (modelData.x - map.box.x) * map.k; y: 30 + (map.height - 40 - map.box.h * map.k) / 2 + (modelData.y - map.box.y) * map.k
                 width: l.w * map.k - 4; height: l.h * map.k - 4; radius: 8
-                color: pg.sel === modelData.name ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.35) : (Theme.t.dark ? "#2AFFFFFF" : "#22141E28")
+                color: pg.sel === modelData.name ? Qt.alpha(Theme.t.accent, 0.35) : (Theme.t.dark ? "#2AFFFFFF" : "#22141E28")
                 border.width: pg.sel === modelData.name ? 2 : 1; border.color: pg.sel === modelData.name ? Theme.t.accent : Theme.t.separator
                 Column { anchors.centerIn: parent; spacing: 2
                     Label { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; font.pixelSize: 12; font.weight: Font.DemiBold }

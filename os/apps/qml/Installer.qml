@@ -89,7 +89,7 @@ GlassWindow {
                             Rectangle { required property var modelData
                                 objectName: "choose-" + modelData.id
                                 width: (choices.width - 14) / 2; height: 96; radius: 18
-                                color: modelData.id === "install" ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, ch.containsMouse ? 0.26 : 0.18) : (ch.containsMouse ? Theme.t.hover : Theme.t.group)
+                                color: modelData.id === "install" ? Qt.alpha(Theme.t.accent, ch.containsMouse ? 0.26 : 0.18) : (ch.containsMouse ? Theme.t.hover : Theme.t.group)
                                 border.width: 1; border.color: modelData.id === "install" ? Theme.t.accent : Theme.t.islandLine
                                 Row { x: 18; anchors.verticalCenter: parent.verticalCenter; spacing: 14
                                     Rectangle { width: 44; height: 44; radius: 14; anchors.verticalCenter: parent.verticalCenter
@@ -167,7 +167,7 @@ GlassWindow {
                                 Rectangle { required property var modelData
                                     objectName: "disk-" + modelData.path
                                     width: dRow.width + 26; height: 40; radius: 12
-                                    color: modelData.path === Backend.disk ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.2) : (dh.containsMouse ? Theme.t.hover : Theme.t.group)
+                                    color: modelData.path === Backend.disk ? Qt.alpha(Theme.t.accent, 0.2) : (dh.containsMouse ? Theme.t.hover : Theme.t.group)
                                     border.width: 1; border.color: modelData.path === Backend.disk ? Theme.t.accent : Theme.t.islandLine
                                     Row { id: dRow; anchors.centerIn: parent; spacing: 8
                                         Glyph { name: modelData.removable ? "download" : "disc"; size: 16; anchors.verticalCenter: parent.verticalCenter }
@@ -219,7 +219,7 @@ GlassWindow {
                                 visible: !(modelData.id === "free" && !(Backend.chosenDisk.parts && Backend.chosenDisk.parts.length)) && modelData.show !== false
                                         && !(modelData.id === "free" && !Backend.chosenDisk.freeBytes && !!Backend.chosenDisk.shrinkPart)
                                 width: diskCol.width; height: 64; radius: 16; opacity: modelData.ok ? 1 : 0.5
-                                color: on ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.16) : (mh.containsMouse ? Theme.t.hover : Theme.t.group)
+                                color: on ? Qt.alpha(Theme.t.accent, 0.16) : (mh.containsMouse ? Theme.t.hover : Theme.t.group)
                                 border.width: 1; border.color: on ? Theme.t.accent : Theme.t.islandLine
                                 Row { x: 16; anchors.verticalCenter: parent.verticalCenter; spacing: 14
                                     Rectangle { width: 20; height: 20; radius: 10; anchors.verticalCenter: parent.verticalCenter; color: "transparent"; border.width: parent.parent.on ? 6 : 1.5; border.color: parent.parent.on ? Theme.t.accent : Theme.t.separator }
@@ -313,7 +313,7 @@ GlassWindow {
 
                 // ---------------------------------------------------- time zone
                 Item { visible: win.stepId === "time"; anchors.fill: parent
-                    Rectangle { id: zoneNow; width: parent.width; height: 70; radius: 16; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.14); border.width: 1; border.color: Theme.t.accent
+                    Rectangle { id: zoneNow; width: parent.width; height: 70; radius: 16; color: Qt.alpha(Theme.t.accent, 0.14); border.width: 1; border.color: Theme.t.accent
                         Row { x: 18; anchors.verticalCenter: parent.verticalCenter; spacing: 14
                             Glyph { name: "globe"; size: 26; ink: Theme.t.accent; anchors.verticalCenter: parent.verticalCenter }
                             Column { anchors.verticalCenter: parent.verticalCenter; Label { text: Backend.zoneLabel; font.pixelSize: 17; font.weight: Font.DemiBold }
@@ -363,7 +363,7 @@ GlassWindow {
                     Rectangle { anchors.fill: parent; radius: 48; visible: Backend.state === "done"
                         gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: Theme.t.glowA } GradientStop { position: 1; color: Theme.t.glowB } }
                         Glyph { anchors.centerIn: parent; name: "check"; size: 44; ink: "#FFFFFF" } }
-                    Rectangle { anchors.fill: parent; radius: 48; visible: Backend.state === "error"; color: Qt.rgba(Theme.t.danger.r, Theme.t.danger.g, Theme.t.danger.b, 0.18); border.width: 2; border.color: Theme.t.danger
+                    Rectangle { anchors.fill: parent; radius: 48; visible: Backend.state === "error"; color: Qt.alpha(Theme.t.danger, 0.18); border.width: 2; border.color: Theme.t.danger
                         Glyph { anchors.centerIn: parent; name: "x"; size: 40; ink: Theme.t.danger } } }
                 Label { objectName: "runTitle"; anchors.horizontalCenter: parent.horizontalCenter; font.pixelSize: 28; font.weight: Font.Light
                     text: Backend.state === "done" ? "Huginn OS is ready" : Backend.state === "error" ? "The installation stopped" : "Installing Huginn OS" }

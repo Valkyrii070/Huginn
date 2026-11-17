@@ -67,11 +67,11 @@ Column {
         Rectangle {   // the Overview's light, sweeping up (Glide with light)
             visible: stage.kind === "overview" && stage.how === "light"
             width: parent.width; height: 80; y: stage.height - (stage.height + 80) * stage.p
-            gradient: Gradient { GradientStop { position: 0; color: "transparent" } GradientStop { position: 0.5; color: Qt.rgba(Theme.t.glowA.r, Theme.t.glowA.g, Theme.t.glowA.b, 0.35) } GradientStop { position: 1; color: "transparent" } }
+            gradient: Gradient { GradientStop { position: 0; color: "transparent" } GradientStop { position: 0.5; color: Qt.alpha(Theme.t.glowA, 0.35) } GradientStop { position: 1; color: "transparent" } }
         }
         Column {   // in an app: a list, and the item opening out of its row (or sliding in)
             visible: stage.kind === "motion"; x: 40; y: 34; spacing: 5
-            Repeater { model: 4; Rectangle { width: 110; height: 18; radius: 4; color: index === 1 ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.4) : Qt.rgba(1, 1, 1, 0.12) } }
+            Repeater { model: 4; Rectangle { width: 110; height: 18; radius: 4; color: index === 1 ? Qt.alpha(Theme.t.accent, 0.4) : Qt.rgba(1, 1, 1, 0.12) } }
         }
         Rectangle {
             visible: stage.kind === "motion"
@@ -145,7 +145,7 @@ Column {
                 Rectangle {
                     required property var modelData
                     readonly property bool on: (DeskPrefs.today.clocks || []).indexOf(modelData) >= 0
-                    width: cl.width + 20; height: 26; radius: 13; color: on ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.2) : Theme.t.hover
+                    width: cl.width + 20; height: 26; radius: 13; color: on ? Qt.alpha(Theme.t.accent, 0.2) : Theme.t.hover
                     border.width: on ? 1 : 0; border.color: Theme.t.accent
                     Label { id: cl; anchors.centerIn: parent; text: (parent.on ? "✓ " : "") + modelData; font.pixelSize: 12 }
                     MouseArea { anchors.fill: parent; onClicked: DeskPrefs.setClock(modelData, !parent.on) }

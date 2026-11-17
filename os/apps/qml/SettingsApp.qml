@@ -120,7 +120,7 @@ GlassWindow {
                 Column { required property var modelData; required property int index; width: parent.width
                     SideTitle { visible: index === 0 || win.pages[index - 1].group !== modelData.group; text: modelData.group; height: visible ? implicitHeight : 0 }
                     Pressable { width: parent.width; height: 34; radius: 11; active: false
-                        color: win.page === modelData.id && win.query === "" ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.18) : (hovered ? Theme.t.hover : "transparent")
+                        color: win.page === modelData.id && win.query === "" ? Qt.alpha(Theme.t.accent, 0.18) : (hovered ? Theme.t.hover : "transparent")
                         onClicked: win.go(modelData.id)
                         Rectangle { x: 6; width: 22; height: 22; radius: 7; anchors.verticalCenter: parent.verticalCenter
                             gradient: Gradient { GradientStop { position: 0; color: modelData.a } GradientStop { position: 1; color: modelData.b } }

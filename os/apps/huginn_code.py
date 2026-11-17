@@ -15,9 +15,10 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import (Property, QFileSystemWatcher, QObject, QProcess, QStandardPaths, QTimer, QUrl, Signal, Slot)
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtQuick import QQuickImageProvider
 
+import huginn_code_more as more
 import huginn_debug as hd
 
 STATE = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "huginn" / "code.json"
@@ -234,6 +235,7 @@ class CodeStyler(QSyntaxHighlighter):
 class LspClient(QObject):
     """One language server for one project: speaks JSON-RPC over the server's standard input and output."""
     diagnostics = Signal(str, list)          # file uri, [{line, col, endLine, endCol, severity, message, source}]
+    applyEdit = Signal(dict)                 # a WorkspaceEdit the server wants made (after a command)
     ready = Signal()
     failed = Signal(str)
 
@@ -253,11 +255,15 @@ class LspClient(QObject):
             "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
             "capabilities": {"textDocument": {
                 "synchronization": {"didSave": True, "dynamicRegistration": False},
-                "completion": {"completionItem": {"snippetSupport": False, "documentationFormat": ["plaintext", "markdown"]}, "contextSupport": True},
+                "completion": {"completionItem": {"snippetSupport": True, "documentationFormat": ["plaintext", "markdown"]}, "contextSupport": True},
+                "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext", "markdown"], "parameterInformation": {"labelOffsetSupport": True},
+                                                           "activeParameterSupport": True}},
+                "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["", "quickfix", "refactor", "source", "source.organizeImports"]}}},
                 "hover": {"contentFormat": ["plaintext", "markdown"]}, "definition": {}, "references": {}, "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
                 "rename": {"prepareSupport": False},
                 "publishDiagnostics": {"relatedInformation": False}, "formatting": {}},
-                "workspace": {"workspaceFolders": True, "configuration": True, "workspaceEdit": {"documentChanges": True}}}}, self._started, early=True)
+                "workspace": {"workspaceFolders": True, "configuration": True, "workspaceEdit": {"documentChanges": True}, "applyEdit": True, "executeCommand": {}}}},
+            self._started, early=True)
 
     def _gone(self) -> None:
         self.alive, self.up = False, False
@@ -340,6 +346,9 @@ class LspClient(QObject):
                 result = [SERVER_SETTINGS.get((it.get("section") or "").split(".")[0]) for it in msg.get("params", {}).get("items", [])]
             elif method == "workspace/workspaceFolders":
                 result = [{"uri": self.root.as_uri(), "name": self.root.name}]
+            elif method == "workspace/applyEdit":
+                self.applyEdit.emit(msg.get("params", {}).get("edit") or {})
+                result = {"applied": True}
             self._send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
 
     def stop(self) -> None:
@@ -726,8 +735,8 @@ def list_files(root: Path) -> list:
     if (root / ".git").exists() and shutil.which("git"):
         try:
             out = git(root, "ls-files", "-co", "--exclude-standard", "-z", timeout=20)
-            if out.returncode == 0:
-                return [p for p in out.stdout.split("\0") if p][:LIST_LIMIT]
+            if out.returncode == 0:                         # a file in conflict is listed once for each side: once is enough
+                return list(dict.fromkeys(p for p in out.stdout.split("\0") if p))[:LIST_LIMIT]
         except (OSError, subprocess.SubprocessError):
             pass
     found = []
@@ -813,6 +822,8 @@ class Code(QObject):
     said = Signal(str, bool)
     shown = Signal()
     _back = Signal(object)
+    signature = Signal(int, str, int, int, str)   # tab, the call's label, the argument being typed (from, to), its notes
+    fixesFound = Signal(int, "QVariantList")      # tab, [{title}]
 
     def __init__(self, demo: bool = False, target: str = "", shell_class=None, settings=None, trash=None):
         super().__init__()
@@ -1249,6 +1260,20 @@ def advice(sky: Sky) -> str:
         if d.read_only:
             self.said.emit(d.why or "This file is read only.", True)
             return "failed"
+        if self._state.get("formatOnSave") and not getattr(self, "_formatting", False):
+            c = self._client_for(d, start=False)
+            if c and c.up and c.caps.get("documentFormattingProvider"):   # formatted first, then saved (when the formatter answers)
+                self._formatting = True
+
+                def after():
+                    try:
+                        if d in self._docs and self.save(self._docs.index(d), force) == "changed":
+                            self.said.emit(f"{Path(d.path).name} changed on disk: save again to replace it.", True)
+                    finally:
+                        self._formatting = False
+                self.format(i, then=after)
+                return ""
+        self._tidy_before_save(i)
         try:
             got = d.save(force)
         except OSError as e:
@@ -1541,7 +1566,9 @@ def advice(sky: Sky) -> str:
         if not self._root:
             return []
         try:
-            args = ["diff", "--no-color", "--no-ext-diff", "-U3"] + (["--cached"] if staged else []) + ["--", rel]
+            change = next((c for c in self._changes if c["path"] == rel), None)
+            mid = ["HEAD"] if change and change["kind"] == "conflict" else (["--cached"] if staged else [])   # in a conflict: against our side
+            args = ["diff", "--no-color", "--no-ext-diff", "-U3"] + mid + ["--", rel]
             out = git(self._root, *args, timeout=15).stdout
             if not out.strip():
                 change = next((c for c in self._changes if c["path"] == rel), None)
@@ -1704,6 +1731,7 @@ def advice(sky: Sky) -> str:
         root = self._root or Path(d.path).parent
         client = LspClient(argv, root, info[4], self)
         client.diagnostics.connect(self._got_diagnostics)
+        client.applyEdit.connect(self._workspace_edit)
         client.failed.connect(lambda why, l=lang: (self._server_note.__setitem__(l, ""), self.said.emit(f"{l} helper: {why}", True)))
         client.ready.connect(lambda l=lang, name=argv[0]: (self._server_note.__setitem__(l, name), self.changed.emit()))
         self._servers[lang] = client
@@ -1771,7 +1799,7 @@ def advice(sky: Sky) -> str:
         d = self._docs[i]
         c = self._client_for(d, start=False)
         if not c:
-            self.completions.emit(i, self._word_completions(d, line, col))
+            self.completions.emit(i, self._with_snippets(d, line, col, self._word_completions(d, line, col)))
             return
         self._push_changes()
 
@@ -1780,10 +1808,14 @@ def advice(sky: Sky) -> str:
             out = []
             for it in items[:200]:
                 edit = it.get("textEdit") or {}
-                out.append({"label": it.get("label", ""), "insert": edit.get("newText") or it.get("insertText") or it.get("label", ""),
-                            "detail": (it.get("detail") or "")[:80], "kind": it.get("kind", 1), "sort": it.get("sortText") or it.get("label", "")})
+                text = edit.get("newText") or it.get("insertText") or it.get("label", "")
+                item = {"label": it.get("label", ""), "insert": text, "detail": (it.get("detail") or "")[:80], "kind": it.get("kind", 1),
+                        "sort": it.get("sortText") or it.get("label", "")}
+                if it.get("insertTextFormat") == 2 and re.search(r"\$\{?\d", text):
+                    item["snippet"] = text
+                out.append(item)
             out.sort(key=lambda x: x["sort"])
-            self.completions.emit(i, out or self._word_completions(d, line, col))
+            self.completions.emit(i, self._with_snippets(d, line, col, out or self._word_completions(d, line, col)))
         c.request("textDocument/completion", {"textDocument": {"uri": d.uri}, "position": {"line": line, "character": col}}, got)
 
     def _word_completions(self, d: Doc, line: int, col: int) -> list:
@@ -1861,18 +1893,24 @@ def advice(sky: Sky) -> str:
         c.request("textDocument/hover", {"textDocument": {"uri": d.uri}, "position": {"line": line, "character": col}}, got)
 
     @Slot(int)
-    def format(self, i: int) -> None:
+    def format(self, i: int, then=None) -> None:
         if not 0 <= i < len(self._docs):
             return
         d = self._docs[i]
         c = self._client_for(d, start=False)
         if not c or not c.caps.get("documentFormattingProvider"):
+            if then:
+                then()
+                return
             self.said.emit("No formatter for this kind of file.", True)
             return
         self._push_changes()
 
         def got(result, error):
             if not result:
+                if then:
+                    then()
+                    return
                 self.said.emit("Already tidy.", False)
                 return
             lines = d.text.split("\n")
@@ -1882,12 +1920,10 @@ def advice(sky: Sky) -> str:
 
             def at(p):
                 return offsets[min(p["line"], len(lines))] + p["character"]
-            text = d.text
-            for e in sorted(result, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
-                text = text[:at(e["range"]["start"])] + e["newText"] + text[at(e["range"]["end"]):]
-            d.text = text
-            self.textLoaded.emit(self._docs.index(d))
-            self.changed.emit()
+            if d in self._docs:
+                self._edit_text(self._docs.index(d), [[at(e["range"]["start"]), at(e["range"]["end"]), e["newText"]] for e in result])
+            if then:
+                then()
         c.request("textDocument/formatting", {"textDocument": {"uri": d.uri}, "options": {"tabSize": len(indent_of(d.text).replace("\t", "    ")), "insertSpaces": indent_of(d.text) != "\t"}}, got)
 
 
@@ -2255,9 +2291,10 @@ def advice(sky: Sky) -> str:
             for e in sorted(es, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
                 text = text[:at(e["range"]["start"])] + e["newText"] + text[at(e["range"]["end"]):]
             if doc:
-                doc.text = text
-                doc.version += 1
-                self.textLoaded.emit(self._docs.index(doc))
+                if not self._doc_edit(doc, [[at(e["range"]["start"]), at(e["range"]["end"]), e["newText"]] for e in es]):
+                    doc.text = text
+                    doc.version += 1
+                    self.textLoaded.emit(self._docs.index(doc))
             else:
                 try:
                     Path(path).write_text(text, encoding="utf-8")
@@ -2266,6 +2303,303 @@ def advice(sky: Sky) -> str:
             done += 1
         self.changed.emit()
         return done
+
+    # ================================================================ round four
+    def _doc_edit(self, d: Doc, edits: list, qt_offsets: bool = False, join: bool = False) -> bool:
+        """Edits [[start, end, text]] made in an open tab's own document, all as one step of its undo. The editor
+        shows them at once and tells the rest of Code through its usual way (the text changed)."""
+        styler = getattr(d, "styler", None)
+        doc = styler.document() if styler is not None else None
+        if doc is None:
+            return False
+        base = d.text
+        cur = QTextCursor(doc)
+        if join:                                              # letters typed one after another: one undo step for the word
+            cur.joinPreviousEditBlock()
+        else:
+            cur.beginEditBlock()
+        for a, b, t in sorted(edits, key=lambda e: (e[0], e[1]), reverse=True):
+            a, b = (int(a), int(b)) if qt_offsets else (more.u16(base, int(a)), more.u16(base, int(b)))
+            cur.setPosition(max(0, a))
+            cur.setPosition(max(0, b), QTextCursor.KeepAnchor)
+            cur.insertText(t)
+        cur.endEditBlock()
+        if d in self._docs:                                   # the editor says so too, but don't depend on it
+            self.edit(self._docs.index(d), doc.toPlainText())
+        return True
+
+    def _edit_text(self, i: int, edits: list) -> None:
+        """Change tab i by offsets into its text: undoably in its editor, or (no editor yet) in the text itself."""
+        d = self._docs[i]
+        if self._doc_edit(d, edits):
+            return
+        text = d.text
+        for a, b, t in sorted(edits, key=lambda e: (e[0], e[1]), reverse=True):
+            text = text[:a] + t + text[b:]
+        d.text = text
+        d.version += 1
+        self.textLoaded.emit(i)
+        self.changed.emit()
+
+    @Slot(int, "QVariantList", bool)
+    def multiEdit(self, i: int, edits, join: bool = False) -> None:
+        """Several cursors typing at once: one undo step for all of them (offsets as the editor counts them); a word
+        typed at all of them is one step too."""
+        if 0 <= i < len(self._docs):
+            edits = [list(e) for e in (edits.toVariant() if hasattr(edits, "toVariant") else edits)]
+            if not self._doc_edit(self._docs[i], edits, qt_offsets=True, join=join):
+                self._edit_text(i, edits)
+
+    # ---------------------------------------------------------------- snippets
+    @Slot(int, str, str, result="QVariantMap")
+    def expandSnippet(self, i: int, body: str, indent: str) -> dict:
+        unit = indent_of(self._docs[i].text) if 0 <= i < len(self._docs) else "    "
+        return more.snippet_parse(body, unit, indent)
+
+    def _with_snippets(self, d: Doc, line: int, col: int, items: list) -> list:
+        lines = d.text.split("\n")
+        here = lines[line][:col] if line < len(lines) else ""
+        m = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", here)
+        prefix = m.group() if m else ""
+        if not prefix or re.search(r"[.\w]$", here[:len(here) - len(prefix)]):   # not after a dot
+            return items
+        return more.snippet_items(d.lang, prefix) + items
+
+    # ---------------------------------------------------------------- what a call wants
+    @Slot(int, int, int)
+    def signatureAt(self, i: int, line: int, col: int) -> None:
+        """The function being called at the cursor, with the argument being typed: from the language server, or
+        (Python, without one) from its def in an open file."""
+        if not 0 <= i < len(self._docs):
+            return
+        d = self._docs[i]
+        c = self._client_for(d, start=False)
+
+        def by_hand():
+            lines = d.text.split("\n")
+            before = "\n".join(lines[max(0, line - 20):line] + [lines[line][:col] if line < len(lines) else ""])
+            depth, k, arg = 0, len(before) - 1, 0
+            while k >= 0:
+                ch = before[k]
+                if ch in ")]}":
+                    depth += 1
+                elif ch in "([{":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    arg += 1
+                k -= 1
+            m = re.search(r"([A-Za-z_]\w*)\s*$", before[:max(0, k)])
+            if k < 0 or before[k] != "(" or not m or d.lang != "Python":
+                self.signature.emit(i, "", -1, -1, "")
+                return
+            name = m.group(1)
+            for doc in [d] + [x for x in self._docs if x is not d and x.lang == "Python"]:
+                dm = re.search(rf"^\s*(?:async\s+)?def\s+{name}\s*\(([^)]*)\)", doc.text, re.M)
+                if dm:
+                    params = [p.strip() for p in dm.group(1).split(",") if p.strip() and p.strip() not in ("self", "cls")]
+                    label = f"{name}({', '.join(params)})"
+                    if arg < len(params):
+                        s = label.index(params[arg], len(name) + 1)
+                        self.signature.emit(i, label, s, s + len(params[arg]), "")
+                    else:
+                        self.signature.emit(i, label, -1, -1, "")
+                    return
+            self.signature.emit(i, "", -1, -1, "")
+        if not c or not c.up or not c.caps.get("signatureHelpProvider"):
+            by_hand()
+            return
+        self._push_changes()
+
+        def got(result, error):
+            sigs = (result or {}).get("signatures") or []
+            if error or not sigs:
+                by_hand()
+                return
+            k = min(len(sigs) - 1, int(result.get("activeSignature") or 0))
+            sig = sigs[k]
+            label = sig.get("label", "")
+            params = sig.get("parameters") or []
+            p = int(sig.get("activeParameter", result.get("activeParameter") or 0) or 0)
+            a = b = -1
+            if 0 <= p < len(params):
+                pl = params[p].get("label")
+                if isinstance(pl, list) and len(pl) == 2:
+                    a, b = int(pl[0]), int(pl[1])
+                elif isinstance(pl, str) and pl in label:
+                    a = label.index(pl, label.find("(") + 1 if "(" in label else 0)
+                    b = a + len(pl)
+            docs = sig.get("documentation") or ""
+            if isinstance(docs, dict):
+                docs = docs.get("value", "")
+            self.signature.emit(i, label, a, b, str(docs)[:400])
+        c.request("textDocument/signatureHelp", {"textDocument": {"uri": d.uri}, "position": {"line": line, "character": col}}, got)
+
+    # ---------------------------------------------------------------- quick fixes
+    def _project_modules(self) -> set:
+        if not self._root:
+            return set()
+        out = set()
+        for rel in self._all_files()[:20000]:
+            p = Path(rel)
+            if p.suffix == ".py" and p.stem != "__init__" and len(p.parts) <= 2:
+                out.add(p.stem)
+            elif p.name == "__init__.py" and len(p.parts) == 2:
+                out.add(p.parts[0])
+        return out
+
+    @Slot(int, int, int)
+    def quickFixes(self, i: int, line: int, col: int) -> None:
+        """Ctrl+.: what can be done about the problems on this line (the language server's fixes and our own)."""
+        if not 0 <= i < len(self._docs):
+            return
+        d = self._docs[i]
+        own = more.python_fixes(d.text, d.problems, line, self._project_modules()) if d.lang == "Python" else []
+        self._fixes = {"tab": i, "list": [dict(f, kind="own") for f in own]}
+        c = self._client_for(d, start=False)
+        here = [p for p in d.problems if p["line"] <= line <= p.get("endLine", p["line"])]
+        if not c or not c.up or not c.caps.get("codeActionProvider"):
+            self.fixesFound.emit(i, [{"title": f["title"]} for f in self._fixes["list"]])
+            return
+        self._push_changes()
+        diags = [{"range": {"start": {"line": p["line"], "character": p["col"]}, "end": {"line": p["endLine"], "character": p["endCol"]}},
+                  "severity": p["severity"], "message": p["message"], "source": p.get("source", "")} for p in here]
+        end = len(d.text.split("\n")[line]) if line < len(d.text.split("\n")) else 0
+
+        def got(result, error):
+            for a in (result or []) if not error else []:
+                if a.get("disabled"):
+                    continue
+                self._fixes["list"].append({"title": a.get("title", "Fix"), "kind": "lsp", "action": a})
+            self.fixesFound.emit(i, [{"title": f["title"]} for f in self._fixes["list"]])
+        c.request("textDocument/codeAction", {"textDocument": {"uri": d.uri}, "range": {"start": {"line": line, "character": 0}, "end": {"line": line, "character": end}},
+                                              "context": {"diagnostics": diags, "triggerKind": 1}}, got)
+
+    def _workspace_edit(self, edit: dict) -> int:
+        edits = {}
+        for change in edit.get("documentChanges") or []:
+            if "textDocument" in change:
+                edits.setdefault(QUrl(change["textDocument"]["uri"]).toLocalFile(), []).extend(change.get("edits", []))
+        for uri, es in (edit.get("changes") or {}).items():
+            edits.setdefault(QUrl(uri).toLocalFile(), []).extend(es)
+        return self.apply_edits(edits)
+
+    @Slot(int)
+    def applyFix(self, k: int) -> None:
+        fx = getattr(self, "_fixes", None)
+        if not fx or not 0 <= k < len(fx["list"]) or not 0 <= fx["tab"] < len(self._docs):
+            return
+        f, i = fx["list"][k], fx["tab"]
+        d = self._docs[i]
+        if f["kind"] == "own":
+            self._edit_text(i, more.edits_to_offsets(d.text, f["edits"]))
+            return
+        a = f["action"]
+        if a.get("edit"):
+            self._workspace_edit(a["edit"])
+        cmd = a.get("command") if isinstance(a.get("command"), dict) else (a if "command" in a and isinstance(a.get("command"), str) else None)
+        c = self._client_for(d, start=False)
+        if cmd and c:
+            c.request("workspace/executeCommand", {"command": cmd["command"], "arguments": cmd.get("arguments") or []}, lambda r, e: None)
+
+    # ---------------------------------------------------------------- merge conflicts
+    @Slot(int, result="QVariantList")
+    def conflictsOf(self, i: int) -> list:
+        return more.conflicts(self._docs[i].text) if 0 <= i < len(self._docs) and "<<<<<<<" in self._docs[i].text else []
+
+    @Slot(int, int, str)
+    def resolveConflict(self, i: int, k: int, which: str) -> None:
+        """Settle conflict k (or all of them, k < 0): keep ours, theirs or both. One undo step."""
+        if not 0 <= i < len(self._docs) or which not in ("ours", "theirs", "both"):
+            return
+        d = self._docs[i]
+        found = more.conflicts(d.text)
+        lines = d.text.split("\n")
+        starts = [0]
+        for l in lines:
+            starts.append(starts[-1] + len(l) + 1)
+        edits = []
+        for n, c in enumerate(found):
+            if k >= 0 and n != k:
+                continue
+            sides = [c["ours"]] if which == "ours" else [c["theirs"]] if which == "theirs" else [c["ours"], c["theirs"]]
+            keep = "\n".join(x for x in sides if x != "")
+            a, b = starts[c["start"]], min(len(d.text), starts[c["end"] + 1])
+            body = keep + ("\n" if keep and b > starts[c["end"]] + len(lines[c["end"]]) else "")
+            edits.append([a, b, body])
+        if edits:
+            self._edit_text(i, edits)
+            left = len(more.conflicts(d.text))
+            if not left:
+                self.said.emit("No conflicts left: save it, then mark it resolved.", False)
+
+    @Slot(str, result=str)
+    def markResolved(self, rel: str) -> str:
+        """Tell Git a conflicted file is settled (it's added to the commit)."""
+        d = next((x for x in self._docs if os.path.relpath(x.path, self._root) == rel), None) if self._root else None
+        if d and "<<<<<<<" in d.text and more.conflicts(d.text):
+            return "It still has conflicts in it."
+        if d and d.dirty:
+            i = self._docs.index(d)
+            got = self.save(i, False)
+            if got:
+                return "Save it first."
+        return self._git_do("add", "--", rel, then_say=f"{Path(rel).name} marked resolved.")
+
+    # ---------------------------------------------------------------- the outline and sticky scroll
+    @Slot(int, result="QVariantList")
+    def outline(self, i: int) -> list:
+        if not 0 <= i < len(self._docs):
+            return []
+        return more.scopes(self._docs[i].text, self.symbols(i))
+
+    @Slot(int, int, result="QVariantList")
+    def stickyAt(self, i: int, line: int) -> list:
+        """The lines that open the scopes the top line of the view is in (pinned at the editor's top), leaving out
+        a scope that ends before the line that would show beneath them."""
+        if not 0 <= i < len(self._docs):
+            return []
+        d = self._docs[i]
+        key = (d.version, i)
+        if getattr(self, "_scoped_key", None) != key:
+            self._scoped_key, self._scoped = key, self.outline(i)
+        lines = d.text.split("\n")
+        keep = []
+        for sc in more.enclosing(self._scoped, line):        # a scope that ends before the line that would show under it goes
+            if sc["end"] >= line + len(keep) + 1:
+                keep.append(sc)
+        return [{"line": sc["line"], "text": lines[sc["line"]].rstrip()} for sc in keep][-4:]
+
+    # ---------------------------------------------------------------- tidy when saving
+    def _tidy_before_save(self, i: int) -> None:
+        d = self._docs[i]
+        if self._state.get("trimOnSave", True) and not d.read_only and not d.binary:
+            tidy = more.trim_text(d.text, d.lang)
+            if tidy != d.text:
+                # the smallest change: only the lines that differ, so the cursor and undo stay where they are
+                old, new = d.text.split("\n"), tidy.split("\n")
+                edits, starts = [], [0]
+                for l in old:
+                    starts.append(starts[-1] + len(l) + 1)
+                for k in range(min(len(old), len(new))):
+                    if old[k] != new[k]:
+                        edits.append([starts[k], starts[k] + len(old[k]), new[k]])
+                if len(new) > len(old):
+                    edits.append([len(d.text), len(d.text), "\n" + "\n".join(new[len(old):]) if d.text else "\n".join(new[len(old):])])
+                elif len(new) < len(old):
+                    edits.append([starts[len(new)] - 1, len(d.text), ""])
+                self._edit_text(i, edits)
+
+    @Slot(str, bool)
+    def setOption(self, key: str, on: bool) -> None:
+        if key in ("formatOnSave", "trimOnSave"):
+            self._state[key] = bool(on)
+            self._keep()
+            self.changed.emit()
+
+    options = Property("QVariantMap", lambda self: {"formatOnSave": bool(self._state.get("formatOnSave", False)), "trimOnSave": bool(self._state.get("trimOnSave", True))},
+                       notify=changed)
 
     # ---------------------------------------------------------------- the minimap
     @Slot(bool)

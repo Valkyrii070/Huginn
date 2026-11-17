@@ -45,7 +45,7 @@ Column {
             Row { spacing: 6
                 Repeater { model: [24, 32, 48, 64, 96]
                     Pressable { required property int modelData; width: 44; height: 44; radius: 10
-                        color: pg.a.cursor === modelData ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.25) : (hovered ? Theme.t.hover : "transparent")
+                        color: pg.a.cursor === modelData ? Qt.alpha(Theme.t.accent, 0.25) : (hovered ? Theme.t.hover : "transparent")
                         border.width: pg.a.cursor === modelData ? 2 : 0; border.color: Theme.t.accent
                         onClicked: Backend.setA11y("cursor", modelData)
                         Canvas { anchors.centerIn: parent; width: 8 + modelData * 0.32; height: width

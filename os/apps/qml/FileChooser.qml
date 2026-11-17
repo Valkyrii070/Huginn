@@ -146,7 +146,7 @@ GlassWindow {
                 objectName: "row-" + modelData.name
                 width: listView.width; height: 34; radius: 9
                 readonly property bool on: !!win.picked[modelData.path]
-                color: on ? Theme.t.accent : (rh.containsMouse ? Theme.t.hover : (index % 2 ? "transparent" : Qt.rgba(Theme.t.hover.r, Theme.t.hover.g, Theme.t.hover.b, 0.35)))
+                color: on ? Theme.t.accent : (rh.containsMouse ? Theme.t.hover : (index % 2 ? "transparent" : Qt.alpha(Theme.t.hover, 0.35)))
                 Item { x: 12; width: 22; height: parent.height
                     Glyph { anchors.centerIn: parent; visible: !thumb.visible; name: modelData.glyph; size: 17; ink: parent.parent.on ? Theme.t.onAccent : modelData.dir ? Theme.t.accent : Theme.t.icon }
                     Image { id: thumb; anchors.centerIn: parent; width: 22; height: 22; source: modelData.picture; sourceSize: Qt.size(44, 44); asynchronous: true
@@ -175,7 +175,7 @@ GlassWindow {
                 required property int index
                 width: gridView.cellWidth; height: 132
                 readonly property bool on: !!win.picked[modelData.path]
-                Rectangle { anchors { fill: parent; margins: 5 } radius: 14; color: parent.on ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.25) : (gh.containsMouse ? Theme.t.hover : "transparent")
+                Rectangle { anchors { fill: parent; margins: 5 } radius: 14; color: parent.on ? Qt.alpha(Theme.t.accent, 0.25) : (gh.containsMouse ? Theme.t.hover : "transparent")
                     border.width: parent.on ? 1.5 : 0; border.color: Theme.t.accent }
                 Item { x: (parent.width - 84) / 2; y: 10; width: 84; height: 84
                     Glyph { anchors.centerIn: parent; visible: big.status !== Image.Ready; name: modelData.glyph; size: 44; ink: modelData.dir ? Theme.t.accent : Theme.t.icon }
@@ -219,7 +219,7 @@ GlassWindow {
         visible: win.ask === "replace"
         objectName: "replaceAsk"
         anchors { left: middle.left; right: parent.right; rightMargin: 14 } y: parent.height - 120 - win.strip; height: 48; radius: 14; z: 8
-        color: Qt.rgba(Theme.t.danger.r, Theme.t.danger.g, Theme.t.danger.b, 0.16); border.width: 1; border.color: Theme.t.danger
+        color: Qt.alpha(Theme.t.danger, 0.16); border.width: 1; border.color: Theme.t.danger
         Label { x: 16; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 220; elide: Text.ElideRight
             text: "“" + nameBox.text.trim() + "” is already here. Replace it?" }
         Row { anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter } spacing: 6

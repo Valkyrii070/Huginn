@@ -571,7 +571,7 @@ Four apps are being taken, round by round, to the level of the professional tool
 | App | Measured against | Rounds so far |
 |---|---|---|
 | Easel | Photoshop, Illustrator | 3 |
-| Code | Xcode, VS Code | 3 |
+| Code | Xcode, VS Code | 4 |
 | Clips | Final Cut Pro, Premiere, DaVinci Resolve | 4 |
 | Tempo (first called Studio) | Logic Pro, Ableton Live | 2 |
 
@@ -726,6 +726,43 @@ Four apps are being taken, round by round, to the level of the professional tool
   and a real export of all of it (640×360, square pixels, the right length, with sound). On screen: the key and the
   oval with its outline, dragging it, the matte, a ramp's stretches and slowing one, opening and leaving a compound
   clip, Find Shots, matching a shot, the beat on a music clip.
+
+**Code, pro round four** (`apps/huginn_code.py`, `apps/huginn_code_more.py`, new; `apps/qml/Code.qml`)
+- *More than one cursor*: Ctrl+D adds the next match of the selection (or picks the word), Ctrl+Shift+L puts a
+  cursor on every match, Alt+click adds one anywhere, Ctrl+Alt+Up/Down one on the line above or below. Typing,
+  Backspace, Delete, Enter (keeping each line's indent), Tab, arrows, Home and End work at all of them; a word typed
+  at all of them is one step of undo. Esc goes back to one.
+- *Snippets*: about 70 across Python, JavaScript and TypeScript, C and C++, Rust, Go, shell, Markdown and HTML,
+  offered in the completion list by name (`def`, `for`, `main`, `iferr`, `test`…). Tab goes from place to place;
+  a name used twice in a snippet is written in both. The language server's own snippet completions work the same.
+- *What the call wants*: typing `(` or `,` shows the function's parameters with the one being typed picked out
+  (`textDocument/signatureHelp`; for Python without a server, from its `def` in an open file).
+- *Quick fixes* (Ctrl+. or the light beside the line): the language server's code actions, and Code's own for
+  Python's commonest problems: an unused import taken out (or just that name from a `from … import` list), a name
+  never imported imported (standard modules, common names like `Path` or `dataclass`, the project's own modules)
+  after the imports already there. All one step of undo.
+- *Merge conflicts*: ours green, theirs blue, with "Keep ours", "Keep theirs" and "Keep both" over each (and for the
+  whole file in the palette); diff3's base is understood. A tick in the Git panel marks a settled file resolved (it
+  saves first, and won't while a conflict is left). A conflicted file's diff is against our side.
+- *Sticky scroll*: the lines that open the class and function the top of the view is inside stay pinned there
+  (click one to go to it). The *Outline* panel lists the file's classes, functions and headings, nested, with the
+  one the cursor is in lit.
+- *Markdown preview* (Ctrl+Shift+V): the file as it reads beside its text, scrolling with it.
+- *When saving*: spaces at the ends of lines go and the file ends in one newline (Markdown's two-space line breaks
+  kept); "Format When Saving" in the palette formats first with the language server (Python through autopep8, now
+  in the image). Formatting and renaming now change open files undoably, in place, instead of reloading them.
+- Fixed on the way: a translucent accent (`Qt.rgba(Theme.t.accent.r, …)`) came out black, because the theme's
+  colours are strings, whose `.r` is undefined: selections in Code were nearly invisible, and 43 other tints
+  across the apps and the shell were wrong. They use `Qt.alpha` now. A conflicted file was listed three times.
+- Tested (34 checks) against a real pylsp and a real Git merge: snippet tab stops, mirrored names and indentation;
+  pylsp's problems and its completions with the `def` snippet; three cursors typing and one undo taking all three
+  back; the parameter being typed, from pylsp and by hand; taking out `import os` and adding
+  `from pathlib import Path` after the imports; trimming a name from an import list; the sticky lines inside a
+  method and leaving when it ends; the outline's extents; formatting on save through pylsp and autopep8; Markdown's
+  line breaks kept; two conflicts read, theirs kept, both kept, undone, saved and marked resolved (Git says `M`);
+  diff3. On screen: the light and its fix, nine cursors renaming `self` and one undo, the call's parameters, the
+  `def` snippet tabbed through, the outline and sticky lines, a conflict settled and marked resolved, the Markdown
+  preview.
 
 ## From power-on to the desktop
 

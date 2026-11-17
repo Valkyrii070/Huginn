@@ -117,7 +117,7 @@ Window {
                         ["bottom-left", [[0, .5, .5, .5]]], ["bottom-right", [[.5, .5, .5, .5]]], ["max", [[0, 0, 1, 1]]]]
                 Rectangle {
                     required property var modelData
-                    width: 56; height: 36; radius: 7; color: lh.containsMouse ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.18) : Theme.t.hover
+                    width: 56; height: 36; radius: 7; color: lh.containsMouse ? Qt.alpha(Theme.t.accent, 0.18) : Theme.t.hover
                     border.width: lh.containsMouse ? 1.5 : 1; border.color: lh.containsMouse ? Theme.t.accent : Theme.t.islandLine
                     Repeater {
                         model: parent.modelData[1]

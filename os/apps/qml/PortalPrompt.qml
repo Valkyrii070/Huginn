@@ -27,14 +27,14 @@ Window {
         color: Theme.t.dark ? Qt.rgba(0.11, 0.13, 0.15, 0.97) : Qt.rgba(0.98, 0.98, 0.99, 0.98)
         border.width: 1; border.color: Theme.t.islandLine
         Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top; margins: 1 } height: 70; radius: 20
-            gradient: Gradient { GradientStop { position: 0; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.16) } GradientStop { position: 1; color: "transparent" } } }
+            gradient: Gradient { GradientStop { position: 0; color: Qt.alpha(Theme.t.accent, 0.16) } GradientStop { position: 1; color: "transparent" } } }
         MouseArea { anchors.fill: parent; property point p0
             onPressed: function (m) { p0 = Qt.point(m.x, m.y) }
             onPositionChanged: function (m) { win.x += m.x - p0.x; win.y += m.y - p0.y } }
 
         Column { id: col; x: 22; y: 22; width: parent.width - 44; spacing: 14
             Row { spacing: 14; width: parent.width
-                Rectangle { width: 46; height: 46; radius: 15; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.18)
+                Rectangle { width: 46; height: 46; radius: 15; color: Qt.alpha(Theme.t.accent, 0.18)
                     Glyph { anchors.centerIn: parent; name: win.glyph; size: 24; ink: Theme.t.accent } }
                 Column { width: parent.width - 60; spacing: 3; anchors.verticalCenter: parent.verticalCenter
                     Label { objectName: "title"; width: parent.width; wrapMode: Text.WordWrap; text: Prompt.title; font.pixelSize: 15; font.weight: Font.DemiBold }
@@ -59,7 +59,7 @@ Window {
                         objectName: "app-" + modelData.id
                         width: col.width; height: 48; radius: 12
                         readonly property bool picked: Prompt.chosen === modelData.id
-                        color: picked ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.20) : hovered ? Theme.t.hover : "transparent"
+                        color: picked ? Qt.alpha(Theme.t.accent, 0.20) : hovered ? Theme.t.hover : "transparent"
                         onClicked: Prompt.choose(modelData.id)
                         onDoubleClicked: { Prompt.choose(modelData.id); Prompt.answer(true) }
                         Image { id: pic; x: 10; anchors.verticalCenter: parent.verticalCenter; width: 32; height: 32; sourceSize: Qt.size(64, 64)

@@ -36,6 +36,10 @@ GlassWindow {
     property int compAt: 0
     property string compPrefix: ""
     property string tip: ""
+    property var sig: null                         // the call being typed: {label, a, b, doc}
+    property var fixMenu: null                     // quick fixes for the cursor's line: {items, k}
+    property bool mdPreview: false                 // Markdown shown as it reads, beside its text
+    property var outlineRows: []
     property var matches: []
     property int matchAt: -1
     property int curLine: 1
@@ -62,8 +66,9 @@ GlassWindow {
     function closeTab(i) { if (Backend.close(i, false) === "dirty") ask("dirty", { tab: i, name: Backend.tabs[i].name }) }
     function save() { if (Backend.current < 0) return; if (Backend.save(Backend.current, false) === "changed") ask("clash", { tab: Backend.current }) }
     function openPalette(prefix) { palBox.text = prefix; palList.model = paletteRows(prefix); palOpen = true; palBox.forceActiveFocus(); palBox.cursorPosition = prefix.length; palList.currentIndex = 0 }
-    function closeOverlays() { palOpen = false; comp = []; tip = ""; menuFor = null; var v = view(); if (v) v.focusEditor() }
-    function showPanel(p) { side = true; panel = p; if (p === "search") Qt.callLater(function () { searchBox.forceActiveFocus() }); if (p === "tests" && Backend.tests.length === 0 && Backend.testBusy === "") Backend.discoverTests() }
+    function closeOverlays() { palOpen = false; comp = []; tip = ""; sig = null; fixMenu = null; menuFor = null; var v = view(); if (v) v.focusEditor() }
+    function refreshOutline() { outlineRows = Backend.current >= 0 ? Backend.outline(Backend.current) : [] }
+    function showPanel(p) { side = true; panel = p; if (p === "outline") refreshOutline(); if (p === "search") Qt.callLater(function () { searchBox.forceActiveFocus() }); if (p === "tests" && Backend.tests.length === 0 && Backend.testBusy === "") Backend.discoverTests() }
     function syncDocs() {
         var tabs = Backend.tabs, i, j, k
         for (i = docModel.count - 1; i >= 0; i--) {
@@ -115,6 +120,17 @@ GlassWindow {
         { name: "Show the Debug Console", key: "", run: function () { win.bottom = "debug"; win.term = true } },
         { name: "Set the Run Command…", key: "", run: function () { win.ask("run", { now: Backend.runCommand() }) } },
         { name: "Format Document", key: "Ctrl+Shift+I", run: function () { if (Backend.current >= 0) Backend.format(Backend.current) } },
+        { name: "Quick Fix…", key: "Ctrl+.", run: function () { var v = win.view(); if (v) v.fixHere() } },
+        { name: "Add the Next Match to the Selection (another cursor)", key: "Ctrl+D", run: function () { var v = win.view(); if (v) v.addNext() } },
+        { name: "Select Every Match (a cursor on each)", key: "Ctrl+Shift+L", run: function () { var v = win.view(); if (v) v.selectEvery() } },
+        { name: "Add a Cursor Below", key: "Ctrl+Alt+Down", run: function () { var v = win.view(); if (v) v.addVertical(1) } },
+        { name: "Add a Cursor Above", key: "Ctrl+Alt+Up", run: function () { var v = win.view(); if (v) v.addVertical(-1) } },
+        { name: "Markdown: Show How It Reads", key: "Ctrl+Shift+V", run: function () { win.mdPreview = !win.mdPreview } },
+        { name: "Show the Outline", key: "", run: function () { win.showPanel("outline") } },
+        { name: (Backend.options.formatOnSave ? "Stop Formatting When Saving" : "Format When Saving"), key: "", run: function () { Backend.setOption("formatOnSave", !Backend.options.formatOnSave) } },
+        { name: (Backend.options.trimOnSave ? "Stop Tidying Line Ends When Saving" : "Tidy Line Ends When Saving"), key: "", run: function () { Backend.setOption("trimOnSave", !Backend.options.trimOnSave) } },
+        { name: "Merge: Keep Ours Everywhere in This File", key: "", run: function () { if (Backend.current >= 0) Backend.resolveConflict(Backend.current, -1, "ours") } },
+        { name: "Merge: Keep Theirs Everywhere in This File", key: "", run: function () { if (Backend.current >= 0) Backend.resolveConflict(Backend.current, -1, "theirs") } },
         { name: "Comment or Uncomment Lines", key: "Ctrl+/", run: function () { var v = win.view(); if (v) v.toggleComment() } },
         { name: "Toggle Word Wrap", key: "Alt+Z", run: function () { Backend.setWrap(!Backend.wrap) } },
         { name: "Bigger Text", key: "Ctrl+=", run: function () { Backend.setSize(Backend.size + 1) } },
@@ -240,6 +256,8 @@ GlassWindow {
         function onJump(i, line, col) { Backend.select(i); Qt.callLater(function () { var v = docs.itemAt(i); if (v) v.goTo(line, col) }) }
         function onCompletions(i, items) { var v = docs.itemAt(i); if (i === Backend.current && v) v.offer(items) }
         function onHoverText(i, text) { if (i === Backend.current) win.tip = text }
+        function onSignature(i, label, a, b, doc) { if (i === Backend.current) win.sig = label ? { label: label, a: a, b: b, doc: doc } : null }
+        function onFixesFound(i, items) { if (i !== Backend.current) return; if (items.length) win.fixMenu = { items: items, k: 0 }; else toast.say("Nothing to fix on this line", false) }
         function onShown() { win.show(); win.raise(); win.requestActivate() }
     }
     Component.onCompleted: syncDocs()
@@ -273,13 +291,14 @@ GlassWindow {
     Shortcut { sequence: "Ctrl+N"; onActivated: win.ask("new", { folder: Backend.root, dir: false }) }
     Shortcut { sequence: "Ctrl+O"; onActivated: { win.browseAt = Backend.root || Backend.home; win.ask("open") } }
     Shortcut { sequence: "Ctrl+Shift+I"; onActivated: if (Backend.current >= 0) Backend.format(Backend.current) }
+    Shortcut { sequence: "Ctrl+Shift+V"; onActivated: win.mdPreview = !win.mdPreview }
     Shortcut { sequence: "Alt+Z"; onActivated: Backend.setWrap(!Backend.wrap) }
     Shortcut { sequences: ["Ctrl+=", "Ctrl++"]; onActivated: Backend.setSize(Backend.size + 1) }
     Shortcut { sequence: "Ctrl+-"; onActivated: Backend.setSize(Backend.size - 1) }
     Shortcut { sequence: "Ctrl+Tab"; onActivated: if (Backend.tabs.length) Backend.select((Backend.current + 1) % Backend.tabs.length) }
     Shortcut { sequence: "Ctrl+Shift+Tab"; onActivated: if (Backend.tabs.length) Backend.select((Backend.current - 1 + Backend.tabs.length) % Backend.tabs.length) }
-    Shortcut { sequence: "Escape"; enabled: win.palOpen || win.finding || win.tip !== "" || win.comp.length > 0 || win.menuFor !== null || win.sheet !== null
-        onActivated: { if (win.sheet) win.sheet = null; else if (win.palOpen || win.tip || win.comp.length || win.menuFor) win.closeOverlays(); else { win.finding = false; var v = win.view(); if (v) v.focusEditor() } } }
+    Shortcut { sequence: "Escape"; enabled: win.palOpen || win.finding || win.tip !== "" || win.comp.length > 0 || win.menuFor !== null || win.sheet !== null || win.sig !== null || win.fixMenu !== null
+        onActivated: { if (win.sheet) win.sheet = null; else if (win.palOpen || win.tip || win.comp.length || win.menuFor || win.sig || win.fixMenu) win.closeOverlays(); else { win.finding = false; var v = win.view(); if (v) v.focusEditor() } } }
 
     islands: [
         // the open files, floating across the top
@@ -324,7 +343,7 @@ GlassWindow {
                     Text { visible: !palBox.text; text: "Type a file's name · > for commands · : for a line · @ for a symbol"; font: palBox.font; color: Theme.t.text_secondary } }
                 ListView { id: palList; x: 8; y: 54; width: parent.width - 16; height: parent.height - 62; clip: true; boundsBehavior: Flickable.StopAtBounds; highlightMoveDuration: 0
                     delegate: Pressable { required property var modelData; required property int index; width: palList.width; height: 40; radius: 10
-                        color: index === palList.currentIndex ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.22) : hovered ? Theme.t.hover : "transparent"
+                        color: index === palList.currentIndex ? Qt.alpha(Theme.t.accent, 0.22) : hovered ? Theme.t.hover : "transparent"
                         onClicked: win.choose(modelData)
                         Label { x: 12 + (modelData.depth || 0) * 12; width: parent.width * 0.6; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter; text: modelData.label; font.weight: Font.DemiBold }
                         Label { anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter } width: Math.min(implicitWidth, parent.width * 0.38); elide: Text.ElideLeft
@@ -392,7 +411,7 @@ GlassWindow {
                         Label { text: win.sheet && win.sheet.commit ? (win.sheet.commit.sha || "").substring(0, 10) + "  ·  " + win.sheet.commit.author + "  ·  " + win.sheet.commit.when + "  ·  " + (win.sheet.commit.files || []).length + " files" : ""
                             font.pixelSize: 11; secondary: true; font.family: win.mono } }
                     delegate: Rectangle { required property var modelData; width: diffList.width; height: modelData.kind === "hunk" ? 30 : modelData.kind === "file" ? 32 : 20
-                        color: modelData.kind === "add" ? Qt.rgba(0.25, 0.73, 0.31, 0.16) : modelData.kind === "del" ? Qt.rgba(0.97, 0.32, 0.29, 0.16) : modelData.kind === "hunk" ? Theme.t.hover : modelData.kind === "file" ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.14) : "transparent"
+                        color: modelData.kind === "add" ? Qt.rgba(0.25, 0.73, 0.31, 0.16) : modelData.kind === "del" ? Qt.rgba(0.97, 0.32, 0.29, 0.16) : modelData.kind === "hunk" ? Theme.t.hover : modelData.kind === "file" ? Qt.alpha(Theme.t.accent, 0.14) : "transparent"
                         Text { x: 6; width: 34; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter; text: modelData.old; color: win.gutterInk; font.family: win.mono; font.pixelSize: 11 }
                         Text { x: 44; width: 34; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter; text: modelData.new; color: win.gutterInk; font.family: win.mono; font.pixelSize: 11 }
                         Text { x: modelData.kind === "file" ? 10 : 86; anchors.verticalCenter: parent.verticalCenter; text: (modelData.kind === "add" ? "+ " : modelData.kind === "del" ? "− " : modelData.kind === "hunk" || modelData.kind === "file" ? "" : "  ") + modelData.text
@@ -425,7 +444,7 @@ GlassWindow {
     // ================================================================ the side island
     Rectangle { id: sideBox; visible: win.side; x: 12; y: 64; width: win.sideW; height: parent.height - y - 12; radius: 18; color: Theme.t.island; border.width: 1; border.color: Theme.t.islandLine; clip: true
         Row { id: panes; x: 10; y: 10; spacing: 4
-            Repeater { model: [["files", "folder", "Files (Ctrl+Shift+E)"], ["search", "search", "Search (Ctrl+Shift+F)"], ["git", "route", "Changes (Ctrl+Shift+G)"], ["problems", "info", "Problems (Ctrl+Shift+M)"], ["tests", "check", "Tests (Ctrl+Shift+T)"]]
+            Repeater { model: [["files", "folder", "Files (Ctrl+Shift+E)"], ["search", "search", "Search (Ctrl+Shift+F)"], ["git", "route", "Changes (Ctrl+Shift+G)"], ["problems", "info", "Problems (Ctrl+Shift+M)"], ["tests", "check", "Tests (Ctrl+Shift+T)"], ["outline", "list", "Outline"]]
                 Seg { required property var modelData; icon: modelData[1]; tip: modelData[2]; on: win.panel === modelData[0]; onClicked: win.showPanel(modelData[0])
                     Rectangle { visible: (modelData[0] === "git" && Backend.changes.length > 0) || (modelData[0] === "problems" && Backend.problems.length > 0)
                                          || (modelData[0] === "tests" && Backend.tests.some(function (t) { return t.status === "failed" }))
@@ -440,7 +459,7 @@ GlassWindow {
             ListView { id: explorer; objectName: "explorer"; y: 32; width: parent.width; height: parent.height - 32; clip: true; model: Backend.tree; boundsBehavior: Flickable.StopAtBounds; reuseItems: true
                 delegate: Pressable { id: row; required property var modelData; width: explorer.width - 12; x: 6; height: 26; radius: 7
                     readonly property bool on: !!win.tab && win.tab.path === modelData.path
-                    color: on ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.2) : hovered ? Theme.t.hover : "transparent"
+                    color: on ? Qt.alpha(Theme.t.accent, 0.2) : hovered ? Theme.t.hover : "transparent"
                     onClicked: modelData.dir ? Backend.toggle(modelData.path) : Backend.openFile(modelData.path)
                     MouseArea { anchors.fill: parent; acceptedButtons: Qt.RightButton
                         onClicked: function (m) { var p = row.mapToItem(win.contentItem, m.x, m.y); win.menuFor = { path: row.modelData.path, name: row.modelData.name, dir: row.modelData.dir, x: p.x, y: p.y } } }
@@ -501,7 +520,7 @@ GlassWindow {
                             c.fillStyle = cols[m.lane % cols.length]; c.beginPath(); c.arc(6 + m.lane * hc.lw, mid, 4.5, 0, Math.PI * 2); c.fill() } }
                     Column { x: graph.width + 10; anchors.verticalCenter: parent.verticalCenter; width: parent.width - x - 8
                         Row { spacing: 6; width: parent.width
-                            Rectangle { visible: !!hc.modelData.refs; height: 15; width: refL.width + 10; radius: 7; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.25); anchors.verticalCenter: parent.verticalCenter
+                            Rectangle { visible: !!hc.modelData.refs; height: 15; width: refL.width + 10; radius: 7; color: Qt.alpha(Theme.t.accent, 0.25); anchors.verticalCenter: parent.verticalCenter
                                 Label { id: refL; anchors.centerIn: parent; text: (hc.modelData.refs || "").replace("HEAD -> ", "").split(",")[0]; font.pixelSize: 9 } }
                             Label { width: parent.width - (hc.modelData.refs ? refL.width + 16 : 0); elide: Text.ElideRight; text: hc.modelData.subject; font.pixelSize: 12 } }
                         Label { text: hc.modelData.short + "  ·  " + hc.modelData.author + "  ·  " + hc.modelData.when; font.pixelSize: 10; secondary: true; font.family: win.mono } } }
@@ -526,9 +545,27 @@ GlassWindow {
                     Label { x: 24; width: parent.width - 24 - (ch.hovered ? 84 : 26); elide: Text.ElideLeft; anchors.verticalCenter: parent.verticalCenter; text: ch.modelData.path; font.pixelSize: 12 }
                     Rectangle { visible: ch.modelData.staged && !ch.hovered; anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter } width: 8; height: 8; radius: 4; color: win.addInk }
                     Row { visible: ch.hovered; anchors { right: parent.right; rightMargin: 4; verticalCenter: parent.verticalCenter } spacing: 2
+                        Seg { visible: ch.modelData.kind === "conflict"; icon: "check"; tip: "Settled: mark it resolved"; onClicked: { var why = Backend.markResolved(ch.modelData.path); if (why) toast.say(why, !/resolved/.test(why)) } }
                         Seg { icon: "back"; tip: "Throw away these changes"; onClicked: win.ask("discard", { rel: ch.modelData.path }) }
                         Seg { icon: ch.modelData.staged && !ch.modelData.unstaged ? "x" : "plus"; tip: ch.modelData.staged && !ch.modelData.unstaged ? "Unstage" : "Stage"
                             onClicked: ch.modelData.staged && !ch.modelData.unstaged ? Backend.unstage(ch.modelData.path) : Backend.stage(ch.modelData.path) } } } } }
+
+        // ---- outline: the file's functions, classes and headings
+        ListView { id: outlineList; objectName: "outlineList"; visible: win.panel === "outline"; x: 10; y: 56; width: parent.width - 20; height: parent.height - 66; clip: true
+            model: win.outlineRows; boundsBehavior: Flickable.StopAtBounds
+            Timer { id: outlineTick; interval: 600; onTriggered: if (win.panel === "outline") win.refreshOutline() }
+            Connections { target: Backend; function onChanged() { if (win.panel === "outline") outlineTick.restart() } }
+            delegate: Pressable { required property var modelData; width: outlineList.width; height: 26; radius: 7
+                readonly property bool here: win.curLine - 1 >= modelData.line && win.curLine - 1 <= modelData.end
+                color: here ? Qt.alpha(Theme.t.accent, 0.14) : hovered ? Theme.t.hover : "transparent"
+                onClicked: { var v = win.view(); if (v) v.goTo(modelData.line, 0) }
+                Text { x: 8 + Math.min(6, modelData.depth) * 14; width: 16; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 11; font.bold: true
+                    color: modelData.kind === "class" || modelData.kind === "struct" || modelData.kind === "interface" ? "#F0B72F" : modelData.kind === "heading" ? Theme.t.text_secondary : "#B392F0"
+                    text: modelData.kind === "heading" ? "#" : modelData.kind === "class" || modelData.kind === "struct" || modelData.kind === "interface" || modelData.kind === "enum" ? "C" : "ƒ" }
+                Label { x: 26 + Math.min(6, modelData.depth) * 14; width: parent.width - x - 40; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter; text: modelData.name; font.pixelSize: 12 }
+                Label { anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter } text: modelData.line + 1; font.pixelSize: 10; secondary: true } }
+            Label { visible: outlineList.count === 0; anchors.centerIn: parent; width: parent.width - 40; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; secondary: true
+                text: "No functions, classes or headings found in this file" } }
 
         // ---- problems
         ListView { id: probList; objectName: "probList"; visible: win.panel === "problems"; x: 10; y: 56; width: parent.width - 20; height: parent.height - 66; clip: true; model: Backend.problems
@@ -616,9 +653,146 @@ GlassWindow {
                 }
                 function accept(item) {
                     var p = win.compPrefix, at = edit.cursorPosition
-                    edit.remove(at - p.length, at); edit.insert(at - p.length, item.insert)
                     win.comp = []; win.compAll = []
+                    if (item.snippet) { startSnippet(at - p.length, at, item.snippet); return }
+                    edit.remove(at - p.length, at); edit.insert(at - p.length, item.insert)
                 }
+                // ---- snippets: places to type, Tab to the next
+                property var snip: null                    // {stops: [[a, b]…], same: [[[a, b]…]…], k, len}
+                function startSnippet(from, to, body) {
+                    var t = edit.text, ls = t.lastIndexOf("\n", from - 1) + 1, ind = /^[ \t]*/.exec(t.substring(ls, from))[0]
+                    var x = Backend.expandSnippet(index, body, ind)
+                    v.multiBusy = true
+                    edit.remove(from, to); edit.insert(from, x.text)
+                    v.multiBusy = false
+                    var stops = x.stops.map(function (r) { return [r[0] + from, r[1] + from] })
+                    var same = x.same.map(function (l) { return l.map(function (r) { return [r[0] + from, r[1] + from] }) })
+                    snip = stops.length > 1 ? { stops: stops, same: same, k: 0, len: edit.length } : null
+                    edit.select(stops[0][0], stops[0][1])
+                }
+                function checkSnip() { if (!snip) return; var r = snip.stops[snip.k]; if (edit.cursorPosition < r[0] || edit.cursorPosition > r[1]) snip = null }
+                function snipShift(delta) {                // the text changed by delta at the current stop
+                    if (!snip) return
+                    var cur = snip.stops[snip.k], at = cur[0], out = { stops: [], same: [], k: snip.k, len: edit.length }
+                    function mv(r) { return r[0] > at || (r[0] === at && r !== cur && r[1] > cur[1]) ? [r[0] + delta, r[1] + delta] : r }
+                    for (var n = 0; n < snip.stops.length; n++) {
+                        var r = snip.stops[n]
+                        out.stops.push(n === snip.k ? [r[0], Math.max(r[0], r[1] + delta)] : (r[0] > at ? [r[0] + delta, r[1] + delta] : r))
+                        out.same.push(snip.same[n].map(function (q) { return q[0] > at ? [q[0] + delta, q[1] + delta] : q }))
+                    }
+                    snip = out
+                }
+                function nextStop() {
+                    var cur = snip.stops[snip.k], typed = edit.getText(cur[0], cur[1]), mirrors = snip.same[snip.k]
+                    if (mirrors.length) {                  // the same name again: write what was typed there too
+                        var edits = mirrors.map(function (r) { return [r[0], r[1], typed] }), was = snip
+                        v.multiBusy = true; Backend.multiEdit(index, edits, false); v.multiBusy = false
+                        var out = { stops: [], same: [], k: was.k, len: edit.length }
+                        function moved(r) { var d = 0; for (var e = 0; e < mirrors.length; e++) if (mirrors[e][0] < r[0]) d += typed.length - (mirrors[e][1] - mirrors[e][0]); return [r[0] + d, r[1] + d] }
+                        for (var n = 0; n < was.stops.length; n++) { out.stops.push(moved(was.stops[n])); out.same.push(n === was.k ? [] : was.same[n].map(moved)) }
+                        snip = out
+                    }
+                    snip.k++
+                    var r = snip.stops[snip.k]
+                    if (snip.k >= snip.stops.length - 1) { snip = null; if (r[1] > r[0]) edit.select(r[0], r[1]); else edit.cursorPosition = r[0]; return }
+                    snip = { stops: snip.stops, same: snip.same, k: snip.k, len: edit.length }
+                    edit.select(r[0], r[1])
+                }
+                // ---- more than one cursor
+                property var extra: []                     // [{a, p}]: where each extra selection starts, and its caret
+                property bool multiBusy: false
+                function anchorOf() { return edit.cursorPosition === edit.selectionStart ? edit.selectionEnd : edit.selectionStart }
+                function allCursors() { return [{ a: anchorOf(), p: edit.cursorPosition, main: true }].concat(extra.map(function (c) { return { a: c.a, p: c.p, main: false } })) }
+                function wordBounds(at) { var t = edit.text, s = at, e = at; while (s > 0 && /\w/.test(t.charAt(s - 1))) s--; while (e < t.length && /\w/.test(t.charAt(e))) e++; return [s, e] }
+                function taken(a, b) { return allCursors().some(function (c) { return Math.min(c.a, c.p) === a && Math.max(c.a, c.p) === b }) }
+                function addNext() {
+                    if (edit.selectionStart === edit.selectionEnd && !extra.length) { var w = wordBounds(edit.cursorPosition); if (w[1] > w[0]) edit.select(w[0], w[1]); return }
+                    var word = edit.getText(edit.selectionStart, edit.selectionEnd); if (!word) return
+                    var last = extra.length ? extra[extra.length - 1] : { a: edit.selectionStart, p: edit.selectionEnd }, t = edit.text
+                    var from = Math.max(last.a, last.p), k = t.indexOf(word, from)
+                    if (k < 0) k = t.indexOf(word)
+                    while (k >= 0 && taken(k, k + word.length)) { k = t.indexOf(word, k + 1); if (k < 0) break }
+                    if (k < 0) { toast.say("No more of “" + word + "”", false); return }
+                    extra = extra.concat([{ a: k, p: k + word.length }]); scroll.follow(edit.positionToRectangle(k))
+                }
+                function selectEvery() {
+                    if (edit.selectionStart === edit.selectionEnd) { var w = wordBounds(edit.cursorPosition); if (w[1] <= w[0]) return; edit.select(w[0], w[1]) }
+                    var word = edit.getText(edit.selectionStart, edit.selectionEnd), t = edit.text, out = []
+                    for (var k = t.indexOf(word); k >= 0; k = t.indexOf(word, k + word.length)) if (k !== edit.selectionStart) out.push({ a: k, p: k + word.length })
+                    extra = out
+                    toast.say((out.length + 1) + " cursors", false)
+                }
+                function addVertical(dir) {
+                    lineStarts()
+                    var cs = allCursors(), ref = cs.reduce(function (b, c) { return dir > 0 ? (c.p > b.p ? c : b) : (c.p < b.p ? c : b) })
+                    var line = 0; while (line + 1 < starts.length && starts[line + 1] <= ref.p) line++
+                    var col = ref.p - starts[line], to = line + dir
+                    if (to < 0 || to >= starts.length) return
+                    var end = to + 1 < starts.length ? starts[to + 1] - 1 : edit.length, p = Math.min(starts[to] + col, end)
+                    extra = extra.concat([{ a: p, p: p }])
+                }
+                property bool typing: false                // the last multi-cursor change was letters: the next joins its undo step
+                function typeAll(fn, letters) {   // fn(cursor) -> [from, to, text, caret offset from `from` after]
+                    var cs = allCursors().slice().sort(function (x, y) { return Math.min(x.a, x.p) - Math.min(y.a, y.p) }), edits = [], shift = 0, next = [], main = 0
+                    for (var n = 0; n < cs.length; n++) {
+                        var r = fn(cs[n]); if (!r) { next.push({ a: cs[n].p + shift, p: cs[n].p + shift, main: cs[n].main }); continue }
+                        edits.push([r[0], r[1], r[2]])
+                        var at = r[0] + shift + r[3]
+                        next.push({ a: at, p: at, main: cs[n].main })
+                        shift += r[2].length - (r[1] - r[0])
+                    }
+                    multiBusy = true
+                    if (edits.length) Backend.multiEdit(index, edits, !!letters && typing)
+                    typing = !!letters
+                    var others = []
+                    for (var m = 0; m < next.length; m++) if (next[m].main) main = next[m].p; else others.push({ a: next[m].a, p: next[m].p })
+                    edit.cursorPosition = main
+                    extra = others
+                    multiBusy = false
+                }
+                function moveAll(fn, keep) {   // fn(position) -> new position; keep: extend the selections
+                    var cs = allCursors(), others = []
+                    typing = false
+                    for (var n = 0; n < cs.length; n++) {
+                        var to = fn(cs[n].p, cs[n])
+                        if (cs[n].main) { multiBusy = true; if (keep) edit.select(cs[n].a, to); else edit.cursorPosition = to; if (keep && to < cs[n].a) edit.select(cs[n].a, to); multiBusy = false }
+                        else others.push({ a: keep ? cs[n].a : to, p: to })
+                    }
+                    extra = others
+                }
+                function multiKey(e) {   // a key with more than one cursor: true when dealt with
+                    var t = edit.text, shift = (e.modifiers & Qt.ShiftModifier)
+                    function sel(c) { return [Math.min(c.a, c.p), Math.max(c.a, c.p)] }
+                    function lineOf(p) { return [t.lastIndexOf("\n", p - 1) + 1, (t.indexOf("\n", p) < 0 ? t.length : t.indexOf("\n", p))] }
+                    if (e.key === Qt.Key_Escape) { extra = []; return true }
+                    if (e.key === Qt.Key_Backspace) { typeAll(function (c) { var r = sel(c); if (r[1] > r[0]) return [r[0], r[1], "", 0]; return c.p > 0 ? [c.p - 1, c.p, "", 0] : null }); return true }
+                    if (e.key === Qt.Key_Delete) { typeAll(function (c) { var r = sel(c); if (r[1] > r[0]) return [r[0], r[1], "", 0]; return c.p < t.length ? [c.p, c.p + 1, "", 0] : null }); return true }
+                    if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { typeAll(function (c) { var r = sel(c), ind = /^[ \t]*/.exec(t.substring(lineOf(r[0])[0], r[0]))[0]; return [r[0], r[1], "\n" + ind, 1 + ind.length] }); return true }
+                    if (e.key === Qt.Key_Tab) { typeAll(function (c) { var r = sel(c); return [r[0], r[1], win.unit, win.unit.length] }); return true }
+                    if (e.key === Qt.Key_Left) { moveAll(function (p, c) { var r = sel(c); return !shift && r[1] > r[0] ? r[0] : Math.max(0, p - 1) }, shift); return true }
+                    if (e.key === Qt.Key_Right) { moveAll(function (p, c) { var r = sel(c); return !shift && r[1] > r[0] ? r[1] : Math.min(t.length, p + 1) }, shift); return true }
+                    if (e.key === Qt.Key_Home) { moveAll(function (p) { var l = lineOf(p), ind = /^[ \t]*/.exec(t.substring(l[0], l[1]))[0].length; return p === l[0] + ind ? l[0] : l[0] + ind }, shift); return true }
+                    if (e.key === Qt.Key_End) { moveAll(function (p) { return lineOf(p)[1] }, shift); return true }
+                    if (e.key === Qt.Key_Up || e.key === Qt.Key_Down || e.key === Qt.Key_PageUp || e.key === Qt.Key_PageDown) { extra = []; return false }
+                    if (e.text.length === 1 && !(e.modifiers & Qt.ControlModifier) && e.text >= " ") {
+                        var ch = e.text; typeAll(function (c) { var r = sel(c); return [r[0], r[1], ch, ch.length] }, /\w/.test(ch)); return true }
+                    return false
+                }
+                // ---- what the call wants; what can be fixed
+                function fixHere() { var lc = lineCol(); win.fixMenu = null; Backend.quickFixes(index, lc[0], lc[1]) }
+                function askSignature() { var lc = lineCol(); Backend.signatureAt(index, lc[0], lc[1]) }
+                // ---- merge conflicts
+                property var conflicts: []
+                Timer { id: conflictTick; interval: 300; onTriggered: v.conflicts = Backend.conflictsOf(v.index) }
+                // ---- sticky scroll: the lines that open the scopes at the top of the view
+                property var sticky: []
+                readonly property int topLine: Math.max(0, Math.floor((scroll.contentY - edit.y + 2) / Math.max(1, edit.cursorRectangle.height)))
+                onContentYChanged: stickyTick.restart()
+                readonly property real contentY: scroll.contentY
+                onTopLineChanged: stickyTick.restart()
+                Timer { id: stickyTick; interval: 60
+                    onTriggered: {
+                        v.sticky = v.topLine > 0 && !Backend.wrap ? Backend.stickyAt(v.index, v.topLine) : [] } }
                 function lineRange() {   // the first and last line of the selection (or the cursor's line)
                     var a = edit.selectionStart, b = edit.selectionEnd, t = edit.text
                     var s = t.lastIndexOf("\n", a - 1) + 1
@@ -648,7 +822,7 @@ GlassWindow {
                             if (all) return l.replace(new RegExp("^([ \\t]*)" + c.replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&") + " ?"), "$1")
                             return l.substring(0, ind) + c + " " + l.substring(ind) }) })
                 }
-                Component.onCompleted: reload()
+                Component.onCompleted: { reload(); conflictTick.start() }
                 Connections { target: Backend; function onChanged() { if (!v.loading) { v.marks = Backend.marksOf(v.index); v.probs = Backend.problemsOf(v.index); v.bps = Backend.breakpointsOf(v.index) } } }
                 Connections { target: win.dbg; function onChanged() { v.bps = Backend.breakpointsOf(v.index) } }
 
@@ -662,13 +836,13 @@ GlassWindow {
                     readonly property real k: Math.min(1, height / Math.max(1, full))
                     Image { id: mmImg; width: parent.width; height: mm.full * mm.k; fillMode: Image.Stretch; smooth: true; cache: false; asynchronous: true
                         source: mm.visible ? "image://minimap/" + v.index + "/" + mm.ver + "_" + edit.lineCount : "" }
-                    Rectangle { width: parent.width; radius: 3; color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.14); border.width: 1; border.color: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.4)
+                    Rectangle { width: parent.width; radius: 3; color: Qt.alpha(Theme.t.accent, 0.14); border.width: 1; border.color: Qt.alpha(Theme.t.accent, 0.4)
                         y: scroll.contentHeight > 0 ? scroll.contentY / scroll.contentHeight * mmImg.height : 0
                         height: Math.max(12, scroll.contentHeight > 0 ? Math.min(1, scroll.height / scroll.contentHeight) * mmImg.height : 0) }
                     MouseArea { width: parent.width; height: mmImg.height; cursorShape: Qt.PointingHandCursor
                         function go(y) { scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height, y / Math.max(1, mmImg.height) * scroll.contentHeight - scroll.height / 2)) }
                         onPressed: function (m) { go(m.y) } onPositionChanged: function (m) { go(m.y) } } }
-                Flickable { id: scroll; visible: !v.info.binary; anchors { fill: parent; margins: 2; bottomMargin: findBar.visible && v.visible ? 0 : 2; rightMargin: mm.visible ? 104 : 2 } clip: true; boundsBehavior: Flickable.StopAtBounds
+                Flickable { id: scroll; visible: !v.info.binary; anchors { fill: parent; margins: 2; bottomMargin: findBar.visible && v.visible ? 0 : 2; rightMargin: win.mdPreview && v.info.lang === "Markdown" ? v.width / 2 + 4 : mm.visible ? 104 : 2 } clip: true; boundsBehavior: Flickable.StopAtBounds
                     contentWidth: Backend.wrap ? width : Math.max(width, edit.x + edit.contentWidth + 60); contentHeight: edit.height + height * 0.5
                     function follow(r) {
                         if (r.y + edit.y - 10 < contentY) contentY = Math.max(0, r.y + edit.y - 10); else if (r.y + edit.y + r.height + 40 > contentY + height) contentY = r.y + edit.y + r.height + 40 - height
@@ -688,6 +862,42 @@ GlassWindow {
                         text: v.blameNow ? v.blameNow.author + ", " + v.blameNow.when + (v.blameNow.summary ? " · " + v.blameNow.summary : "") : "" }
                     // the line the cursor is on
                     Rectangle { x: 0; y: edit.y + edit.cursorRectangle.y - 1; width: scroll.contentWidth; height: edit.cursorRectangle.height + 2; color: win.lineGlow; visible: edit.activeFocus || true }
+                    // merge conflicts: ours green, theirs blue, with what to keep above each
+                    Repeater { model: Backend.wrap ? [] : v.conflicts
+                        Item { required property var modelData; required property int index
+                            readonly property real lh: edit.cursorRectangle.height
+                            Rectangle { x: 0; y: edit.y + modelData.start * parent.lh; width: scroll.contentWidth; height: parent.lh; color: Qt.rgba(0.25, 0.73, 0.31, 0.32) }
+                            Rectangle { x: 0; y: edit.y + (modelData.start + 1) * parent.lh; width: scroll.contentWidth; height: ((modelData.base > 0 ? modelData.base : modelData.mid) - modelData.start - 1) * parent.lh; color: Qt.rgba(0.25, 0.73, 0.31, 0.13) }
+                            Rectangle { x: 0; y: edit.y + modelData.mid * parent.lh; width: scroll.contentWidth; height: parent.lh; color: Qt.rgba(0.5, 0.5, 0.5, 0.2) }
+                            Rectangle { x: 0; y: edit.y + (modelData.mid + 1) * parent.lh; width: scroll.contentWidth; height: (modelData.end - modelData.mid - 1) * parent.lh; color: Qt.rgba(0.3, 0.55, 1, 0.13) }
+                            Rectangle { x: 0; y: edit.y + modelData.end * parent.lh; width: scroll.contentWidth; height: parent.lh; color: Qt.rgba(0.3, 0.55, 1, 0.32) } } }
+                    Repeater { model: Backend.wrap ? [] : v.conflicts      // …and what to keep, over the text so it can be clicked
+                        Row { required property var modelData; required property int index; objectName: "conflictBar"; z: 8
+                            readonly property int which: index
+                            x: scroll.contentX + edit.x + 260; y: edit.y + modelData.start * edit.cursorRectangle.height; height: edit.cursorRectangle.height; spacing: 10
+                            Repeater { model: [["ours", "Keep ours (" + parent.modelData.oursName + ")"], ["theirs", "Keep theirs (" + parent.modelData.theirsName + ")"], ["both", "Keep both"]]
+                                Text { required property var modelData; anchors.verticalCenter: parent.verticalCenter; text: modelData[1]; font.pixelSize: Math.max(10, Backend.size - 3); color: Theme.t.accent; font.underline: ma.containsMouse
+                                    MouseArea { id: ma; anchors.fill: parent; anchors.margins: -3; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: Backend.resolveConflict(v.index, parent.parent.which, parent.modelData[0]) } } } } }
+
+                    // the other cursors and what they've selected
+                    Repeater { model: v.extra
+                        Item { required property var modelData
+                            readonly property rect ra: edit.positionToRectangle(Math.min(modelData.a, modelData.p))
+                            readonly property rect rb: edit.positionToRectangle(Math.max(modelData.a, modelData.p))
+                            readonly property rect rc: edit.positionToRectangle(modelData.p)
+                            Rectangle { visible: parent.ra.y === parent.rb.y && parent.rb.x > parent.ra.x; x: edit.x + parent.ra.x; y: edit.y + parent.ra.y; width: parent.rb.x - parent.ra.x; height: parent.ra.height
+                                color: Qt.alpha(Theme.t.accent, 0.35) }
+                            Rectangle { x: edit.x + parent.rc.x; y: edit.y + parent.rc.y; width: 2; height: parent.rc.height; color: Theme.t.text } } }
+                    // a snippet's places still to fill
+                    Repeater { model: v.snip ? v.snip.stops.slice(v.snip.k + 1, v.snip.stops.length - 1) : []
+                        Rectangle { required property var modelData; readonly property rect ra: edit.positionToRectangle(modelData[0]); readonly property rect rb: edit.positionToRectangle(modelData[1])
+                            x: edit.x + ra.x - 1; y: edit.y + ra.y; width: Math.max(4, rb.x - ra.x + 2); height: ra.height; radius: 3; color: "transparent"; border.width: 1
+                            border.color: Qt.alpha(Theme.t.accent, 0.6) } }
+                    // a light when the cursor's line has a problem: click it (or Ctrl+.) for fixes
+                    Text { objectName: "fixBulb"; visible: !Backend.wrap && v.probs.some(function (p) { return p.line <= win.curLine - 1 && win.curLine - 1 <= p.endLine }) && v.index === Backend.current
+                        z: 6; x: 1; y: edit.y + edit.cursorRectangle.y; height: edit.cursorRectangle.height; verticalAlignment: Text.AlignVCenter; text: "💡"; font.pixelSize: Math.max(10, Backend.size - 3)
+                        MouseArea { anchors.fill: parent; anchors.margins: -3; cursorShape: Qt.PointingHandCursor; onClicked: v.fixHere() } }
                     // line numbers
                     Text { id: gutter; x: 0; y: edit.y; width: gutterW; horizontalAlignment: Text.AlignRight; rightPadding: 14; color: win.gutterInk; renderType: Text.NativeRendering
                         readonly property int gutterW: 34 + String(edit.lineCount).length * Math.ceil(Backend.size * 0.62)
@@ -718,13 +928,16 @@ GlassWindow {
                             Rectangle { x: edit.x + parent.a.x; y: edit.y + parent.a.y + parent.a.height - 2; width: Math.max(8, (parent.b.y === parent.a.y ? parent.b.x : edit.contentWidth) - parent.a.x); height: 2; color: parent.ink; opacity: 0.85 } } }
                     TextEdit { id: edit; objectName: "editor"; x: Backend.wrap ? 20 : gutter.width + 6; y: 12
                         width: Backend.wrap ? scroll.width - 40 : Math.max(contentWidth + 20, scroll.width - x - 10)
-                        color: Theme.t.text; selectionColor: Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.45); selectedTextColor: Theme.t.text
+                        color: Theme.t.text; selectionColor: Qt.alpha(Theme.t.accent, 0.45); selectedTextColor: Theme.t.text
                         font.family: win.mono; font.pixelSize: Backend.size; wrapMode: Backend.wrap ? TextEdit.Wrap : TextEdit.NoWrap; textFormat: TextEdit.PlainText
                         readOnly: !!v.info.readOnly; selectByMouse: true; persistentSelection: true; tabStopDistance: 4 * widest.advanceWidth; focus: v.index === Backend.current
                         onActiveFocusChanged: if (activeFocus && win.split && v.index !== Backend.current) { var side = v.side; Backend.select(v.index); win.pane = side }
                         TextMetrics { id: widest; font: edit.font; text: " " }
                         onTextChanged: {
                             if (v.loading || text === v.known) return      // colouring touches the text too: only real typing counts
+                            if (v.snip && !v.multiBusy) v.snipShift(length - v.snip.len)
+                            if (!v.multiBusy && v.extra.length) v.extra = []
+                            conflictTick.restart(); stickyTick.restart()
                             v.known = text
                             mmTick.restart()
                             Backend.edit(v.index, text); v.lineStarts()
@@ -733,7 +946,11 @@ GlassWindow {
                             var c = getText(Math.max(0, cursorPosition - 1), cursorPosition)
                             if (/[A-Za-z_.]/.test(c)) suggestTimer.restart(); else if (!win.comp.length) suggestTimer.stop()
                         }
-                        onCursorPositionChanged: { if (v.visible) { var lc = v.lineCol(); win.curLine = lc[0] + 1; win.curCol = lc[1] + 1 } if (win.tip) win.tip = "" }
+                        onCursorPositionChanged: { if (v.visible) { var lc = v.lineCol(); win.curLine = lc[0] + 1; win.curCol = lc[1] + 1 } if (win.tip) win.tip = ""
+                            if (v.snip && !v.multiBusy) Qt.callLater(v.checkSnip)    // after the text has caught up (the cursor moves first)
+                            if (win.fixMenu) win.fixMenu = null }
+                        TapHandler { acceptedModifiers: Qt.AltModifier; onTapped: function (p) { var at = edit.positionAt(p.position.x, p.position.y); if (!v.taken(at, at)) v.extra = v.extra.concat([{ a: at, p: at }]) } }
+                        TapHandler { acceptedModifiers: Qt.NoModifier; onTapped: if (v.extra.length) v.extra = [] }
                         onCursorRectangleChanged: if (v.visible) scroll.follow(cursorRectangle)
                         TapHandler { acceptedModifiers: Qt.ControlModifier; onTapped: function (p) { edit.cursorPosition = edit.positionAt(p.position.x, p.position.y); v.definition() } }
                         Keys.onPressed: function (e) {
@@ -744,7 +961,23 @@ GlassWindow {
                                 if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Tab) { v.accept(win.comp[win.compAt]); e.accepted = true; return }
                                 if (e.key === Qt.Key_Escape) { win.comp = []; e.accepted = true; return }
                             }
+                            if (win.fixMenu && win.fixMenu.items.length) {
+                                if (e.key === Qt.Key_Down) { win.fixMenu = { items: win.fixMenu.items, k: (win.fixMenu.k + 1) % win.fixMenu.items.length }; e.accepted = true; return }
+                                if (e.key === Qt.Key_Up) { win.fixMenu = { items: win.fixMenu.items, k: (win.fixMenu.k - 1 + win.fixMenu.items.length) % win.fixMenu.items.length }; e.accepted = true; return }
+                                if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { Backend.applyFix(win.fixMenu.k); win.fixMenu = null; e.accepted = true; return }
+                                if (e.key === Qt.Key_Escape) { win.fixMenu = null; e.accepted = true; return }
+                            }
                             if (readOnly) return
+                            var alt = (e.modifiers & Qt.AltModifier)
+                            if (ctrl && !shift && e.key === Qt.Key_D) { v.addNext(); e.accepted = true; return }
+                            if (ctrl && shift && e.key === Qt.Key_L) { v.selectEvery(); e.accepted = true; return }
+                            if (ctrl && alt && (e.key === Qt.Key_Down || e.key === Qt.Key_Up)) { v.addVertical(e.key === Qt.Key_Down ? 1 : -1); e.accepted = true; return }
+                            if (ctrl && e.key === Qt.Key_Period) { v.fixHere(); e.accepted = true; return }
+                            if (v.snip && e.key === Qt.Key_Tab && !shift) { v.nextStop(); e.accepted = true; return }
+                            if (v.snip && e.key === Qt.Key_Escape) { v.snip = null; e.accepted = true; return }
+                            if (win.sig && (e.key === Qt.Key_Escape || e.text === ")")) win.sig = null
+                            if (v.extra.length && v.multiKey(e)) { e.accepted = true; return }
+                            if (e.text === "(" || e.text === ",") Qt.callLater(v.askSignature)
                             if (ctrl && e.key === Qt.Key_Space) { v.suggest(); e.accepted = true; return }
                             if (ctrl && (e.key === Qt.Key_Slash || e.key === Qt.Key_Question)) { v.toggleComment(); e.accepted = true; return }
                             if (ctrl && e.key === Qt.Key_I && !shift) { v.hover(); e.accepted = true; return }
@@ -799,16 +1032,56 @@ GlassWindow {
                     ListView { id: compList; anchors { fill: parent; margins: 5 } clip: true; model: win.comp; currentIndex: win.compAt; highlightMoveDuration: 0
                         onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
                         delegate: Pressable { required property var modelData; required property int index; width: compList.width; height: 30; radius: 7
-                            color: index === win.compAt ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.25) : hovered ? Theme.t.hover : "transparent"
+                            color: index === win.compAt ? Qt.alpha(Theme.t.accent, 0.25) : hovered ? Theme.t.hover : "transparent"
                             onClicked: { v.accept(modelData); edit.forceActiveFocus() }
                             Rectangle { x: 8; anchors.verticalCenter: parent.verticalCenter; width: 16; height: 16; radius: 4
-                                color: [2, 3, 4].indexOf(modelData.kind) >= 0 ? "#B392F0" : [5, 6, 10].indexOf(modelData.kind) >= 0 ? "#79B8FF" : [7, 8, 22].indexOf(modelData.kind) >= 0 ? "#F0B72F" : modelData.kind === 14 ? "#F97583" : Theme.t.text_secondary
-                                Text { anchors.centerIn: parent; text: [2, 3, 4].indexOf(modelData.kind) >= 0 ? "ƒ" : [5, 6, 10].indexOf(modelData.kind) >= 0 ? "v" : [7, 8, 22].indexOf(modelData.kind) >= 0 ? "C" : modelData.kind === 9 ? "m" : modelData.kind === 14 ? "k" : "a"
+                                color: modelData.kind === 15 ? "#56D4BC" : [2, 3, 4].indexOf(modelData.kind) >= 0 ? "#B392F0" : [5, 6, 10].indexOf(modelData.kind) >= 0 ? "#79B8FF" : [7, 8, 22].indexOf(modelData.kind) >= 0 ? "#F0B72F" : modelData.kind === 14 ? "#F97583" : Theme.t.text_secondary
+                                Text { anchors.centerIn: parent; text: modelData.kind === 15 ? "⌁" : [2, 3, 4].indexOf(modelData.kind) >= 0 ? "ƒ" : [5, 6, 10].indexOf(modelData.kind) >= 0 ? "v" : [7, 8, 22].indexOf(modelData.kind) >= 0 ? "C" : modelData.kind === 9 ? "m" : modelData.kind === 14 ? "k" : "a"
                                     font.pixelSize: 10; font.bold: true; color: "#111" } }
                             Text { x: 32; width: parent.width * 0.55; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter; font.family: win.mono; font.pixelSize: 12; color: Theme.t.text
                                 textFormat: Text.StyledText; text: "<b>" + modelData.label.substring(0, win.compPrefix.length) + "</b>" + modelData.label.substring(win.compPrefix.length) }
                             Label { anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter } width: parent.width * 0.38; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight
                                 text: modelData.detail; font.pixelSize: 10; secondary: true } } } }
+                // sticky scroll: the scopes the top of the view is inside
+                Column { objectName: "stickyRows"; visible: v.visible && v.sticky.length > 0 && !v.info.binary; z: 4; x: scroll.x; y: scroll.y; width: scroll.width
+                    Repeater { model: v.sticky
+                        Rectangle { required property var modelData; width: parent.width; height: edit.cursorRectangle.height + 2; color: win.slab
+                            Text { x: 0; width: gutter.width; horizontalAlignment: Text.AlignRight; rightPadding: 14; anchors.verticalCenter: parent.verticalCenter; text: modelData.line + 1
+                                font.family: win.mono; font.pixelSize: Backend.size; color: win.gutterInk }
+                            Text { x: edit.x - scroll.contentX; anchors.verticalCenter: parent.verticalCenter; text: modelData.text; font.family: win.mono; font.pixelSize: Backend.size; color: Theme.t.text; textFormat: Text.PlainText }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: v.goTo(modelData.line, 0) } } }
+                    Rectangle { width: parent.width; height: 1; color: Theme.t.islandLine } }
+                // what the call being typed wants
+                Rectangle { objectName: "sigTip"; visible: v.visible && v.index === Backend.current && win.sig !== null && !win.comp.length; z: 6; radius: 10
+                    width: Math.min(v.width - 40, sigText.implicitWidth + 24); height: sigText.height + (sigDoc.visible ? sigDoc.height + 6 : 0) + 16
+                    color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
+                    readonly property point at: edit.mapToItem(v, edit.cursorRectangle.x, edit.cursorRectangle.y)
+                    x: Math.max(8, Math.min(at.x - 30, v.width - width - 10)); y: at.y - height - 6 < 0 ? at.y + edit.cursorRectangle.height + 6 : at.y - height - 6
+                    function esc(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") }
+                    Text { id: sigText; x: 12; y: 8; font.family: win.mono; font.pixelSize: 12; color: Theme.t.text; textFormat: Text.StyledText
+                        text: !win.sig ? "" : win.sig.a < 0 ? parent.esc(win.sig.label) : parent.esc(win.sig.label.substring(0, win.sig.a)) + "<b><font color='" + Theme.t.accent + "'>"
+                              + parent.esc(win.sig.label.substring(win.sig.a, win.sig.b)) + "</font></b>" + parent.esc(win.sig.label.substring(win.sig.b)) }
+                    Text { id: sigDoc; visible: !!win.sig && win.sig.doc !== ""; x: 12; y: sigText.height + 12; width: Math.min(520, v.width - 64); wrapMode: Text.Wrap; maximumLineCount: 4; elide: Text.ElideRight
+                        font.pixelSize: 11; color: Theme.t.text_secondary; text: win.sig ? win.sig.doc : "" } }
+                // quick fixes at the cursor
+                Rectangle { objectName: "fixMenu"; visible: v.visible && v.index === Backend.current && win.fixMenu !== null; z: 7; width: 360; height: (win.fixMenu ? win.fixMenu.items.length : 0) * 30 + 10; radius: 12
+                    color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
+                    readonly property point at: edit.mapToItem(v, edit.cursorRectangle.x, edit.cursorRectangle.y + edit.cursorRectangle.height)
+                    x: Math.min(at.x, v.width - width - 10); y: at.y + height + 6 > v.height ? at.y - edit.cursorRectangle.height - height - 4 : at.y + 4
+                    Column { x: 5; y: 5; width: parent.width - 10
+                        Repeater { model: win.fixMenu ? win.fixMenu.items : []
+                            Pressable { required property var modelData; required property int index; width: parent.width; height: 30; radius: 7
+                                color: win.fixMenu && index === win.fixMenu.k ? Qt.alpha(Theme.t.accent, 0.25) : hovered ? Theme.t.hover : "transparent"
+                                onClicked: { Backend.applyFix(index); win.fixMenu = null; edit.forceActiveFocus() }
+                                Text { x: 10; anchors.verticalCenter: parent.verticalCenter; text: "💡"; font.pixelSize: 11 }
+                                Label { x: 30; width: parent.width - 40; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter; text: modelData.title; font.pixelSize: 12 } } } } }
+                // Markdown as it reads, beside its text
+                Rectangle { objectName: "mdPreview"; visible: win.mdPreview && v.info.lang === "Markdown"; z: 3; anchors { right: parent.right; top: parent.top; bottom: parent.bottom; margins: 6 }
+                    width: parent.width / 2 - 10; radius: 12; color: Theme.t.dark ? "#16181D" : "#FFFFFF"; border.width: 1; border.color: Theme.t.islandLine; clip: true
+                    Flickable { id: mdFlick; anchors.fill: parent; anchors.margins: 18; contentHeight: mdText.height + 40; boundsBehavior: Flickable.StopAtBounds; clip: true
+                        contentY: scroll.contentHeight > scroll.height ? Math.max(0, Math.min(contentHeight - height, scroll.contentY / (scroll.contentHeight - scroll.height) * (contentHeight - height))) : 0
+                        Text { id: mdText; width: mdFlick.width; wrapMode: Text.Wrap; textFormat: Text.MarkdownText; text: edit.text; color: Theme.t.text; font.pixelSize: 14
+                            baseUrl: "file://" + v.path; onLinkActivated: function (link) { Qt.openUrlExternally(link) } } } }
                 // what the language server says about the word under the cursor
                 Rectangle { visible: v.visible && win.tip !== ""; z: 6; width: Math.min(560, v.width - 40); height: Math.min(260, tipText.contentHeight + 24); radius: 12; clip: true
                     color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
@@ -893,7 +1166,7 @@ GlassWindow {
                 Label { text: "CALL STACK" + (win.dbg.reason ? "  ·  " + win.dbg.reason : ""); secondary: true; font.pixelSize: 10; font.weight: Font.DemiBold; width: parent.width; elide: Text.ElideRight }
                 ListView { width: parent.width; height: parent.height - 20; clip: true; model: win.dbg.frames; boundsBehavior: Flickable.StopAtBounds
                     delegate: Pressable { required property var modelData; width: ListView.view.width; height: 24; radius: 6
-                        color: win.dbg.frame === modelData.id ? Qt.rgba(Theme.t.accent.r, Theme.t.accent.g, Theme.t.accent.b, 0.2) : (hovered ? Theme.t.hover : "transparent")
+                        color: win.dbg.frame === modelData.id ? Qt.alpha(Theme.t.accent, 0.2) : (hovered ? Theme.t.hover : "transparent")
                         onClicked: win.dbg.selectFrame(modelData.id)
                         Text { x: 6; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 12; elide: Text.ElideRight; font.family: win.mono; font.pixelSize: 11; color: modelData.file ? Theme.t.text : Theme.t.text_secondary
                             text: modelData.name + "   " + modelData.short + (modelData.file ? ":" + (modelData.line + 1) : "") } } } }
