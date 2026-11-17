@@ -570,7 +570,7 @@ Four apps are being taken, round by round, to the level of the professional tool
 
 | App | Measured against | Rounds so far |
 |---|---|---|
-| Easel | Photoshop, Illustrator | 3 |
+| Easel | Photoshop, Illustrator | 4 |
 | Code | Xcode, VS Code | 4 |
 | Clips | Final Cut Pro, Premiere, DaVinci Resolve | 4 |
 | Tempo (first called Studio) | Logic Pro, Ableton Live | 2 |
@@ -763,6 +763,41 @@ Four apps are being taken, round by round, to the level of the professional tool
   diff3. On screen: the light and its fix, nine cursors renaming `self` and one undo, the call's parameters, the
   `def` snippet tabbed through, the outline and sticky lines, a conflict settled and marked resolved, the Markdown
   preview.
+
+**Easel, pro round four** (`apps/huginn_easel_more.py`, new; `apps/huginn_easel.py`, `apps/huginn_easel_ui.py`, `apps/qml/Easel.qml`)
+- *Layer styles* (the sparkle in Layers, or Layer › Layer Style): drop shadow (light angle, distance, softness,
+  spread), outer glow, outline (outside, centre or inside, any width), inner shadow and colour overlay, on any
+  layer or group, as you change them. Each is worked out from the layer's see-through edge (outlines from a true
+  distance transform) and kept until the layer changes. The sheet sits beside the picture so the effect shows.
+- *Layer groups* (Ctrl+G, Ctrl+Shift+G): folders in Layers that fold, nest, and have their own visibility,
+  opacity, blend, mask and styles. A group is drawn on its own and then placed, so its opacity treats it as one
+  picture and an adjustment inside it changes only the group. Layers step in and out of groups with the arrows or by
+  dragging; the Move tool moves everything in one; duplicate, delete and Merge Down (into one layer) take the whole
+  group. OpenRaster keeps groups as stacks; PSD gets their layers with the group's visibility and opacity (a group
+  with styles goes as one picture, so it looks the same).
+- *Smart objects* (Layer › Convert to Smart Object, or Place a Picture…): the original pixels are kept, so free
+  transform (shrink, turn, grow back) is always drawn from them and loses nothing. Filters on a smart object become
+  *smart filters*, listed under the layer: switch each off, change its strength or take it away.
+- *Retouching brushes*: dodge and burn (shadows, midtones or highlights), sponge (takes colour out), soften and
+  sharpen, each painting toward the effect with a soft edge and staying inside a selection; a smudge brush that
+  carries wet paint along; and liquify: push, bloat, pucker, twirl and restore, warping a displacement field
+  sampled smoothly from the original, so later strokes and Restore keep working from the unwarped picture.
+- *Rulers and guides* (View, Ctrl+R): rulers along the picture's top and left; drag a guide out of one, move it
+  with the Move tool, drag it off to remove it. *Snapping* (Ctrl+;): selections, shapes, crops and gradients snap
+  to guides and to the canvas's edges and middle; moving a layer, a group, shapes or a transform snaps its nearest
+  edge or middle. Guides are saved and follow canvas and image size changes.
+- The tools rail goes to two columns when the window is too short for one.
+- Tested (69 checks): every style against exact pixels (a 5 px outside outline exactly 5 px out, inner ones inside,
+  shadow and glow where the light says, cached until the layer changes); groups' order, nesting, isolated opacity,
+  hidden groups, adjustments inside, a group's outline round the group as a whole; .easel, OpenRaster and PSD round
+  trips giving the same picture; a smart object shrunk to a tenth and back still pixel-sharp, its filter on, off and
+  saved; dodge, burn, sponge, smudge and liquify (push, restore, bloat) moving the right pixels; and, through the
+  app, grouping, stepping in and out of groups, dropping on a group, folding, moving and undoing a group,
+  duplicating, deleting and merging one, one undo step for a dragged style slider, converting, transforming,
+  filtering and rasterising a smart object, placing a picture, the brushes, guides (added, snapped to by a
+  selection and a moved layer, dragged, dragged off, kept through a canvas change) and saving it all. On screen: a
+  grouped badge with styles, the sun as a smart object with its filter, rulers, a guide pulled out of the ruler, the
+  style sheet giving the group an orange outline, liquify pushing the card's edge.
 
 ## From power-on to the desktop
 

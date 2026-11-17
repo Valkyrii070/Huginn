@@ -17,19 +17,21 @@ from PySide6.QtGui import (QBrush, QColor, QCursor, QFontDatabase, QGuiApplicati
 from PySide6.QtQuick import QQuickImageProvider, QQuickPaintedItem
 
 import huginn_easel as ez
+import huginn_easel_more as more
 
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "huginn"
 PREFS = DATA_HOME / "easel.json"
 OPENABLE = (".easel", ".ora", ".psd", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".svg")
 PRESETS = [("Screen", 1920, 1080), ("4K screen", 3840, 2160), ("Square post", 1080, 1080), ("Story", 1080, 1920), ("A4 at 300 dpi", 2480, 3508),
            ("Letter at 300 dpi", 2550, 3300), ("App icon", 1024, 1024), ("Banner", 1500, 500), ("Phone wallpaper", 1290, 2796)]
-PIXEL_TOOLS = ["move", "transform", "select", "ellipsesel", "lasso", "wand", "brush", "eraser", "clone", "heal", "fill", "gradient", "picker", "text", "crop",
-               "hand", "zoom"]
+PIXEL_TOOLS = ["move", "transform", "select", "ellipsesel", "lasso", "wand", "brush", "eraser", "clone", "heal", "dodge", "smudge", "liquify", "fill", "gradient",
+               "picker", "text", "crop", "hand", "zoom"]
 VECTOR_TOOLS = ["pointer", "nodes", "pen", "rect", "ellipse", "line", "star", "text", "fill", "picker", "hand", "zoom"]
 TOOL_NAMES = {"move": "Move", "select": "Rectangle selection", "ellipsesel": "Ellipse selection", "lasso": "Lasso", "wand": "Magic wand",
               "brush": "Brush", "eraser": "Eraser", "fill": "Fill", "gradient": "Gradient", "picker": "Colour picker", "text": "Text", "crop": "Crop",
               "hand": "Hand", "zoom": "Zoom", "pointer": "Select", "pen": "Pen", "rect": "Rectangle", "ellipse": "Ellipse", "line": "Line", "star": "Star",
-              "transform": "Free transform", "clone": "Clone", "heal": "Heal", "nodes": "Edit points"}
+              "transform": "Free transform", "clone": "Clone", "heal": "Heal", "nodes": "Edit points", "dodge": "Dodge and burn", "smudge": "Smudge",
+              "liquify": "Liquify"}
 SHIFT, ALT, CTRL = 1, 2, 4
 HANDLES = ["tl", "t", "tr", "r", "br", "b", "bl", "l"]
 
@@ -75,6 +77,9 @@ class Easel(QObject):
         self._xform = None                                       # a free transform in progress
         self._clone_src, self._clone_off, self.heal_spot = None, None, True
         self._node_sel = None                                    # (shape id, subpath, node) being edited
+        self.retouch, self.retouch_range, self.retouch_strength = "dodge", "mid", 0.35   # round four's brushes
+        self.liquify_mode, self.liquify_strength, self.smudge_strength = "push", 0.7, 0.6
+        self.snap, self.rulers, self._guide_live = True, False, None
         self._dabs = {}
         self._cursor = ""
         self._call.connect(lambda fn: fn())
@@ -84,6 +89,7 @@ class Easel(QObject):
             prefs = {}
         self._recent = [r for r in prefs.get("recent", []) if isinstance(r, str)][:12]
         self.fg, self.bg = prefs.get("fg", self.fg), prefs.get("bg", self.bg)
+        self.snap, self.rulers = bool(prefs.get("snap", True)), bool(prefs.get("rulers", False))
         self._swatches = prefs.get("swatches") or ["#14171C", "#FFFFFF", "#E5484D", "#F76B15", "#FFC53D", "#30A46C", "#12A594", "#0090FF", "#3E63DD", "#8E4EC6", "#D6409F", "#8D8D8D"]
         if demo:
             self._demo_doc()
@@ -150,10 +156,16 @@ class Easel(QObject):
         if not self.doc:
             return []
         out = []
-        for l in reversed(self.doc.layers):                       # the panel lists the top layer first
+        layers = self.doc.layers
+        for l in reversed(layers):                                # the panel lists the top layer first
+            anc = more.ancestors(layers, l)
+            if any(not self.doc.layer(g).get("open", True) for g in anc):
+                continue                                          # inside a folded group
             out.append({"id": l["id"], "name": l["name"], "kind": l["kind"], "visible": l["visible"], "locked": l["locked"], "opacity": l["opacity"],
                         "blend": l["blend"], "hasMask": l.get("mask") is not None, "maskOn": l.get("maskOn", True), "active": l["id"] == self.doc.active,
-                        "adjust": l.get("adjust", ""), "v": l.get("v", 0), "shapes": len(l.get("shapes", []))})
+                        "adjust": l.get("adjust", ""), "v": l.get("v", 0) + (sum(x.get("v", 0) for x in self._subtree(l)) if l["kind"] == "group" else 0),
+                        "shapes": len(l.get("shapes", [])), "depth": len(anc), "open": l.get("open", True), "fx": more.has_fx(l),
+                        "count": len(self._subtree(l)) - 1 if l["kind"] == "group" else 0, "filters": len(l.get("sfilters") or [])})
         return out
 
     @Property("QVariantMap", notify=changed)
@@ -167,7 +179,9 @@ class Easel(QObject):
             params["curves"] = dict(ez.ADJUST_DEFAULTS["curves"]["curves"], **((l.get("params") or {}).get("curves") or {}))
         return {"id": l["id"], "name": l["name"], "kind": l["kind"], "opacity": l["opacity"], "blend": l["blend"], "locked": l["locked"],
                 "hasMask": l.get("mask") is not None, "adjust": l.get("adjust", ""), "params": params,
-                "paramList": [{"id": k, "name": n} for k, n in ez.ADJUST_PARAMS.get(l.get("adjust", ""), [])]}
+                "paramList": [{"id": k, "name": n} for k, n in ez.ADJUST_PARAMS.get(l.get("adjust", ""), [])],
+                "fx": more.has_fx(l), "inGroup": bool(l.get("group")),
+                "sfilters": [{"name": ez.FILTERS.get(f["name"], f["name"]), "on": f.get("on", True), "amount": f.get("amount", 0.4)} for f in l.get("sfilters") or []]}
 
     @Property("QVariantMap", notify=changed)
     def picked(self):
@@ -244,7 +258,8 @@ class Easel(QObject):
             return
         try:
             PREFS.parent.mkdir(parents=True, exist_ok=True)
-            PREFS.write_text(json.dumps({"recent": self._recent, "fg": self.fg, "bg": self.bg, "swatches": self._swatches}, indent=1), encoding="utf-8")
+            PREFS.write_text(json.dumps({"recent": self._recent, "fg": self.fg, "bg": self.bg, "swatches": self._swatches, "snap": self.snap,
+                                         "rulers": self.rulers}, indent=1), encoding="utf-8")
         except OSError:
             pass
 
@@ -431,7 +446,9 @@ class Easel(QObject):
                 out["nodes"] = shape["subs"][0]["nodes"]
         elif len(shapes) == 1 and shapes[0]["type"] == "path" and self.tool in ("pointer", "pen", "nodes"):
             out["nodes"] = [n for sub in shapes[0].get("subs", []) for n in sub["nodes"]]
-        if self._hover is not None and self.tool in ("brush", "eraser", "clone", "heal") and self.doc:
+        out["guides"] = [dict(g) for g in self.doc.guides] if self.doc else []
+        out["guideLive"] = self._guide_live
+        if self._hover is not None and self.tool in ("brush", "eraser", "clone", "heal", "dodge", "smudge", "liquify") and self.doc:
             out["brush"] = (self._hover, self.brush["size"])
         out["xform"] = self._xform_handles() if self._xform else None
         out["source"] = None
@@ -608,8 +625,15 @@ class Easel(QObject):
 
     # ------------------------------------------------------------------ layers
     def _insert(self, layer: dict, above: str = None) -> None:
-        at = self.doc.index(above or self.doc.active)
+        ref = self.doc.layer(above or self.doc.active)
+        at = self.doc.index(ref["id"]) if ref else -1
+        if ref is not None and ref["kind"] == "group" and ref.get("open", True) and above is None:
+            layer["group"] = ref["id"]                                # a new layer on an open group goes in at its top
+            at -= 1
+        elif ref is not None:
+            layer["group"] = ref.get("group")
         self.doc.layers.insert(at + 1 if at >= 0 else len(self.doc.layers), layer)
+        self.doc.layers = more.normalize(self.doc.layers)
         self.doc.active = layer["id"]
         self.doc.touch()
 
@@ -681,24 +705,59 @@ class Easel(QObject):
 
     @Slot(str, int)
     def moveLayer(self, ident: str, delta: int) -> None:
-        """delta +1 moves it up (toward the top of the stack)."""
-        i = self.doc.index(ident) if self.doc else -1
-        j = i + delta
-        if i < 0 or not 0 <= j < len(self.doc.layers):
+        """delta +1 moves it up (toward the top of the stack), past the next layer or group beside it. At the top
+        (or bottom) of a group it steps out of the group; onto an open group it steps in."""
+        l = self.doc.layer(ident) if self.doc else None
+        if not l or self.doc.index(ident) < 0:
             return
-        self._push("Move layer")
-        self.doc.layers.insert(j, self.doc.layers.pop(i))
+        sibs = self._siblings(l)
+        k = next(i for i, x in enumerate(sibs) if x is l)
+        items = self._subtree(l)
+        if 0 <= k + delta < len(sibs):
+            nb = sibs[k + delta]
+            self._push("Move layer")
+            if nb["kind"] == "group" and nb.get("open", True):    # into the open group next to it, at its near end
+                inside = self._siblings_of_group(nb["id"])
+                if inside:
+                    (self._place_below if delta > 0 else self._place_above)(items, inside[0] if delta > 0 else inside[-1], nb["id"])
+                else:
+                    items[-1]["group"] = nb["id"]
+                    self.doc.layers = more.normalize(self.doc.layers)
+            else:
+                (self._place_above if delta > 0 else self._place_below)(items, nb, l.get("group"))
+        elif l.get("group"):                                       # out of the group, beside it
+            g = self.doc.layer(l["group"])
+            self._push("Move layer")
+            (self._place_above if delta > 0 else self._place_below)(items, g, g.get("group"))
+        else:
+            return
         self.doc.touch()
         self._refresh()
 
+    def _siblings_of_group(self, gid: str) -> list:
+        return [x for x in self.doc.layers if x.get("group") == gid]
+
     @Slot(str, str)
     def dropLayer(self, ident: str, onto: str) -> None:
-        """Drag a layer in the list onto another: it takes that one's place."""
-        i, j = self.doc.index(ident), self.doc.index(onto)
-        if i < 0 or j < 0 or i == j:
+        """Drag a layer in the list onto another: it takes that one's place (in its group). Dropped on a group,
+        it goes in at the top."""
+        l, t = (self.doc.layer(ident), self.doc.layer(onto)) if self.doc else (None, None)
+        if not l or not t or l is t or self.doc.index(ident) < 0 or self.doc.index(onto) < 0:
             return
+        if l["kind"] == "group" and (t["id"] == l["id"] or l["id"] in more.ancestors(self.doc.layers, t)):
+            return                                                 # not into itself
         self._push("Move layer")
-        self.doc.layers.insert(j, self.doc.layers.pop(i))
+        items = self._subtree(l)
+        if t["kind"] == "group":
+            inside = self._siblings_of_group(t["id"])
+            if inside:
+                self._place_above(items, inside[-1], t["id"])
+            else:
+                items[-1]["group"] = t["id"]
+                self.doc.layers = more.normalize(self.doc.layers)
+            t["open"] = True
+        else:
+            (self._place_above if self.doc.index(ident) < self.doc.index(onto) else self._place_below)(items, t, t.get("group"))
         self.doc.touch()
         self._refresh()
 
@@ -708,13 +767,23 @@ class Easel(QObject):
             return
         self._push("Duplicate layer")
         src = self.doc.layer()
-        dup = ez.copy_layer(src)
-        dup["id"] = os.urandom(5).hex()
-        dup["name"] = src["name"] + " copy"
-        if dup.get("shapes"):
-            for s in dup["shapes"]:
-                s["id"] = os.urandom(4).hex()
-        self._insert(dup, src["id"])
+        items = self._subtree(src)
+        ids = {x["id"]: os.urandom(5).hex() for x in items}
+        dups = []
+        for x in items:
+            dup = ez.copy_layer(x)
+            dup["id"] = ids[x["id"]]
+            dup["group"] = ids.get(x.get("group"), x.get("group"))
+            if dup.get("shapes"):
+                for sh in dup["shapes"]:
+                    sh["id"] = os.urandom(4).hex()
+            dups.append(dup)
+        dups[-1]["name"] = src["name"] + " copy"
+        at = self.doc.index(items[-1]["id"])
+        self.doc.layers[at + 1:at + 1] = dups
+        self.doc.layers = more.normalize(self.doc.layers)
+        self.doc.active = dups[-1]["id"]
+        self.doc.touch()
         self._refresh()
 
     @Slot()
@@ -722,10 +791,15 @@ class Easel(QObject):
         if not self.doc or len(self.doc.layers) <= 1:
             self.said.emit("A picture needs at least one layer.", True)
             return
-        self._push("Delete layer")
-        i = self.doc.index(self.doc.active)
-        self.doc.layers.pop(i)
-        self.doc.active = self.doc.layers[max(0, i - 1)]["id"]
+        items = self._subtree(self.doc.layer())
+        if len(items) >= len(self.doc.layers):
+            self.said.emit("A picture needs at least one layer.", True)
+            return
+        self._push("Delete layer" if len(items) == 1 else "Delete group")
+        first = self.doc.index(items[0]["id"])
+        gone = {x["id"] for x in items}
+        self.doc.layers = [x for x in self.doc.layers if x["id"] not in gone]
+        self.doc.active = self.doc.layers[max(0, min(first, len(self.doc.layers)) - 1)]["id"]
         self._picked = []
         self.doc.touch()
         self._refresh()
@@ -737,7 +811,26 @@ class Easel(QObject):
     @Slot()
     def rasterize(self) -> None:
         l = self.doc.layer() if self.doc else None
-        if not l or l["kind"] != "vector":
+        if not l or l["kind"] not in ("vector", "smart", "group"):
+            return
+        if l["kind"] == "group":                                       # a group becomes one picture, as it shows
+            self._push("Merge group")
+            img = self.doc.group_image(dict(l, mask=None))
+            gone = {x["id"] for x in self._subtree(l) if x is not l}
+            self.doc.layers = [x for x in self.doc.layers if x["id"] not in gone]
+            l.update(kind="pixel", image=QImage(img))
+            l.pop("open", None)
+            self.doc.touch(l)
+            self._refresh()
+            return
+        if l["kind"] == "smart":
+            self._push("Rasterise")
+            img = self.doc.layer_image(dict(l, mask=None))
+            for key in ("source", "place", "sfilters"):
+                l.pop(key, None)
+            l.update(kind="pixel", image=QImage(img))
+            self.doc.touch(l)
+            self._refresh()
             return
         self._push("Rasterise")
         img = self.doc.layer_image(dict(l, mask=None))
@@ -756,11 +849,17 @@ class Easel(QObject):
             self.said.emit("There's no layer below to merge into.", True)
             return
         top, below = self.doc.layers[i], self.doc.layers[i - 1]
+        if top["kind"] == "group":
+            self.rasterize()
+            return
         if top["kind"] == "adjust" or below["kind"] == "adjust":
             self.said.emit("Adjustment layers can't be merged; flatten the picture instead.", True)
             return
+        if below["kind"] == "group" or below.get("group") != top.get("group"):
+            self.said.emit("The layer below is in another group: move it next to the one to merge with.", True)
+            return
         self._push("Merge down")
-        base = QImage(self.doc.layer_image(below)) if below["visible"] else ez.new_image(self.doc.w, self.doc.h)
+        base = QImage(self.doc.styled_image(below)) if below["visible"] else ez.new_image(self.doc.w, self.doc.h)
         if below.get("opacity", 1) < 1:
             faded = ez.new_image(self.doc.w, self.doc.h)
             p = QPainter(faded)
@@ -772,10 +871,11 @@ class Easel(QObject):
             p = QPainter(base)
             p.setOpacity(top["opacity"])
             p.setCompositionMode(ez.BLENDS.get(top["blend"], ez.CM.CompositionMode_SourceOver))
-            p.drawImage(0, 0, self.doc.layer_image(top))
+            p.drawImage(0, 0, self.doc.styled_image(top))
             p.end()
         below.update(kind="pixel", image=base, mask=None, opacity=1.0, blend=below["blend"] if below["kind"] == "pixel" else "normal")
-        below.pop("shapes", None)
+        for key in ("shapes", "source", "place", "sfilters", "fx"):
+            below.pop(key, None)
         self.doc.layers.pop(i)
         self.doc.active = below["id"]
         self._picked = []
@@ -933,6 +1033,9 @@ class Easel(QObject):
             return l, "mask"
         if l["kind"] == "pixel":
             return l, "image"
+        if l["kind"] in ("group", "smart"):
+            self.said.emit("Pick a layer in the group to paint on." if l["kind"] == "group" else
+                           "A smart object keeps its original: rasterise it (Layer menu) to paint on it.", True)
         return None
 
     def _clip(self, img: QImage) -> QImage:
@@ -1019,8 +1122,12 @@ class Easel(QObject):
             tool = "picker"
         handler = getattr(self, f"_press_{tool}", None)
         if handler:
+            if tool in ("select", "ellipsesel", "rect", "ellipse", "line", "star", "crop", "gradient"):
+                pt = self._snap_point(pt)
             handler(pt, mods)
         self.painted.emit()
+
+    SNAPPING = ("select", "ellipsesel", "shape", "crop", "gradient")
 
     @Slot(float, float, int)
     def move(self, x: float, y: float, mods: int) -> None:
@@ -1028,7 +1135,10 @@ class Easel(QObject):
             return
         handler = getattr(self, f"_move_{self._drag['kind']}", None)
         if handler:
-            handler(QPointF(x, y), mods)
+            pt = QPointF(x, y)
+            if self._drag["kind"] in self.SNAPPING:
+                pt = self._snap_point(pt)
+            handler(pt, mods)
             self.painted.emit()
 
     @Slot(float, float, int)
@@ -1055,7 +1165,7 @@ class Easel(QObject):
         if text != self._cursor:
             self._cursor = text
             self.changed.emit()
-        if self.tool in ("brush", "eraser"):
+        if self.tool in ("brush", "eraser", "dodge", "smudge", "liquify"):
             self.painted.emit()
 
     @Slot(float, float)
@@ -1083,7 +1193,7 @@ class Easel(QObject):
         target = self._target()
         if target is None:
             l = self.doc.layer()
-            if not l["locked"]:
+            if not l["locked"] and l["kind"] not in ("group", "smart"):
                 self.said.emit("Brushes paint on pixel layers. Pick one, or add one with + in Layers.", True)
             return
         layer, which = target
@@ -1284,8 +1394,18 @@ class Easel(QObject):
         l = self.doc.layer()
         if l["locked"] or l["kind"] == "adjust":
             return
+        k = self.guide_at(pt.x(), pt.y(), 5 / max(0.05, self.zoom)) if self.doc.guides else -1
+        if k >= 0:                                                    # the Move tool drags guides too
+            self._drag = {"kind": "guide", "k": k, "axis": self.doc.guides[k]["axis"]}
+            return
         self._push("Move")
-        d = {"kind": "move", "start": pt, "dx": 0.0, "dy": 0.0, "layer": l}
+        d = {"kind": "move", "start": pt, "dx": 0.0, "dy": 0.0, "layer": l, "box": self._content_box(l) if self.snap else None}
+        if l["kind"] in ("group", "smart"):
+            d["members"] = [x for x in self._subtree(l) if x["kind"] in ("pixel", "vector", "smart")]
+            d["orig"] = {x["id"]: (QImage(x["image"]) if x["kind"] == "pixel" else json.loads(json.dumps(x.get("shapes") or x.get("place"))))
+                         for x in d["members"]}
+            self._drag = d
+            return
         if l["kind"] == "pixel" and self.doc.selection is not None:   # lift what's selected off the layer
             sel = self.doc.selection
             floating = self._clip(l["image"])
@@ -1305,7 +1425,26 @@ class Easel(QObject):
                 d["dy"] = 0
             else:
                 d["dx"] = 0
+        elif d.get("box") is not None and "floating" not in d:
+            d["dx"], d["dy"] = self._snap_box(d["box"], d["dx"], d["dy"])
         l = d["layer"]
+        if "members" in d:                                            # a group (everything in it) or a smart object
+            for x in d["members"]:
+                o = d["orig"][x["id"]]
+                if x["kind"] == "pixel":
+                    out = ez.new_image(self.doc.w, self.doc.h)
+                    p = QPainter(out)
+                    p.drawImage(QPointF(d["dx"], d["dy"]), o)
+                    p.end()
+                    x["image"] = out
+                elif x["kind"] == "smart":
+                    x["place"] = dict(o, cx=o["cx"] + d["dx"], cy=o["cy"] + d["dy"])
+                else:
+                    x["shapes"] = json.loads(json.dumps(o))
+                    for sh in x["shapes"]:
+                        ez.move_shape(sh, d["dx"], d["dy"])
+                self.doc.touch(x)
+            return
         if l["kind"] == "pixel":
             self._live = (l["id"], lambda img, d=d: self._shifted(d))
         else:
@@ -1315,6 +1454,21 @@ class Easel(QObject):
             for s in l["shapes"]:
                 ez.move_shape(s, d["dx"], d["dy"])
             self.doc.touch(l)
+
+    def _move_guide(self, pt: QPointF, mods: int) -> None:
+        d = self._drag
+        d["at"] = pt.x() if d["axis"] == "x" else pt.y()
+        self.set_guide_live((d["axis"], d["at"], d["k"]))
+
+    def _release_guide(self, pt: QPointF, mods: int) -> None:
+        d = self._drag
+        at = pt.x() if d["axis"] == "x" else pt.y()
+        size = self.doc.w if d["axis"] == "x" else self.doc.h
+        if at < -4 or at > size + 4:                                  # dragged off the picture: gone
+            self.removeGuide(d["k"])
+        elif "at" in d:
+            self.moveGuide(d["k"], at)
+        self._guide_live = None
 
     def _shifted(self, d: dict) -> QImage:
         l = d["layer"]
@@ -1328,6 +1482,11 @@ class Easel(QObject):
         d = self._drag
         if abs(d["dx"]) < 0.5 and abs(d["dy"]) < 0.5:
             self._undo.pop()
+            return
+        if "members" in d:
+            for x in d["members"]:
+                self.doc.touch(x)
+            self.doc.touch(d["layer"])
             return
         l = d["layer"]
         if l["kind"] == "pixel":
@@ -1390,7 +1549,12 @@ class Easel(QObject):
                 l[key] = out
             for s in l.get("shapes", []):
                 ez.move_shape(s, -rect.x(), -rect.y())
+            if l.get("place"):
+                l["place"]["cx"] -= rect.x()
+                l["place"]["cy"] -= rect.y()
             l["v"] = l.get("v", 0) + 1
+        for g in self.doc.guides:
+            g["at"] -= rect.x() if g["axis"] == "x" else rect.y()
         self.doc.w, self.doc.h = w, h
         self.doc.selection = None
         self._selection_changed()
@@ -1422,7 +1586,12 @@ class Easel(QObject):
                 ez.scale_shape(s, QRectF(0, 0, self.doc.w, self.doc.h), QRectF(0, 0, w, h))
                 if s.get("width"):
                     s["width"] = s["width"] * (sx + sy) / 2
+            if l.get("place"):
+                pl = l["place"]
+                pl.update(cx=pl["cx"] * sx, cy=pl["cy"] * sy, sx=pl["sx"] * sx, sy=pl["sy"] * sy)
             l["v"] = l.get("v", 0) + 1
+        for g in self.doc.guides:
+            g["at"] *= sx if g["axis"] == "x" else sy
         self.doc.w, self.doc.h = int(w), int(h)
         self.doc.selection = None
         self._selection_changed()
@@ -1466,7 +1635,17 @@ class Easel(QObject):
                                             {"x": t.map(QPointF(s["x2"], s["y2"])).x(), "y": t.map(QPointF(s["x2"], s["y2"])).y()}], "closed": False}]})
             if "shapes" in l:
                 l["shapes"] = new
+            if l.get("place"):
+                pl = l["place"]
+                c = t.map(QPointF(pl["cx"], pl["cy"]))
+                pl["cx"], pl["cy"] = c.x(), c.y()
+                if how in ("cw", "ccw", "180"):
+                    pl["rot"] = (pl.get("rot", 0) + {"cw": 90, "ccw": -90, "180": 180}[how]) % 360
+                else:
+                    pl["flipx" if how == "fliph" else "flipy"] = not pl.get("flipx" if how == "fliph" else "flipy")
+                    pl["rot"] = -pl.get("rot", 0) % 360
             l["v"] = l.get("v", 0) + 1
+        self.doc.guides = []
         self.doc.w, self.doc.h = nw, nh
         self.doc.selection = None
         self._selection_changed()
@@ -1625,6 +1804,13 @@ class Easel(QObject):
 
     @Slot(str, float)
     def applyFilter(self, name: str, amount: float) -> None:
+        l = self.doc.layer() if self.doc else None
+        if l and l["kind"] == "smart" and name in ez.FILTERS and not l["locked"]:
+            self._push(ez.FILTERS[name])                               # a smart filter: kept, and can be changed or taken away
+            l.setdefault("sfilters", []).append({"name": name, "amount": max(0.0, min(1.0, float(amount))), "on": True})
+            self.doc.touch(l)
+            self._refresh()
+            return
         target = self._target() if self.doc else None
         if target is None or name not in ez.FILTERS:
             if self.doc and self.doc.layer()["kind"] == "vector":
@@ -1828,6 +2014,13 @@ class Easel(QObject):
                 dy = 0
             else:
                 dx = 0
+        if self.snap and not mods & SHIFT:
+            if "box" not in d:
+                boxes = [ez.shape_bounds(o) for o in d["orig"].values()]
+                d["box"] = boxes[0] if boxes else None
+                for b in boxes[1:]:
+                    d["box"] = d["box"].united(b)
+            dx, dy = self._snap_box(d["box"], dx, dy)
         d["moved"] = d["moved"] or abs(dx) + abs(dy) > 0.5
         for s in self._picked_shapes():
             o = d["orig"].get(s["id"])
@@ -2159,6 +2352,15 @@ class Easel(QObject):
 
     def _begin_transform(self) -> bool:
         l = self.doc.layer()
+        if l["kind"] == "smart" and not l["locked"]:
+            self._push("Transform")
+            pl = l["place"]
+            self._xform = {"layer": l, "floating": l["source"], "rest": ez.new_image(self.doc.w, self.doc.h), "smart": True, "sel": None,
+                           "cx": pl["cx"], "cy": pl["cy"], "sx": pl["sx"], "sy": pl["sy"], "rot": pl.get("rot", 0.0),
+                           "flipx": bool(pl.get("flipx")), "flipy": bool(pl.get("flipy"))}
+            self._live = (l["id"], lambda img: self._xform_image())
+            self.changed.emit()
+            return True
         if l["kind"] != "pixel" or l["locked"]:
             self.said.emit("Free transform works on pixel layers; shapes have their own handles with Select.", True)
             return False
@@ -2200,6 +2402,12 @@ class Easel(QObject):
     def applyTransform(self) -> None:
         x = self._xform
         if x is None:
+            return
+        if x.get("smart"):
+            x["layer"]["place"] = {k: x[k] for k in ("cx", "cy", "sx", "sy", "rot", "flipx", "flipy")}
+            self._xform, self._live = None, None
+            self.doc.touch(x["layer"])
+            self._refresh()
             return
         x["layer"]["image"] = self._xform_image()
         if x["sel"] is not None:                                     # the selection keeps its new shape too
@@ -2255,7 +2463,11 @@ class Easel(QObject):
         o = d["orig"]
         w, h = x["floating"].width(), x["floating"].height()
         if d["what"] == "move":
-            x["cx"], x["cy"] = o["cx"] + pt.x() - d["start"].x(), o["cy"] + pt.y() - d["start"].y()
+            dx, dy = pt.x() - d["start"].x(), pt.y() - d["start"].y()
+            if self.snap and not mods & SHIFT:
+                bw, bh = abs(w * o["sx"]), abs(h * o["sy"])
+                dx, dy = self._snap_box(QRectF(o["cx"] - bw / 2, o["cy"] - bh / 2, bw, bh), dx, dy)
+            x["cx"], x["cy"] = o["cx"] + dx, o["cy"] + dy
         elif d["what"] == "rot":
             a0 = math.atan2(d["start"].y() - o["cy"], d["start"].x() - o["cx"])
             a1 = math.atan2(pt.y() - o["cy"], pt.x() - o["cx"])
@@ -2591,6 +2803,458 @@ class Easel(QObject):
         return [float(lut[int(i * 255 / 63)]) for i in range(64)]
 
 
+    # ================================================================== round four
+    # ------------------------------------------------------------------ layer groups
+    def _siblings(self, layer: dict) -> list:
+        g = layer.get("group")
+        return [l for l in self.doc.layers if l.get("group") == g]
+
+    def _subtree(self, layer: dict) -> list:
+        """A layer, or a group with everything in it, in list order."""
+        if layer["kind"] != "group":
+            return [layer]
+        a, b = more.span(self.doc.layers, layer["id"])
+        return self.doc.layers[a:b + 1]
+
+    def _place_above(self, items: list, ref: dict, group) -> None:
+        """Take items out and put them just above ref (a layer, or a whole group), in `group`."""
+        ids = {l["id"] for l in items}
+        rest = [l for l in self.doc.layers if l["id"] not in ids]
+        top = more.span(rest, ref["id"])[1] if ref["kind"] == "group" else next(i for i, l in enumerate(rest) if l["id"] == ref["id"])
+        items[-1]["group"] = group
+        self.doc.layers = more.normalize(rest[:top + 1] + items + rest[top + 1:])
+
+    def _place_below(self, items: list, ref: dict, group) -> None:
+        ids = {l["id"] for l in items}
+        rest = [l for l in self.doc.layers if l["id"] not in ids]
+        first = more.span(rest, ref["id"])[0] if ref["kind"] == "group" else next(i for i, l in enumerate(rest) if l["id"] == ref["id"])
+        items[-1]["group"] = group
+        self.doc.layers = more.normalize(rest[:first] + items + rest[first:])
+
+    @Slot()
+    def groupLayer(self) -> None:
+        """Ctrl+G: put the active layer (or group) in a new group of its own, where it was."""
+        if not self.doc:
+            return
+        l = self.doc.layer()
+        self._push("Group")
+        g = ez.new_layer("group", f"Group {self._count('group')}")
+        g["group"] = l.get("group")
+        items = self._subtree(l)
+        at = self.doc.index(items[-1]["id"])
+        self.doc.layers.insert(at + 1, g)
+        l["group"] = g["id"]
+        self.doc.layers = more.normalize(self.doc.layers)
+        self.doc.active = g["id"]
+        self.doc.touch()
+        self._refresh()
+
+    @Slot()
+    def ungroup(self) -> None:
+        """Ctrl+Shift+G: the group goes; what was in it stays where it was."""
+        l = self.doc.layer() if self.doc else None
+        if not l or l["kind"] != "group":
+            return
+        self._push("Ungroup")
+        for x in self.doc.layers:
+            if x.get("group") == l["id"]:
+                x["group"] = l.get("group")
+        kids = [x for x in self._subtree(l) if x is not l]
+        self.doc.layers = more.normalize([x for x in self.doc.layers if x is not l])
+        self.doc.active = kids[-1]["id"] if kids else self.doc.layers[-1]["id"]
+        self.doc.touch()
+        self._refresh()
+
+    @Slot(str)
+    def toggleOpen(self, ident: str) -> None:
+        l = self.doc.layer(ident) if self.doc else None
+        if l and l["kind"] == "group":
+            l["open"] = not l.get("open", True)
+            self.changed.emit()
+
+    # ------------------------------------------------------------------ layer styles
+    @Slot()
+    def markFx(self) -> None:
+        if self.doc:
+            self._push("Layer style")
+
+    @Slot(str, str, "QVariant")
+    def setFx(self, key: str, prop: str, value) -> None:
+        """One setting of one style of the active layer (call markFx first for one undo step per change)."""
+        l = self.doc.layer() if self.doc else None
+        if not l or key not in more.STYLES or l["kind"] == "adjust":
+            return
+        if hasattr(value, "toVariant"):
+            value = value.toVariant()
+        cur = more.STYLES[key]
+        if prop not in cur or prop == "name":
+            return
+        if prop == "colour":
+            value = _hex(QColor(value))
+        elif prop == "on":
+            value = bool(value)
+        elif prop == "where":
+            value = value if value in ("outside", "inside", "centre") else "outside"
+        else:
+            value = float(value)
+        import time as _time
+        mark = (l["id"], key, prop)
+        last = getattr(self, "_fx_mark", None)
+        if not last or last[0] != mark or _time.monotonic() - last[1] > 1.5 or prop in ("on", "where", "colour"):
+            self._push("Layer style")                               # one undo step for a whole drag of one slider
+        self._fx_mark = (mark, _time.monotonic())
+        fx = l.setdefault("fx", {})
+        st = fx.setdefault(key, {})
+        st[prop] = value
+        if prop != "on" and not st.get("on"):
+            st["on"] = True                                     # changing a style's setting turns it on
+        self.doc.touch(l)
+        self._refresh()
+
+    @Slot()
+    def clearFx(self) -> None:
+        l = self.doc.layer() if self.doc else None
+        if l and l.get("fx"):
+            self._push("Clear styles")
+            l.pop("fx", None)
+            self.doc.touch(l)
+            self._refresh()
+
+    @Property("QVariantMap", notify=changed)
+    def styles(self):
+        if not self.doc:
+            return {}
+        l = self.doc.layer()
+        return {k: dict(more.style_of(l, k), name=v["name"]) for k, v in more.STYLES.items()}
+
+    # ------------------------------------------------------------------ smart objects
+    @Slot()
+    def convertToSmart(self) -> None:
+        """The active pixel or shape layer becomes a smart object: its pixels kept as they are, so it can be made
+        smaller and bigger again, turned and filtered without losing anything."""
+        l = self.doc.layer() if self.doc else None
+        if not l or l["kind"] not in ("pixel", "vector"):
+            self.said.emit("Pixel and shape layers can become smart objects.", True)
+            return
+        img = self.doc.layer_image(dict(l, mask=None))
+        a = ez.alpha_of(img)
+        ys, xs = np.nonzero(a > 0)
+        if not len(xs):
+            self.said.emit("There's nothing on that layer yet.", True)
+            return
+        self._push("Smart object")
+        box = QRect(int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+        src = img.copy(box)
+        l.pop("image", None)
+        l.pop("shapes", None)
+        l.update(kind="smart", source=src, place=more.smart_place(src, box.x(), box.y()), sfilters=[])
+        self._picked = []
+        self.doc.touch(l)
+        self._refresh()
+
+    @Slot(str)
+    def placeFile(self, path: str) -> None:
+        """Bring a picture in as a smart object, fitted inside the canvas."""
+        if not self.doc:
+            return
+        img = QImage(path)
+        if img.isNull():
+            self.said.emit("That picture couldn't be read.", True)
+            return
+        img = img.convertToFormat(ez.FMT)
+        self._push("Place")
+        l = ez.new_layer("pixel", Path(path).stem, 1, 1)
+        l.pop("image", None)
+        k = min(1.0, self.doc.w * 0.8 / img.width(), self.doc.h * 0.8 / img.height())
+        place = more.smart_place(img, (self.doc.w - img.width()) / 2, (self.doc.h - img.height()) / 2)
+        place.update(sx=k, sy=k)
+        l.update(kind="smart", source=img, place=place, sfilters=[])
+        self._insert(l)
+        self._refresh()
+
+    @Slot(int)
+    def toggleSmartFilter(self, k: int) -> None:
+        l = self.doc.layer() if self.doc else None
+        if l and l["kind"] == "smart" and 0 <= k < len(l.get("sfilters") or []):
+            self._push("Smart filter")
+            l["sfilters"][k]["on"] = not l["sfilters"][k].get("on", True)
+            self.doc.touch(l)
+            self._refresh()
+
+    @Slot(int)
+    def removeSmartFilter(self, k: int) -> None:
+        l = self.doc.layer() if self.doc else None
+        if l and l["kind"] == "smart" and 0 <= k < len(l.get("sfilters") or []):
+            self._push("Remove filter")
+            l["sfilters"].pop(k)
+            self.doc.touch(l)
+            self._refresh()
+
+    @Slot(int, float)
+    def setSmartFilter(self, k: int, amount: float) -> None:
+        l = self.doc.layer() if self.doc else None
+        if l and l["kind"] == "smart" and 0 <= k < len(l.get("sfilters") or []):
+            l["sfilters"][k]["amount"] = max(0.0, min(1.0, float(amount)))
+            self.doc.touch(l)
+            self._refresh()
+
+    # ------------------------------------------------------------------ the effect brushes and liquify
+    @Slot(str, "QVariant")
+    def setRetouch(self, key: str, value) -> None:
+        if key == "mode" and value in ("dodge", "burn", "sponge", "soften", "sharpen"):
+            self.retouch = value
+        elif key == "range" and value in ("shadows", "mid", "highlights"):
+            self.retouch_range = value
+        elif key == "strength":
+            self.retouch_strength = max(0.02, min(1.0, float(value)))
+        elif key == "liquify" and value in more.LIQUIFY:
+            self.liquify_mode = value
+        elif key == "liquifyStrength":
+            self.liquify_strength = max(0.05, min(1.0, float(value)))
+        elif key == "smudge":
+            self.smudge_strength = max(0.05, min(1.0, float(value)))
+        self.changed.emit()
+
+    def _pixels_target(self, what: str):
+        target = self._target()
+        if target is None or target[1] != "image":
+            l = self.doc.layer()
+            if not l["locked"] and l["kind"] not in ("group", "smart"):
+                self.said.emit(f"The {what} works on pixel layers. Pick one (or rasterise this one).", True)
+            return None
+        return target[0]
+
+    def _press_dodge(self, pt: QPointF, mods: int) -> None:
+        layer = self._pixels_target(TOOL_NAMES["dodge"].lower())
+        if layer is None:
+            return
+        self._push({"dodge": "Dodge", "burn": "Burn", "sponge": "Sponge", "soften": "Soften", "sharpen": "Sharpen"}[self.retouch])
+        stroke = ez.new_image(self.doc.w, self.doc.h)
+        painter = QPainter(stroke)
+        painter.setOpacity(self.brush["flow"])
+        base = layer["image"]
+        effect = more.effect_of(base, self.retouch, self.retouch_strength, self.retouch_range)
+        d = {"kind": "dodge", "layer": layer, "which": "image", "stroke": stroke, "painter": painter, "erase": False, "dab": self._dab_image(True),
+             "last": (pt.x(), pt.y()), "carry": 0.0, "base": base, "effect": effect}
+        self._stamp(d, pt.x(), pt.y())
+        self._drag = d
+        self._live = (layer["id"], lambda img, d=d: self._retouched(d))
+
+    def _retouched(self, d: dict) -> QImage:
+        out = d["base"].copy()
+        top = d["effect"].copy()
+        p = QPainter(top)
+        p.setCompositionMode(ez.CM.CompositionMode_DestinationIn)
+        p.drawImage(0, 0, self._clip(d["stroke"]))
+        p.end()
+        p = QPainter(out)
+        p.setCompositionMode(ez.CM.CompositionMode_SourceAtop)
+        p.drawImage(0, 0, top)
+        p.end()
+        return out
+
+    def _move_dodge(self, pt: QPointF, mods: int) -> None:
+        self._stroke_to(self._drag, pt.x(), pt.y())
+
+    def _release_dodge(self, pt: QPointF, mods: int) -> None:
+        d = self._drag
+        self._stroke_to(d, pt.x(), pt.y())
+        d["painter"].end()
+        d["layer"]["image"] = more.blend_by(d["base"], d["effect"], d["stroke"], self.doc.selection)
+        self.doc.touch(d["layer"])
+
+    def _press_smudge(self, pt: QPointF, mods: int) -> None:
+        layer = self._pixels_target("smudge brush")
+        if layer is None:
+            return
+        self._push("Smudge")
+        arr = more._arr(layer["image"])
+        sel = (self.doc.selection_alpha().astype(np.float32) / 255) if self.doc.selection is not None else None
+        d = {"kind": "smudge", "layer": layer, "arr": arr, "spot": more.soft_spot(self.brush["size"] / 2, self.brush["hardness"]), "carried": None,
+             "last": (pt.x(), pt.y()), "sel": sel, "img": layer["image"]}
+        d["carried"] = more.smudge_dab(arr, None, pt.x(), pt.y(), d["spot"], self.smudge_strength, sel)
+        self._drag = d
+        self._live = (layer["id"], lambda img, d=d: d["img"])
+
+    def _move_smudge(self, pt: QPointF, mods: int) -> None:
+        d = self._drag
+        lx, ly = d["last"]
+        step = max(1.0, self.brush["size"] * 0.08)
+        dist = math.hypot(pt.x() - lx, pt.y() - ly)
+        n = int(dist // step)
+        for i in range(1, n + 1):
+            t = i * step / dist
+            d["carried"] = more.smudge_dab(d["arr"], d["carried"], lx + (pt.x() - lx) * t, ly + (pt.y() - ly) * t, d["spot"], self.smudge_strength, d["sel"])
+        if n:
+            d["last"] = (lx + (pt.x() - lx) * n * step / dist, ly + (pt.y() - ly) * n * step / dist)
+            d["img"] = more._img(d["arr"])
+
+    def _release_smudge(self, pt: QPointF, mods: int) -> None:
+        self._move_smudge(pt, mods)
+        d = self._drag
+        d["layer"]["image"] = more._img(d["arr"])
+        self.doc.touch(d["layer"])
+
+    def _press_liquify(self, pt: QPointF, mods: int) -> None:
+        layer = self._pixels_target("liquify brush")
+        if layer is None:
+            return
+        self._push("Liquify")
+        src = more._arr(layer["image"])
+        lq = getattr(self, "_lq", None)
+        if not lq or lq["layer"] is not layer or lq["shape"] != src.shape[:2] or lq.get("v") != layer.get("v"):
+            lq = {"layer": layer, "src": src, "dx": np.zeros(src.shape[:2], np.float32), "dy": np.zeros(src.shape[:2], np.float32), "shape": src.shape[:2]}
+            self._lq = lq                                           # strokes one after another warp the same original: restore can go all the way back
+        d = {"kind": "liquify", "layer": layer, "lq": lq, "out": lq.get("out", src.copy()), "last": (pt.x(), pt.y()), "img": layer["image"],
+             "sel": (self.doc.selection_alpha().astype(np.float32) / 255) if self.doc.selection is not None else None}
+        self._drag = d
+        self._liquify_at(d, pt.x(), pt.y(), 0.0, 0.0)
+        self._live = (layer["id"], lambda img, d=d: d["img"])
+
+    def _liquify_at(self, d: dict, x: float, y: float, vx: float, vy: float) -> None:
+        lq = d["lq"]
+        r = max(2.0, self.brush["size"] / 2)
+        if self.liquify_mode == "push" and abs(vx) + abs(vy) < 1e-6:
+            return
+        box = more.liquify_step(lq["dx"], lq["dy"], self.liquify_mode, x, y, vx, vy, r, self.liquify_strength)
+        if box is None:
+            return
+        x0, y0, x1, y1 = box                                       # what moved can pull from a little further
+        pad = int(r)
+        box = (max(0, x0 - pad), max(0, y0 - pad), min(lq["shape"][1], x1 + pad), min(lq["shape"][0], y1 + pad))
+        more.warp_region(lq["src"], lq["dx"], lq["dy"], box, d["out"])
+        if d["sel"] is not None:
+            bx0, by0, bx1, by1 = box
+            a = d["sel"][by0:by1, bx0:bx1, None]
+            d["out"][by0:by1, bx0:bx1] = lq["src"][by0:by1, bx0:bx1] * (1 - a) + d["out"][by0:by1, bx0:bx1] * a
+
+    def _move_liquify(self, pt: QPointF, mods: int) -> None:
+        d = self._drag
+        lx, ly = d["last"]
+        step = max(1.0, self.brush["size"] * 0.1)
+        dist = math.hypot(pt.x() - lx, pt.y() - ly)
+        n = max(1, int(dist // step)) if self.liquify_mode == "push" else 1
+        if self.liquify_mode == "push" and dist < 0.5:
+            return
+        for i in range(1, n + 1):
+            t = i / n
+            x, y = lx + (pt.x() - lx) * t, ly + (pt.y() - ly) * t
+            self._liquify_at(d, x, y, (pt.x() - lx) / n, (pt.y() - ly) / n)
+        d["last"] = (pt.x(), pt.y())
+        d["img"] = more._img(d["out"])
+
+    def _release_liquify(self, pt: QPointF, mods: int) -> None:
+        d = self._drag
+        if self.liquify_mode != "push":
+            self._liquify_at(d, pt.x(), pt.y(), 0, 0)
+        d["layer"]["image"] = more._img(d["out"])
+        self.doc.touch(d["layer"])
+        d["lq"]["out"], d["lq"]["v"] = d["out"], d["layer"].get("v")
+
+    # ------------------------------------------------------------------ guides, rulers and snapping
+    @Slot(str, float)
+    def addGuide(self, axis: str, at: float) -> None:
+        if not self.doc or axis not in ("x", "y"):
+            return
+        self._push("Guide")
+        self.doc.guides.append({"axis": axis, "at": round(float(at), 1)})
+        self._guide_live = None
+        self._refresh()
+
+    @Slot(int, float)
+    def moveGuide(self, k: int, at: float) -> None:
+        if self.doc and 0 <= k < len(self.doc.guides):
+            self._push("Move guide")
+            self.doc.guides[k]["at"] = round(float(at), 1)
+            self._guide_live = None
+            self._refresh()
+
+    @Slot(int)
+    def removeGuide(self, k: int) -> None:
+        if self.doc and 0 <= k < len(self.doc.guides):
+            self._push("Remove guide")
+            self.doc.guides.pop(k)
+            self._guide_live = None
+            self._refresh()
+
+    @Slot()
+    def clearGuides(self) -> None:
+        if self.doc and self.doc.guides:
+            self._push("Clear guides")
+            self.doc.guides = []
+            self._refresh()
+
+    def guide_at(self, x: float, y: float, slack: float) -> int:
+        best, bd = -1, slack
+        for k, g in enumerate(self.doc.guides if self.doc else []):
+            d = abs((x if g["axis"] == "x" else y) - g["at"])
+            if d <= bd:
+                best, bd = k, d
+        return best
+
+    def set_guide_live(self, live) -> None:
+        self._guide_live = live
+        self.painted.emit()
+
+    @Slot(bool)
+    def setSnap(self, on: bool) -> None:
+        self.snap = bool(on)
+        self._save_prefs()
+        self.changed.emit()
+
+    rulersToggled = Signal()
+
+    @Slot(bool)
+    def setRulers(self, on: bool) -> None:
+        self.rulers = bool(on)
+        self._save_prefs()
+        self.changed.emit()
+        self.rulersToggled.emit()
+        self.painted.emit()
+
+    def _snap_targets(self) -> tuple:
+        xs = [0.0, self.doc.w / 2, float(self.doc.w)] + [g["at"] for g in self.doc.guides if g["axis"] == "x"]
+        ys = [0.0, self.doc.h / 2, float(self.doc.h)] + [g["at"] for g in self.doc.guides if g["axis"] == "y"]
+        return xs, ys
+
+    def _snap_point(self, pt: QPointF) -> QPointF:
+        if not self.snap or not self.doc:
+            return pt
+        xs, ys = self._snap_targets()
+        within = 7 / max(0.05, self.zoom)
+        return QPointF(more.snap_value(pt.x(), xs, within)[0], more.snap_value(pt.y(), ys, within)[0])
+
+    def _snap_box(self, box: QRectF, dx: float, dy: float) -> tuple:
+        """A moving box's delta, nudged so an edge or its middle lands on a guide or the canvas's edges and middle."""
+        if not self.snap or box is None or box.isEmpty():
+            return dx, dy
+        xs, ys = self._snap_targets()
+        within = 7 / max(0.05, self.zoom)
+        sx, sy = more.snap_box(box.x() + dx, box.y() + dy, box.width(), box.height(), xs, ys, within)
+        return dx + sx, dy + sy
+
+    def _content_box(self, layer: dict) -> QRectF:
+        img = self.doc.layer_image(dict(layer, mask=None)) if layer["kind"] != "adjust" else None
+        if img is None:
+            return QRectF()
+        a = ez.alpha_of(img)
+        ys, xs = np.nonzero(a > 0)
+        if not len(xs):
+            return QRectF()
+        return QRectF(float(xs.min()), float(ys.min()), float(xs.max() - xs.min() + 1), float(ys.max() - ys.min() + 1))
+
+    guides = Property("QVariantList", lambda self: [dict(g) for g in self.doc.guides] if self.doc else [], notify=changed)
+    snapOn = Property(bool, lambda self: self.snap, notify=changed)
+    rulersOn = Property(bool, lambda self: self.rulers, notify=changed)
+    retouchMode = Property(str, lambda self: self.retouch, notify=changed)
+    retouchRange = Property(str, lambda self: self.retouch_range, notify=changed)
+    retouchStrength = Property(float, lambda self: self.retouch_strength, notify=changed)
+    liquifyMode = Property(str, lambda self: self.liquify_mode, notify=changed)
+    liquifyStrength = Property(float, lambda self: self.liquify_strength, notify=changed)
+    smudgeStrength = Property(float, lambda self: self.smudge_strength, notify=changed)
+    liquifyModes = Property("QVariantList", lambda self: [[k, v] for k, v in more.LIQUIFY.items()], constant=True)
+
+
 def zipfile_error():
     import zipfile
     return zipfile.BadZipFile
@@ -2680,6 +3344,7 @@ class EaselView(QQuickPaintedItem):
         if easel is not None:
             easel.painted.connect(self._repaint)
             easel.changed.connect(self._changed)
+            easel.rulersToggled.connect(lambda: self.fit() if not getattr(self, "_user_zoom", False) else self.update())
         self._fitted = False
         self._repaint()
         self.backendChanged.emit()
@@ -2735,6 +3400,8 @@ class EaselView(QQuickPaintedItem):
             return
         doc = self._easel.doc
         l, t, r, b = self._pads
+        if self._easel.rulers:                                        # room for the rulers too
+            l, t = l + self.RULER, t + self.RULER
         room_w, room_h = max(50, self.width() - l - r - 40), max(50, self.height() - t - b - 40)
         z = min(room_w / doc.w, room_h / doc.h, 1.0 if max(doc.w, doc.h) > 400 else 4.0)
         self._set_zoom(max(0.02, z), center=False)
@@ -2818,11 +3485,19 @@ class EaselView(QQuickPaintedItem):
             self._user_zoom = True
             self._set_zoom(self._zoom * (0.5 if self._mods(event) & ALT or event.button() == Qt.MouseButton.RightButton else 2.0), around=event.position())
             return
+        axis = self._in_ruler(event.position())
+        if axis and event.button() == Qt.MouseButton.LeftButton:     # pull a guide out of the ruler
+            self._ruler_drag = axis
+            return
         pt = self._doc_point(event.position())
         button = 2 if event.button() == Qt.MouseButton.RightButton else 1
         e.press(pt.x(), pt.y(), button, self._mods(event))
 
     def mouseMoveEvent(self, event):
+        if getattr(self, "_ruler_drag", ""):
+            pt = self._doc_point(event.position())
+            self._easel.set_guide_live((self._ruler_drag, pt.x() if self._ruler_drag == "x" else pt.y(), None))
+            return
         if self._pan is not None:
             start, ox, oy = self._pan
             self._ox, self._oy = ox + event.position().x() - start.x(), oy + event.position().y() - start.y()
@@ -2834,6 +3509,14 @@ class EaselView(QQuickPaintedItem):
             self._easel.hover(pt.x(), pt.y())
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, "_ruler_drag", ""):
+            axis, self._ruler_drag = self._ruler_drag, ""
+            if self._in_ruler(event.position()):
+                self._easel.set_guide_live(None)                      # let go over the ruler: no guide
+            else:
+                pt = self._doc_point(event.position())
+                self._easel.addGuide(axis, pt.x() if axis == "x" else pt.y())
+            return
         if self._pan is not None:
             self._pan = None
             self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor if self._space or (self._easel and self._easel.tool == "hand") else self._tool_cursor()))
@@ -3061,4 +3744,93 @@ class EaselView(QQuickPaintedItem):
             p.drawEllipse(q, r, r)
             p.setPen(QPen(QColor(255, 255, 255, 200), 1))
             p.drawEllipse(q, r + 1, r + 1)
+        self._paint_guides(p, ov, z)
         p.restore()
+        if e.rulers:
+            self._paint_rulers(p, z)
+
+    RULER = 20
+
+    def _paint_guides(self, p: QPainter, ov: dict, z: float) -> None:
+        live = ov.get("guideLive")
+        guides = [g for k, g in enumerate(ov.get("guides") or []) if not (live and live[2] == k)]
+        if live:
+            guides.append({"axis": live[0], "at": live[1], "live": True})
+        for g in guides:
+            pen = QPen(QColor("#00C8E8"), 1)
+            if g.get("live"):
+                pen.setDashPattern([5, 3])
+            p.setPen(pen)
+            left, top, right, bottom = self._pads                      # across the free area, not under the islands
+            if g["axis"] == "x":
+                x = self._ox + g["at"] * z
+                p.drawLine(QPointF(x, top), QPointF(x, self.height() - bottom))
+            else:
+                y = self._oy + g["at"] * z
+                p.drawLine(QPointF(left, y), QPointF(self.width() - right, y))
+
+    def _ruler_step(self, z: float) -> float:
+        for step in (1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000):
+            if step * z >= 60:
+                return step
+        return 10000
+
+    def _paint_rulers(self, p: QPainter, z: float) -> None:
+        """Along the top and left of the canvas's free area (clear of the islands): pixels, numbered."""
+        left, top, right, bottom = self._pads
+        R = self.RULER
+        p.save()
+        dark = QColor(20, 22, 27, 215)
+        p.fillRect(QRectF(left, top, self.width() - left - right, R), dark)
+        p.fillRect(QRectF(left, top, R, self.height() - top - bottom), dark)
+        step = self._ruler_step(z)
+        f = p.font()
+        f.setPixelSize(9)
+        p.setFont(f)
+        p.setPen(QPen(QColor(200, 205, 215), 1))
+        x_from, x_to = (left + R - self._ox) / z, (self.width() - right - self._ox) / z
+        k = math.floor(x_from / step) * step
+        while k <= x_to:
+            sx = self._ox + k * z
+            if sx >= left + R:
+                p.drawLine(QPointF(sx, top + R - 7), QPointF(sx, top + R))
+                p.drawText(QPointF(sx + 3, top + 10), str(int(k)))
+            for sub in range(1, 5):
+                tx = sx + sub * step * z / 5
+                if left + R <= tx <= self.width() - right:
+                    p.drawLine(QPointF(tx, top + R - 3), QPointF(tx, top + R))
+            k += step
+        y_from, y_to = (top + R - self._oy) / z, (self.height() - bottom - self._oy) / z
+        k = math.floor(y_from / step) * step
+        while k <= y_to:
+            sy = self._oy + k * z
+            if sy >= top + R:
+                p.drawLine(QPointF(left + R - 7, sy), QPointF(left + R, sy))
+                p.save()
+                p.translate(left + 10, sy + 3)
+                p.rotate(90)
+                p.drawText(QPointF(0, 0), str(int(k)))
+                p.restore()
+            for sub in range(1, 5):
+                ty = sy + sub * step * z / 5
+                if top + R <= ty <= self.height() - bottom:
+                    p.drawLine(QPointF(left + R - 3, ty), QPointF(left + R, ty))
+            k += step
+        hv = self._easel._hover if self._easel else None
+        if hv is not None:                                            # where the pointer is, on both rulers
+            p.setPen(QPen(QColor("#00C8E8"), 1))
+            p.drawLine(QPointF(self._ox + hv.x() * z, top), QPointF(self._ox + hv.x() * z, top + R))
+            p.drawLine(QPointF(left, self._oy + hv.y() * z), QPointF(left + R, self._oy + hv.y() * z))
+        p.restore()
+
+    def _in_ruler(self, pos) -> str:
+        """"y" over the top ruler (a guide across), "x" over the left one, "" elsewhere."""
+        e = self._easel
+        if not e or not e.rulers:
+            return ""
+        left, top, right, bottom = self._pads
+        if top <= pos.y() < top + self.RULER and pos.x() >= left:
+            return "y"
+        if left <= pos.x() < left + self.RULER and pos.y() >= top:
+            return "x"
+        return ""

@@ -714,6 +714,8 @@ def new_layer(kind: str, name: str, w: int = 0, h: int = 0, fill=None) -> dict:
     elif kind == "adjust":
         layer["adjust"] = "light"
         layer["params"] = {}
+    elif kind == "group":
+        layer["open"] = True
     return layer
 
 
@@ -722,6 +724,11 @@ def copy_layer(layer: dict) -> dict:
     out = dict(layer)
     if "image" in layer:
         out["image"] = QImage(layer["image"])
+    if layer.get("source") is not None:
+        out["source"] = QImage(layer["source"])
+    for key in ("fx", "place", "sfilters"):                     # nested settings: a copy, so undo keeps the old ones
+        if layer.get(key) is not None:
+            out[key] = json.loads(json.dumps(layer[key]))
     if layer.get("mask") is not None:
         out["mask"] = QImage(layer["mask"])
     if "shapes" in layer:
@@ -744,8 +751,10 @@ class Document:
         self.path = ""
         self.dpi = 72
         self.version = 0
+        self.guides = []                                        # [{"axis": "x" or "y", "at": pixels}]
         self._vector_cache = {}
         self._mask_cache = {}
+        self._fx_cache = {}
 
     # -------------------------------------------------------------- finding layers
     def layer(self, ident: str = None) -> dict:
@@ -784,9 +793,71 @@ class Document:
                 self._vector_cache[layer["id"]] = (key, canvas)
                 img = (key, canvas)
             img = img[1]
+        elif layer["kind"] == "smart":
+            key = (layer["id"], layer.get("v", 0), self.w, self.h)
+            img = self._vector_cache.get(layer["id"])
+            if img is None or img[0] != key:
+                import huginn_easel_more as more
+                img = (key, more.smart_render(layer, self.w, self.h, filter_array))
+                self._vector_cache[layer["id"]] = img
+            img = img[1]
+            if extra is not None:
+                img = extra(img)
+        elif layer["kind"] == "group":
+            return self.group_image(layer)
         else:
             return None
         return self._masked(layer, img)
+
+    def styled_image(self, layer: dict, extra=None) -> QImage:
+        """A layer as it shows: its picture with its styles (shadows, glows, outlines…), kept until it changes."""
+        import huginn_easel_more as more
+        img = self.layer_image(layer, extra)
+        if img is None or not more.has_fx(layer):
+            return img
+        if extra is not None:
+            return more.render_fx(img, layer)
+        key = (layer.get("v", 0), self.w, self.h, more.dumps(layer.get("fx")), self._inside_key(layer))
+        got = self._fx_cache.get(layer["id"])
+        if got is None or got[0] != key:
+            got = (key, more.render_fx(img, layer))
+            self._fx_cache[layer["id"]] = got
+        return got[1]
+
+    def _inside_key(self, layer: dict) -> tuple:
+        if layer["kind"] != "group":
+            return ()
+        import huginn_easel_more as more
+        a, b = more.span(self.layers, layer["id"])
+        return tuple((l["id"], l.get("v", 0), l["visible"], l["opacity"], l["blend"], more.dumps(l.get("fx"))) for l in self.layers[a:b])
+
+    def group_image(self, header: dict, live=None) -> QImage:
+        """A group's insides drawn on their own, then masked (its own blend and opacity are for where it goes)."""
+        import huginn_easel_more as more
+        sub = self._find(more.tree(self.layers), header["id"])
+        return self._masked(header, self._stack(sub or [], live))
+
+    def _find(self, items: list, gid: str):
+        for it in items:
+            if isinstance(it, tuple):
+                if it[1]["id"] == gid:
+                    return it[2]
+                got = self._find(it[2], gid)
+                if got is not None:
+                    return got
+        return None
+
+    def visible_in_place(self, layer: dict) -> bool:
+        """Shown: it and every group it's in."""
+        import huginn_easel_more as more
+        return layer["visible"] and all(self.layer(g)["visible"] for g in more.ancestors(self.layers, layer))
+
+    def opacity_in_place(self, layer: dict) -> float:
+        import huginn_easel_more as more
+        o = layer["opacity"]
+        for g in more.ancestors(self.layers, layer):
+            o *= self.layer(g)["opacity"]
+        return o
 
     def _masked(self, layer: dict, img: QImage) -> QImage:
         if layer.get("mask") is None or not layer.get("maskOn", True):
@@ -799,11 +870,39 @@ class Document:
         return out
 
     def composite(self, live=None, upto: int = None) -> QImage:
-        """Every visible layer, bottom up. `live` = (layer id, function(image) → image) shows a stroke in progress."""
+        """Every visible layer, bottom up. `live` = (layer id, function(image) → image) shows a stroke in progress.
+        A group's insides are drawn on their own and then go onto what's under the group, with its blend,
+        opacity, mask and styles."""
+        import huginn_easel_more as more
+        layers = self.layers if upto is None else self.layers[:upto]
+        return self._stack(more.tree(layers), live)
+
+    def _stack(self, items: list, live=None) -> QImage:
         out = new_image(self.w, self.h)
-        for i, layer in enumerate(self.layers):
-            if upto is not None and i >= upto:
-                break
+        for it in items:
+            if isinstance(it, tuple):
+                header, inside = it[1], it[2]
+                if not header["visible"]:
+                    continue
+                img = self._masked(header, self._stack(inside, live))
+                import huginn_easel_more as more
+                if more.has_fx(header):
+                    key = (header.get("v", 0), self.w, self.h, more.dumps(header.get("fx")), self._inside_key(header))
+                    got = self._fx_cache.get(header["id"])
+                    if live is not None and any(l["id"] == live[0] for l in more.flatten_tree(inside)):
+                        img = more.render_fx(img, header)
+                    else:
+                        if got is None or got[0] != key:
+                            got = (key, more.render_fx(img, header))
+                            self._fx_cache[header["id"]] = got
+                        img = got[1]
+                p = QPainter(out)
+                p.setOpacity(header["opacity"])
+                p.setCompositionMode(BLENDS.get(header["blend"], CM.CompositionMode_SourceOver))
+                p.drawImage(0, 0, img)
+                p.end()
+                continue
+            layer = it
             if not layer["visible"]:
                 continue
             extra = live[1] if live and live[0] == layer["id"] else None
@@ -816,7 +915,7 @@ class Document:
                 p.drawImage(0, 0, adjusted)
                 p.end()
                 continue
-            img = self.layer_image(layer, extra)
+            img = self.styled_image(layer, extra)
             p = QPainter(out)
             p.setOpacity(layer["opacity"])
             p.setCompositionMode(BLENDS.get(layer["blend"], CM.CompositionMode_SourceOver))
@@ -837,7 +936,7 @@ class Document:
     # -------------------------------------------------------------- the whole document as data (for undo)
     def snapshot(self) -> dict:
         return {"w": self.w, "h": self.h, "layers": [copy_layer(l) for l in self.layers], "active": self.active,
-                "selection": QImage(self.selection) if self.selection is not None else None}
+                "selection": QImage(self.selection) if self.selection is not None else None, "guides": [dict(g) for g in self.guides]}
 
     def restore(self, snap: dict) -> None:
         self.w, self.h = snap["w"], snap["h"]
@@ -846,6 +945,7 @@ class Document:
             l["v"] = l.get("v", 0) + 1000                        # vector pictures are drawn afresh
         self.active = snap["active"] if any(l["id"] == snap["active"] for l in self.layers) else self.layers[-1]["id"]
         self.selection = QImage(snap["selection"]) if snap["selection"] is not None else None
+        self.guides = [dict(g) for g in snap.get("guides", self.guides)]
         self.touch()
 
     # -------------------------------------------------------------- the selection
@@ -884,9 +984,13 @@ class Document:
 
     # -------------------------------------------------------------- reading and writing
     def manifest(self) -> dict:
-        out = {"format": "huginn-easel", "version": 1, "w": self.w, "h": self.h, "dpi": self.dpi, "active": self.active, "layers": []}
+        out = {"format": "huginn-easel", "version": 1, "w": self.w, "h": self.h, "dpi": self.dpi, "active": self.active, "layers": [],
+               "guides": self.guides}
         for l in self.layers:
             entry = {k: l[k] for k in ("id", "name", "kind", "visible", "locked", "opacity", "blend", "maskOn")}
+            for k in ("group", "open", "fx", "place", "sfilters"):
+                if l.get(k) is not None:
+                    entry[k] = l[k]
             if l["kind"] == "vector":
                 entry["shapes"] = l["shapes"]
             if l["kind"] == "adjust":
@@ -903,6 +1007,8 @@ class Document:
             for l in self.layers:
                 if l["kind"] == "pixel":
                     z.writestr(f"layers/{l['id']}.png", png_bytes(l["image"]), compress_type=zipfile.ZIP_STORED)
+                if l["kind"] == "smart":
+                    z.writestr(f"smart/{l['id']}.png", png_bytes(l["source"]), compress_type=zipfile.ZIP_STORED)
                 if l.get("mask") is not None:
                     z.writestr(f"masks/{l['id']}.png", png_bytes(l["mask"]), compress_type=zipfile.ZIP_STORED)
             thumb = self.flattened().scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -921,7 +1027,10 @@ class Document:
             names = set(z.namelist())
             for e in m["layers"]:
                 layer = new_layer(e["kind"], e.get("name", "Layer"), doc.w, doc.h)
-                layer.update({k: e[k] for k in ("id", "visible", "locked", "opacity", "blend", "maskOn") if k in e})
+                layer.update({k: e[k] for k in ("id", "visible", "locked", "opacity", "blend", "maskOn", "group", "open", "fx", "place", "sfilters") if k in e})
+                if e["kind"] == "smart":
+                    layer["source"] = image_from_bytes(z.read(f"smart/{e['id']}.png")) if f"smart/{e['id']}.png" in names else new_image(1, 1)
+                    layer.setdefault("place", {"cx": 0.5, "cy": 0.5, "sx": 1, "sy": 1, "rot": 0})
                 if e["kind"] == "pixel" and f"layers/{e['id']}.png" in names:
                     img = image_from_bytes(z.read(f"layers/{e['id']}.png"))
                     layer["image"] = img if img.size() == QSize(doc.w, doc.h) else _fit(img, doc.w, doc.h)
@@ -935,6 +1044,9 @@ class Document:
             if not doc.layers:
                 doc.layers.append(new_layer("pixel", "Layer 1", doc.w, doc.h))
             doc.active = m.get("active") if any(l["id"] == m.get("active") for l in doc.layers) else doc.layers[-1]["id"]
+            doc.guides = [g for g in m.get("guides") or [] if g.get("axis") in ("x", "y")]
+            import huginn_easel_more as more
+            doc.layers = more.normalize(doc.layers)
         doc.path = path
         return doc
 
@@ -943,16 +1055,32 @@ class Document:
         part = path + ".saving"
         stack = ET.Element("image", {"w": str(self.w), "h": str(self.h), "version": "0.0.5"})
         top = ET.SubElement(stack, "stack")
+        import huginn_easel_more as more
         with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("mimetype", "image/openraster", compress_type=zipfile.ZIP_STORED)
-            for i, l in enumerate(reversed(self.layers)):           # OpenRaster lists the top layer first
-                img = self.layer_image(l) if l["kind"] != "adjust" else None
-                if img is None:
-                    continue
-                name = f"data/layer{i}.png"
-                z.writestr(name, png_bytes(img), compress_type=zipfile.ZIP_STORED)
-                ET.SubElement(top, "layer", {"name": l["name"], "src": name, "x": "0", "y": "0", "opacity": f"{l['opacity']:.3f}",
-                                              "visibility": "visible" if l["visible"] else "hidden", "composite-op": ORA_OPS.get(l["blend"], "svg:src-over")})
+            count = [0]
+
+            def put(items, parent):                                 # OpenRaster lists the top layer first; a group is a stack
+                for it in reversed(items):
+                    if isinstance(it, tuple) and more.has_fx(it[1]):    # a group with styles: drawn as one picture
+                        it = it[1]
+                    if isinstance(it, tuple):
+                        h = it[1]
+                        sub = ET.SubElement(parent, "stack", {"name": h["name"], "opacity": f"{h['opacity']:.3f}",
+                                                              "visibility": "visible" if h["visible"] else "hidden",
+                                                              "composite-op": ORA_OPS.get(h["blend"], "svg:src-over"), "isolation": "isolate"})
+                        put(it[2], sub)
+                        continue
+                    l = it
+                    img = self.styled_image(l) if l["kind"] != "adjust" else None
+                    if img is None:
+                        continue
+                    name = f"data/layer{count[0]}.png"
+                    count[0] += 1
+                    z.writestr(name, png_bytes(img), compress_type=zipfile.ZIP_STORED)
+                    ET.SubElement(parent, "layer", {"name": l["name"], "src": name, "x": "0", "y": "0", "opacity": f"{l['opacity']:.3f}",
+                                                    "visibility": "visible" if l["visible"] else "hidden", "composite-op": ORA_OPS.get(l["blend"], "svg:src-over")})
+            put(more.tree(self.layers), top)
             z.writestr("stack.xml", ET.tostring(stack, encoding="unicode"))
             flat = self.flattened()
             z.writestr("mergedimage.png", png_bytes(flat), compress_type=zipfile.ZIP_STORED)
@@ -969,10 +1097,14 @@ class Document:
             doc = cls(w, h, None)
             doc.layers = []
 
-            def walk(stack, hidden=False):
+            def walk(stack, hidden=False, group=None):
                 for el in stack:
                     if el.tag == "stack":
-                        walk(el, hidden or el.get("visibility") == "hidden")
+                        g = new_layer("group", el.get("name", "Group"))
+                        g.update(opacity=float(el.get("opacity", 1)), visible=el.get("visibility", "visible") != "hidden",
+                                 blend=ops.get(el.get("composite-op", "svg:src-over"), "normal"), group=group)
+                        doc.layers.insert(0, g)
+                        walk(el, False, g["id"])
                     elif el.tag == "layer" and el.get("src", "").lower().endswith(".png"):
                         img = image_from_bytes(z.read(el.get("src")))
                         layer = new_layer("pixel", el.get("name", "Layer"), w, h)
@@ -982,8 +1114,11 @@ class Document:
                         layer["opacity"] = float(el.get("opacity", 1))
                         layer["visible"] = el.get("visibility", "visible") != "hidden" and not hidden
                         layer["blend"] = ops.get(el.get("composite-op", "svg:src-over"), "normal")
+                        layer["group"] = group
                         doc.layers.insert(0, layer)
             walk(root.find("stack") if root.find("stack") is not None else root)
+            import huginn_easel_more as more
+            doc.layers = more.normalize(doc.layers)
         if not doc.layers:
             doc.layers.append(new_layer("pixel", "Layer 1", w, h))
         doc.active = doc.layers[-1]["id"]
@@ -1045,12 +1180,15 @@ class Document:
 
     def _paint_vectors(self, p: QPainter) -> None:
         """Each layer in turn: shapes as shapes, pictures as pictures (for SVG and PDF)."""
+        import huginn_easel_more as more
         for layer in self.layers:
-            if not layer["visible"] or layer["kind"] == "adjust":
+            if layer["kind"] in ("adjust", "group") or not self.visible_in_place(layer):
                 continue
             p.save()
-            p.setOpacity(layer["opacity"])
-            if layer["kind"] == "vector" and (layer.get("mask") is None or not layer.get("maskOn", True)) and layer["blend"] == "normal":
+            p.setOpacity(self.opacity_in_place(layer))
+            if layer["kind"] == "group" or more.has_fx(layer) or any(more.has_fx(self.layer(g)) for g in more.ancestors(self.layers, layer)):
+                p.drawImage(0, 0, self.styled_image(layer))
+            elif layer["kind"] == "vector" and (layer.get("mask") is None or not layer.get("maskOn", True)) and layer["blend"] == "normal":
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 for s in layer["shapes"]:
                     if not s.get("hidden"):
@@ -1363,10 +1501,20 @@ def write_psd(doc: "Document", path: str) -> None:
     out += struct.pack(">I", 0)                                       # colour mode data
     res = b"8BIM" + struct.pack(">H", 1005) + b"\x00\x00" + struct.pack(">I", 16) + struct.pack(">IHHIHH", doc.dpi << 16, 1, 1, doc.dpi << 16, 1, 1)
     out += struct.pack(">I", len(res)) + res                          # the resolution, so print sizes come across
-    layers = [l for l in doc.layers if l["kind"] != "adjust"]
+    import huginn_easel_more as more
+
+    def pick(items):                                                  # a group with styles goes as one picture
+        out = []
+        for it in items:
+            if isinstance(it, tuple):
+                out += [it[1]] if more.has_fx(it[1]) else pick(it[2])
+            elif it["kind"] != "adjust":
+                out.append(it)
+        return out
+    layers = pick(more.tree(doc.layers))
     records, pictures = bytearray(), bytearray()
     for l in layers:
-        img = doc.layer_image(l)
+        img = doc.styled_image(l)
         rgba = image_to_array(img)
         ys, xs = np.nonzero(rgba[..., 3])
         if len(xs):
@@ -1389,7 +1537,7 @@ def write_psd(doc: "Document", path: str) -> None:
         records += struct.pack(">iiiiH", top, left, bottom, right, len(chans))
         for cid, body in chans:
             records += struct.pack(">hI", cid, len(body))
-        records += b"8BIM" + PSD_KEYS.get(l["blend"], "norm").encode("latin-1") + bytes([int(round(l["opacity"] * 255)), 0, 0 if l["visible"] else 2, 0])
+        records += b"8BIM" + PSD_KEYS.get(l["blend"], "norm").encode("latin-1") + bytes([int(round(doc.opacity_in_place(l) * 255)), 0, 0 if doc.visible_in_place(l) else 2, 0])
         records += struct.pack(">I", len(extra)) + extra
         for _, body in chans:
             pictures += body
