@@ -122,7 +122,7 @@ GlassWindow {
                                 Btn { height: 26; text: "Remove"; onClicked: Backend.removeAccount(modelData.id) } } } } }
                 Column { visible: card.kind === "more"; x: 16; y: 52; width: parent.width - 32
                     Repeater { model: card.kind === "more" ? win.sheet.boxes : []
-                        Pressable { required property var modelData; width: parent.width; height: 34; radius: 9; onClicked: { win.sheet = null; Backend.setFolder(modelData.name) }
+                        Pressable { required property var modelData; width: parent.width; height: 34; radius: 9; onClicked: { var n = modelData.name; win.sheet = null; Backend.setFolder(n) }
                             Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: modelData.icon; size: 15 }
                             Label { x: 36; width: parent.width - 90; elide: Text.ElideMiddle; anchors.verticalCenter: parent.verticalCenter; text: modelData.name }
                             Label { visible: modelData.unread > 0; anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter } text: modelData.unread; color: Theme.t.accent; font.pixelSize: 12 } } } }

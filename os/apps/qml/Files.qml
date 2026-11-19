@@ -214,7 +214,7 @@ GlassWindow {
             Repeater { model: Backend.crumbs.slice(win.deep ? -1 : -3)
                 Row { required property var modelData; required property int index; height: parent.height; spacing: 2
                     Label { visible: index > 0; text: "›"; secondary: true; anchors.verticalCenter: parent.verticalCenter }
-                    Seg { text: modelData.name.length > 20 ? modelData.name.slice(0, 19) + "…" : modelData.name; onClicked: { search.text = ""; Backend.open(modelData.path) }
+                    Seg { text: modelData.name.length > 20 ? modelData.name.slice(0, 19) + "…" : modelData.name; onClicked: { var p = modelData.path; search.text = ""; Backend.open(p) }
                         DropSpot { dest: modelData.path; on: !win.trash && (win.deep || modelData.path !== Backend.path) } } } }
             Label { visible: win.deep; text: "›"; secondary: true; anchors.verticalCenter: parent.verticalCenter }
             Seg { visible: win.deep; text: "Results"; on: true; tip: "Back to the folder"; onClicked: search.text = "" }

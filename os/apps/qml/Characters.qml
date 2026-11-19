@@ -18,7 +18,7 @@ GlassWindow {
         Rail { x: 12; y: 64; width: 168; maxHeight: win.height - 64 - 14
             Repeater { model: Backend.groups
                 Pressable { required property var modelData; readonly property bool on: Backend.group === modelData.id && find.text === ""; width: parent.width; height: 34; radius: 11
-                    color: on ? Theme.t.accent : hovered ? Theme.t.hover : "transparent"; onClicked: { find.text = ""; Backend.setGroup(modelData.id) }
+                    color: on ? Theme.t.accent : hovered ? Theme.t.hover : "transparent"; onClicked: { var g = modelData.id; find.text = ""; Backend.setGroup(g) }
                     Label { x: 10; width: 22; height: parent.height; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; text: modelData.mark; font.pixelSize: 16; color: parent.on ? Theme.t.onAccent : Theme.t.text }
                     Label { x: 40; height: parent.height; verticalAlignment: Text.AlignVCenter; text: modelData.name; font.pixelSize: 12; font.weight: parent.on ? Font.DemiBold : Font.Normal; color: parent.on ? Theme.t.onAccent : Theme.t.text } } } }
     ]

@@ -74,6 +74,6 @@ GlassWindow {
                         text: player.source.toString() === it.modelData.url && player.duration > 0 ? win.clock(player.position) + " / " + win.clock(player.duration) : "" }
                     Seg { anchors.verticalCenter: undefined; text: "Rename"; onClicked: win.sheet = { kind: "rename", path: it.modelData.path, name: it.modelData.name, why: "" } }
                     Seg { anchors.verticalCenter: undefined; icon: "folder"; tip: "Show in Files"; onClicked: Backend.show("") }
-                    Seg { anchors.verticalCenter: undefined; icon: "trash"; danger: true; tip: "Move to the Trash"; onClicked: { player.stop(); player.source = ""; win.at = ""; Backend.remove(it.modelData.path) } } } } } }
+                    Seg { anchors.verticalCenter: undefined; icon: "trash"; danger: true; tip: "Move to the Trash"; onClicked: { var p = it.modelData.path; player.stop(); player.source = ""; win.at = ""; Backend.remove(p) } } } } } }
     Shortcut { sequence: "Space"; enabled: win.sheet === null && !win.noMic; onActivated: big.clicked() }
 }

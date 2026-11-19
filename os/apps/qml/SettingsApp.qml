@@ -174,7 +174,7 @@ GlassWindow {
                 model: card.kind === "pick" ? win.sheet.choices.filter(function (c) { var q = pickFilter.text.trim().toLowerCase(); return q === "" || (c.label + " " + (c.sub || "") + " " + c.id).toLowerCase().indexOf(q) >= 0 }) : []
                 delegate: Pressable { required property var modelData; width: pickList.width; height: 44; radius: 10
                     color: hovered ? Theme.t.hover : "transparent"
-                    onClicked: { var d = win.sheet.done; win.sheet = null; d(modelData.id) }
+                    onClicked: { var d = win.sheet.done, id = modelData.id; win.sheet = null; d(id) }
                     Image { id: pic; visible: !!modelData.icon; x: 10; width: 24; height: 24; source: modelData.icon || ""; sourceSize: Qt.size(48, 48); anchors.verticalCenter: parent.verticalCenter }
                     Column { x: pic.visible ? 44 : 14; width: parent.width - x - 40; anchors.verticalCenter: parent.verticalCenter
                         Label { width: parent.width; text: modelData.label; elide: Text.ElideRight; font.weight: win.sheet && String(win.sheet.current) === String(modelData.id) ? Font.DemiBold : Font.Normal }

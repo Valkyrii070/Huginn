@@ -375,7 +375,7 @@ GlassWindow {
                                                 anchors.verticalCenter: parent.verticalCenter; color: "#FFFFFF"; opacity: 0.75 } } } }
                                 MouseArea { anchors.fill: body; anchors.rightMargin: 8; preventStealing: true; cursorShape: Qt.OpenHandCursor
                                     property real x0: 0; property real y0: 0; property bool moved: false
-                                    onPressed: function (m) { var p = mapToItem(lanes.contentItem, m.x, m.y); x0 = p.x; y0 = p.y; moved = false; win.selSection = ""; Backend.selectRegion(rg.modelData.id) }
+                                    onPressed: function (m) { var p = mapToItem(lanes.contentItem, m.x, m.y); x0 = p.x; y0 = p.y; moved = false; var id = rg.modelData.id; win.selSection = ""; Backend.selectRegion(id) }
                                     onPositionChanged: function (m) { var p = mapToItem(lanes.contentItem, m.x, m.y); rg.dx = p.x - x0; moved = Math.abs(rg.dx) > 3 || Math.abs(p.y - y0) > 12 }
                                     onReleased: function (m) {
                                         if (moved) { var p = mapToItem(lanes.contentItem, m.x, m.y), tr = win.rowOf(p.y)

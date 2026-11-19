@@ -361,13 +361,16 @@ GlassWindow {
                 Column { id: menuCol; x: 6; y: 6; width: parent.width - 12
                     Repeater { model: win.menuFor ? (win.menuFor.dir ? ["New File Here", "New Folder Here", "Rename…", "Show in Files", "Move to Trash"] : ["Open", "Rename…", "Show in Files", "Move to Trash"]) : []
                         Pressable { required property string modelData; width: menuCol.width; height: 32; radius: 8; color: hovered ? Theme.t.hover : "transparent"
-                            onClicked: { var f = win.menuFor; win.menuFor = null
-                                if (modelData === "Open") Backend.openFile(f.path)
-                                else if (modelData === "New File Here") win.ask("new", { folder: f.path, dir: false })
-                                else if (modelData === "New Folder Here") win.ask("new", { folder: f.path, dir: true })
-                                else if (modelData === "Rename…") win.ask("rename", { path: f.path, name: f.name })
-                                else if (modelData === "Show in Files") Backend.reveal(f.path)
-                                else win.ask("trash", { path: f.path, name: f.name }) }
+                            // what was picked is read first: clearing menuFor empties this Repeater, which ends this row (and
+                            // with it modelData, win and Backend here), so every item used to do nothing
+                            onClicked: { var f = win.menuFor, what = modelData
+                                if (what === "Open") Backend.openFile(f.path)
+                                else if (what === "New File Here") win.ask("new", { folder: f.path, dir: false })
+                                else if (what === "New Folder Here") win.ask("new", { folder: f.path, dir: true })
+                                else if (what === "Rename…") win.ask("rename", { path: f.path, name: f.name })
+                                else if (what === "Show in Files") Backend.reveal(f.path)
+                                else win.ask("trash", { path: f.path, name: f.name })
+                                win.menuFor = null }
                             Label { x: 10; anchors.verticalCenter: parent.verticalCenter; text: modelData; font.pixelSize: 12; color: modelData === "Move to Trash" ? Theme.t.danger : Theme.t.text } } } } } },
 
         // sheets: open a folder, unsaved changes, a clash on disk, names, the Run command, a diff
@@ -419,7 +422,7 @@ GlassWindow {
                         model: card.kind === "open" ? (Backend.recent.length && win.browseAt === Backend.home ? Backend.recent.map(function (r) { return { name: r.name, path: r.path, git: false, recent: r.where } }).concat(Backend.browse(win.browseAt)) : Backend.browse(win.browseAt)) : []
                         delegate: Pressable { required property var modelData; width: folders.width; height: 38; radius: 9; color: hovered ? Theme.t.hover : "transparent"
                             onClicked: win.browseAt = modelData.path
-                            onDoubleClicked: { win.sheet = null; Backend.openFolder(modelData.path) }
+                            onDoubleClicked: { var p = modelData.path; win.sheet = null; Backend.openFolder(p) }
                             Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: modelData.recent ? "history" : "folder"; size: 15; ink: modelData.recent ? Theme.t.accent : Theme.t.icon }
                             Label { x: 36; width: parent.width - 180; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter; text: modelData.name }
                             Label { anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter } font.pixelSize: 11; secondary: true

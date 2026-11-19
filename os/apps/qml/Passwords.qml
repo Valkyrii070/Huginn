@@ -55,7 +55,7 @@ GlassWindow {
                     Label { x: 6; height: 24; secondary: true; font.pixelSize: 12; width: parent.width - 12; elide: Text.ElideRight
                         text: choices.count ? "Files a browser or another app exported (.csv):" : "Export your passwords from the browser as a .csv into Downloads, then come back." }
                     Repeater { id: choices; model: card.kind === "import" ? win.sheet.files : []
-                        Pressable { required property var modelData; width: parent.width; height: 34; radius: 9; onClicked: { win.sheet = null; Backend.importCsv(modelData.path) }
+                        Pressable { required property var modelData; width: parent.width; height: 34; radius: 9; onClicked: { var p = modelData.path; win.sheet = null; Backend.importCsv(p) }
                             Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: "doc"; size: 15 }
                             Label { x: 36; width: parent.width - 170; elide: Text.ElideMiddle; anchors.verticalCenter: parent.verticalCenter; text: modelData.name }
                             Label { anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter } text: modelData.where + " · " + modelData.when; secondary: true; font.pixelSize: 11 } } } }

@@ -607,7 +607,10 @@ GlassWindow {
                 ListView { id: files; y: 36; width: parent.width; height: parent.height - 36; clip: true; boundsBehavior: Flickable.StopAtBounds
                     model: card.browsing && win.browseAt ? Backend.browse(win.browseAt) : []
                     delegate: Pressable { required property var modelData; width: files.width; height: 36; radius: 9; color: hovered ? Theme.t.hover : "transparent"
-                        onClicked: modelData.dir ? win.browseAt = modelData.path : (card.kind === "open" ? (win.sheet = "", win.sheetData.place ? Backend.placeFile(modelData.path) : Backend.open(modelData.path)) : saveName.text = modelData.name.replace(/\.[^.]+$/, ""))
+                        onClicked: { var m = modelData                      // read first: closing the sheet ends this row
+                            if (m.dir) win.browseAt = m.path
+                            else if (card.kind === "open") { var place = win.sheetData.place; if (place) Backend.placeFile(m.path); else Backend.open(m.path); win.sheet = "" }
+                            else saveName.text = m.name.replace(/\.[^.]+$/, "") }
                         Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: modelData.dir ? "folder" : "image"; size: 15; ink: modelData.dir ? Theme.t.icon : Theme.t.accent }
                         Label { x: 36; width: parent.width - 50; elide: Text.ElideMiddle; anchors.verticalCenter: parent.verticalCenter; text: modelData.name; font.pixelSize: 12 } } } }
             Column { visible: card.kind === "save" || card.kind === "export"; x: 24; anchors { bottom: parent.bottom; bottomMargin: 70 } width: parent.width - 48; spacing: 8
@@ -633,7 +636,7 @@ GlassWindow {
             Flow { visible: card.kind === "new"; x: 20; y: 58; width: parent.width - 40; spacing: 8
                 Repeater { model: card.kind === "new" ? Backend.presets : []
                     Pressable { required property var modelData; width: 140; height: 46; radius: 10; color: hovered ? Theme.t.hover : Theme.t.group
-                        onClicked: { win.sheet = ""; Backend.newDoc(modelData.w, modelData.h, "#FFFFFF") }
+                        onClicked: { var m = modelData; win.sheet = ""; Backend.newDoc(m.w, m.h, "#FFFFFF") }
                         Column { x: 10; anchors.verticalCenter: parent.verticalCenter
                             Label { text: modelData.name; font.pixelSize: 12; font.weight: Font.DemiBold }
                             Label { text: modelData.w + " × " + modelData.h; font.pixelSize: 10; secondary: true } } } }

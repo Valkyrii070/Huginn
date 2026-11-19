@@ -56,7 +56,7 @@ GlassWindow {
                         Label { x: 8; y: 27; width: parent.width - 130; elide: Text.ElideRight; font.pixelSize: 11; color: modelData.error ? Theme.t.danger : Theme.t.text_secondary
                             text: card.kind === "import" ? "in " + modelData.where : modelData.error ? modelData.error : modelData.unread + " unread" + (modelData.checked ? " · checked " + modelData.checked : "") }
                         Btn { visible: card.kind === "sources"; anchors { right: parent.right; verticalCenter: parent.verticalCenter } text: "Unfollow"; onClicked: Backend.unfollow(modelData.id) }
-                        Btn { visible: card.kind === "import"; anchors { right: parent.right; verticalCenter: parent.verticalCenter } primary: true; text: "Bring In"; onClicked: { win.sheet = null; Backend.importOpml(modelData.path) } }
+                        Btn { visible: card.kind === "import"; anchors { right: parent.right; verticalCenter: parent.verticalCenter } primary: true; text: "Bring In"; onClicked: { var p = modelData.path; win.sheet = null; Backend.importOpml(p) } }
                         Rule { anchors.bottom: parent.bottom; width: parent.width } } }
                 Label { visible: card.kind !== "follow" && list.count === 0; x: 24; y: 62; width: parent.width - 48; wrapMode: Text.WordWrap; secondary: true
                     text: card.kind === "import" ? "Export your feeds from your old reader as an .opml file into Documents or Downloads, then come back." : "You don't follow anything yet." }

@@ -56,7 +56,7 @@ GlassWindow {
                         Repeater { model: Backend.accounts; Seg { required property var modelData; text: modelData.name; on: win.sheet && win.sheet.account === modelData.id
                             onClicked: win.sheet = { kind: "import", files: win.sheet.files, account: modelData.id } } } }
                     Repeater { id: files; model: card.kind === "import" ? win.sheet.files : []
-                        Pressable { required property var modelData; width: parent.width; height: 38; radius: 9; onClicked: { var a = win.sheet.account; win.sheet = null; Backend.importFile(modelData.path, a) }
+                        Pressable { required property var modelData; width: parent.width; height: 38; radius: 9; onClicked: { var a = win.sheet.account, p = modelData.path; win.sheet = null; Backend.importFile(p, a) }
                             Glyph { x: 10; anchors.verticalCenter: parent.verticalCenter; name: "doc"; size: 15 }
                             Label { x: 36; width: parent.width - 150; elide: Text.ElideMiddle; anchors.verticalCenter: parent.verticalCenter; text: modelData.name }
                             Label { anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter } text: modelData.where + " · " + modelData.when; secondary: true; font.pixelSize: 11 } } } }

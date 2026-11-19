@@ -91,7 +91,7 @@ Item {
                             anchors.horizontalCenter: parent.horizontalCenter; y: 31; spacing: 2
                             Repeater { model: dayCell.modelData.dots; Rectangle { required property var modelData; width: 4; height: 4; radius: 2; color: modelData } }
                         }
-                        MouseArea { id: dayHit; anchors.fill: parent; hoverEnabled: true; enabled: dayCell.modelData.inMonth; onClicked: { today.openEvent = ""; Today.pick(dayCell.modelData.date) } }
+                        MouseArea { id: dayHit; anchors.fill: parent; hoverEnabled: true; enabled: dayCell.modelData.inMonth; onClicked: { var d = dayCell.modelData.date; today.openEvent = ""; Today.pick(d) } }
                     }
                 }
             }
