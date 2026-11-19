@@ -71,6 +71,54 @@ RUNNERS = {"Python": 'python3 "{f}"', "Shell": 'bash "{f}"', "JavaScript": 'node
            "C": 'cc "{f}" -o /tmp/huginn-run && /tmp/huginn-run', "C++": 'c++ "{f}" -o /tmp/huginn-run && /tmp/huginn-run', "Lua": 'lua "{f}"', "Rust": 'rustc "{f}" -o /tmp/huginn-run && /tmp/huginn-run'}
 
 
+# Adding a language: what it takes, from Ubuntu's archive (apt, through the system's password prompt) and, for the
+# helpers Ubuntu doesn't package, from npm into the user's own folder (no password). "tools" are what Run and the
+# terminal use (a compiler, an interpreter); a language is ready when its helper (language server) is there.
+TOOLS_HOME = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "huginn" / "code-tools"
+EXTRA_BIN = [str(TOOLS_HOME / "bin"), "/usr/lib/qt6/bin", "/usr/lib/go/bin"]
+LANG_PACKS = {
+    "Python": {"apt": ["python3-pylsp", "python3-pyflakes", "python3-autopep8"], "tools": ["python3"]},
+    "C": {"apt": ["clangd", "build-essential", "gdb"], "tools": ["cc"]},
+    "C++": {"apt": ["clangd", "build-essential", "gdb"], "tools": ["c++"]},
+    "Rust": {"apt": ["rustc", "cargo", "rust-src", "gdb"], "tools": ["cargo"]},
+    "Go": {"apt": ["golang-go", "gopls"], "tools": ["go"]},
+    "JavaScript": {"apt": ["nodejs", "npm"], "npm": ["typescript", "typescript-language-server"], "tools": ["node"]},
+    "TypeScript": {"apt": ["nodejs", "npm"], "npm": ["typescript", "typescript-language-server", "tsx"], "tools": ["node"]},
+    "Java": {"apt": ["default-jdk"], "tools": ["javac"]},
+    "Shell": {"apt": ["shellcheck", "nodejs", "npm"], "npm": ["bash-language-server"], "tools": ["bash"]},
+    "HTML": {"apt": ["nodejs", "npm"], "npm": ["vscode-langservers-extracted"], "tools": []},
+    "CSS": {"apt": ["nodejs", "npm"], "npm": ["vscode-langservers-extracted"], "tools": []},
+    "JSON": {"apt": ["nodejs", "npm"], "npm": ["vscode-langservers-extracted"], "tools": []},
+    "YAML": {"apt": ["nodejs", "npm"], "npm": ["yaml-language-server"], "tools": []},
+    "QML": {"apt": ["qt6-declarative-dev-tools", "qt6-qmlls-plugins"], "tools": ["qml"]},
+    "Lua": {"apt": ["lua5.4"], "tools": ["lua5.4"]},
+    "SQL": {"apt": ["sqlite3"], "tools": ["sqlite3"]},
+    "CMake": {"apt": ["cmake", "ninja-build", "build-essential"], "tools": ["cmake"]},
+}
+# What a new file in each language starts with (the cursor goes where the first line of real work goes).
+TEMPLATES = {
+    "Python": 'def main():\n    print("Hello")\n\n\nif __name__ == "__main__":\n    main()\n',
+    "C": '#include <stdio.h>\n\nint main(void)\n{\n    printf("Hello\\n");\n    return 0;\n}\n',
+    "C++": '#include <iostream>\n\nint main()\n{\n    std::cout << "Hello" << std::endl;\n    return 0;\n}\n',
+    "Rust": 'fn main() {\n    println!("Hello");\n}\n',
+    "Go": 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("Hello")\n}\n',
+    "JavaScript": 'console.log("Hello");\n', "TypeScript": 'const greeting: string = "Hello";\nconsole.log(greeting);\n',
+    "Java": 'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello");\n    }\n}\n',
+    "Shell": '#!/usr/bin/env bash\nset -euo pipefail\n\necho "Hello"\n',
+    "HTML": '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Hello</title>\n</head>\n<body>\n  <h1>Hello</h1>\n</body>\n</html>\n',
+    "CSS": 'body {\n  font-family: system-ui, sans-serif;\n  margin: 2rem;\n}\n', "JSON": '{\n  \n}\n',
+    "QML": 'import QtQuick\n\nRectangle {\n    width: 400; height: 300\n    Text { anchors.centerIn: parent; text: "Hello" }\n}\n',
+    "Lua": 'print("Hello")\n', "SQL": "SELECT 'Hello';\n", "Markdown": "# Title\n\n", "YAML": "", "TOML": "", "Text": "",
+}
+# the first-named file for languages whose files are known by name, not by an ending
+NEW_NAMES = {"Make": "Makefile", "CMake": "CMakeLists.txt", "Docker": "Dockerfile", "Java": "Main.java"}
+
+
+def which(program: str):
+    """A program on the PATH, or in Code's own tools folder and the places Ubuntu puts some helpers (qmlls, gopls)."""
+    return shutil.which(program) or shutil.which(program, path=os.pathsep.join(EXTRA_BIN))
+
+
 def language_of(path: str, head: str = "") -> str:
     name = Path(path).name
     suffix = Path(path).suffix.lower()
@@ -828,6 +876,7 @@ class Code(QObject):
     def __init__(self, demo: bool = False, target: str = "", shell_class=None, settings=None, trash=None):
         super().__init__()
         self._back.connect(lambda fn: fn())
+        self._lang_done.connect(self._language_added)
         self._demo, self._shell_class, self._settings, self._trash = demo, shell_class, settings, trash
         self._root, self._docs, self._at = None, [], -1
         self._open_dirs, self._tree, self._files_cache = set(), [], None
@@ -1309,6 +1358,105 @@ def advice(sky: Sky) -> str:
             self.textLoaded.emit(i)
             self.changed.emit()
 
+    @Slot(str)
+    def newFileIn(self, lang: str) -> None:
+        """A new file in a language: named for it, started with a few lines of it (TEMPLATES), in the open folder
+        (or Documents), and opened."""
+        info = LANGS.get(lang)
+        if not info:
+            self.newUntitled()
+            return
+        folder = self._root or Path(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or Path.home())
+        first = NEW_NAMES.get(lang) or ("untitled" + next((e for e in info[0] if e.startswith(".")), ".txt"))
+        stem, ext = (first, "") if "." not in first else (first.rsplit(".", 1)[0], "." + first.rsplit(".", 1)[1])
+        n, path = 1, folder / first
+        while path.exists():
+            n += 1
+            path = folder / f"{stem}-{n}{ext}"
+        try:
+            path.write_text(TEMPLATES.get(lang, ""), encoding="utf-8")
+        except OSError as e:
+            self.said.emit(f"Couldn't make a file: {e.strerror or e}", True)
+            return
+        self._files_cache = None
+        self._build_tree()
+        self.openFile(str(path))
+
+    def _get_languages(self) -> list:
+        out = []
+        for name, info in LANGS.items():
+            if name in ("Diff", "Settings"):
+                continue
+            pack = LANG_PACKS.get(name, {})
+            helper = next((a[0] for a in info[5] if which(a[0])), "") if info[5] else ""
+            tools = all(which(t) for t in pack.get("tools", [])) if pack else True
+            out.append({"name": name, "ext": next((e for e in info[0] if e.startswith(".")), info[0][0] if info[0] else ""),
+                        "helper": helper, "hasHelper": bool(info[5]), "tools": tools, "canAdd": bool(pack) and (not tools or (bool(info[5]) and not helper)),
+                        "adding": name in getattr(self, "_adding", set())})
+        return out
+    languages = Property("QVariantList", lambda self: self._get_languages(), notify=changed)
+
+    @Slot(str)
+    def addLanguage(self, lang: str) -> None:
+        """Put in what a language needs (LANG_PACKS): Ubuntu's packages through the system's password prompt, then
+        npm's helpers into Code's own tools folder. Its helper starts on the next file opened in it."""
+        pack = LANG_PACKS.get(lang)
+        if not pack or self._demo or lang in getattr(self, "_adding", set()):
+            return
+        self._adding = getattr(self, "_adding", set()) | {lang}
+        self.changed.emit()
+        self.said.emit(f"Adding {lang}… The system may ask for your password.", False)
+
+        def work():
+            why = ""
+            missing = [p for p in pack.get("apt", []) if not self._installed(p)]
+            if missing:
+                argv = (["pkgcli", "install", "-y"] if shutil.which("pkgcli") else ["pkexec", "apt-get", "install", "-y"]) + missing
+                try:
+                    done = subprocess.run(argv, capture_output=True, text=True, timeout=3600, env={**os.environ, "LC_ALL": "C.UTF-8"})
+                    if done.returncode != 0:
+                        tail = (done.stderr or done.stdout).strip().splitlines()
+                        why = "The packages weren't put in" + (f" ({tail[-1][:120]})" if tail else "") + "."
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    why = f"The packages weren't put in ({e})."
+            if not why and pack.get("npm"):
+                npm = shutil.which("npm")
+                if not npm:
+                    why = "npm isn't there, so the helper couldn't be fetched."
+                else:
+                    try:
+                        TOOLS_HOME.mkdir(parents=True, exist_ok=True)
+                        done = subprocess.run([npm, "install", "-g", "--prefix", str(TOOLS_HOME)] + pack["npm"], capture_output=True, text=True, timeout=1800)
+                        if done.returncode != 0:
+                            tail = (done.stderr or done.stdout).strip().splitlines()
+                            why = "The helper wasn't fetched" + (f" ({tail[-1][:120]})" if tail else "") + "."
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        why = f"The helper wasn't fetched ({e})."
+            self._lang_done.emit(lang, why)
+        threading.Thread(target=work, daemon=True).start()
+
+    _lang_done = Signal(str, str)
+
+    def _language_added(self, lang: str, why: str) -> None:
+        self._adding = getattr(self, "_adding", set()) - {lang}
+        self._servers.pop(lang, None)                  # look for its helper again
+        for alias in ("JavaScript", "TypeScript") if lang in ("JavaScript", "TypeScript") else ("HTML", "CSS", "JSON") if lang in ("HTML", "CSS", "JSON") else ():
+            self._servers.pop(alias, None)
+        self.changed.emit()
+        self.said.emit(why or f"{lang} is ready: suggestions, problems and go-to-definition work in its files now.", bool(why))
+        if not why:
+            for d in self._docs:
+                if d.lang == lang:
+                    self._lsp_open(d)
+
+    @staticmethod
+    def _installed(package: str) -> bool:
+        try:
+            done = subprocess.run(["dpkg-query", "-W", "-f=${Status}", package], capture_output=True, text=True, timeout=20)
+            return "install ok installed" in done.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
     @Slot()
     def newUntitled(self) -> None:
         folder = self._root or Path(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or Path.home())
@@ -1723,7 +1871,7 @@ def advice(sky: Sky) -> str:
         info = LANGS.get(lang)
         if not info or not info[5]:
             return None
-        argv = next((a for a in info[5] if shutil.which(a[0])), None)
+        argv = next(([which(a[0])] + a[1:] for a in info[5] if which(a[0])), None)
         if not argv:
             self._servers[lang] = None
             self._server_note[lang] = ""
@@ -1733,9 +1881,9 @@ def advice(sky: Sky) -> str:
         client.diagnostics.connect(self._got_diagnostics)
         client.applyEdit.connect(self._workspace_edit)
         client.failed.connect(lambda why, l=lang: (self._server_note.__setitem__(l, ""), self.said.emit(f"{l} helper: {why}", True)))
-        client.ready.connect(lambda l=lang, name=argv[0]: (self._server_note.__setitem__(l, name), self.changed.emit()))
+        client.ready.connect(lambda l=lang, name=os.path.basename(argv[0]): (self._server_note.__setitem__(l, name), self.changed.emit()))
         self._servers[lang] = client
-        self._server_note[lang] = "starting " + argv[0]
+        self._server_note[lang] = "starting " + os.path.basename(argv[0])
         return client
 
     def _lsp_open(self, d: Doc) -> None:
@@ -1815,8 +1963,50 @@ def advice(sky: Sky) -> str:
                     item["snippet"] = text
                 out.append(item)
             out.sort(key=lambda x: x["sort"])
-            self.completions.emit(i, self._with_snippets(d, line, col, out or self._word_completions(d, line, col)))
+            for n, item in enumerate(out):
+                item["rank"] = n                                          # the server's own order, as a hint
+            self.completions.emit(i, self._with_snippets(d, line, col, self._ranked(d, line, out) if out else self._word_completions(d, line, col)))
         c.request("textDocument/completion", {"textDocument": {"uri": d.uri}, "position": {"line": line, "character": col}}, got)
+
+    # ---------------------------------------------------------------- which suggestion is likeliest
+    # Each suggestion carries what the editor needs to put the likeliest first as you type (Code.qml, filterOffer):
+    # how often the word is already in the file (freq), how near its nearest use is to the cursor in lines (near),
+    # and how lately you picked it (recent: 1 for the last pick, falling away over the last 200). The editor adds
+    # how well it matches what's typed (the same case at the start, any case, then the capitals or parts of the name).
+    def _ranked(self, d: Doc, line: int, items: list) -> list:
+        uses = {}
+        for n, text in enumerate(d.text.split("\n")):
+            for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text):
+                count, near = uses.get(w, (0, 10 ** 6))
+                uses[w] = (count + 1, min(near, abs(n - line)))
+        picked = self._picks()
+        for it in items:
+            count, near = uses.get(it["label"], (0, 10 ** 6))
+            if near == 0 and count == 1:                                  # the word being typed is the only use
+                count, near = 0, 10 ** 6
+            it["freq"], it["near"] = count, near
+            it["recent"] = round(1 - picked.index(it["label"]) / len(picked), 3) if it["label"] in picked else 0
+        return items
+
+    def _picks(self) -> list:
+        if not hasattr(self, "_picked"):
+            try:
+                self._picked = [str(w) for w in json.loads(STATE.with_name("code-picks.json").read_text(encoding="utf-8"))][:200]
+            except (OSError, ValueError, TypeError):
+                self._picked = []
+        return self._picked
+
+    @Slot(str)
+    def picked(self, label: str) -> None:
+        """A suggestion was taken: it comes first sooner next time (kept across runs, the last 200)."""
+        if not label:
+            return
+        self._picked = [label] + [w for w in self._picks() if w != label][:199]
+        try:
+            STATE.parent.mkdir(parents=True, exist_ok=True)
+            STATE.with_name("code-picks.json").write_text(json.dumps(self._picked), encoding="utf-8")
+        except OSError:
+            pass
 
     def _word_completions(self, d: Doc, line: int, col: int) -> list:
         """Without a language server: the words already in the file that start like this one."""
@@ -1826,8 +2016,11 @@ def advice(sky: Sky) -> str:
         prefix = m.group() if m else ""
         if len(prefix) < 2:
             return []
-        words = sorted({w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", d.text) if w.startswith(prefix) and w != prefix} | {w for w in LANGS.get(d.lang, LANGS["Text"])[3].split() if w.startswith(prefix) and w != prefix})
-        return [{"label": w, "insert": w, "detail": "", "kind": 1, "sort": w} for w in words[:60]]
+        low = prefix.lower()
+        words = {w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", d.text) if w.lower().startswith(low[:1]) and w != prefix} | \
+                {w for w in LANGS.get(d.lang, LANGS["Text"])[3].split() if w.lower().startswith(low[:1]) and w != prefix}
+        items = [{"label": w, "insert": w, "detail": "", "kind": 14 if w in LANGS.get(d.lang, LANGS["Text"])[3].split() else 1, "sort": w, "rank": 0} for w in sorted(words)]
+        return self._ranked(d, line, items)[:400]
 
     @Slot(int, int, int)
     def definition(self, i: int, line: int, col: int) -> None:

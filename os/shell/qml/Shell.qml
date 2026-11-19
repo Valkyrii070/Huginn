@@ -37,11 +37,12 @@ QtObject {
             if (!Status.ownCompositor) { stop(); return }
             var sw = dockWin.screen ? dockWin.screen.width : 0, sh = dockWin.screen ? dockWin.screen.height : 0
             if (!sw) return
-            var tiles = dock.tileRects(), out = {}, x0 = (sw - dock.width) / 2, y0 = sh - dockWin.height
+            var tiles = dock.tileRects(), out = {}, x0 = (sw - dock.width) / 2, y0 = sh - dockWin.full
             for (var k in tiles) out[k] = [x0 + tiles[k][0], y0 + tiles[k][1], tiles[k][2], tiles[k][3]]
             var text = JSON.stringify({ tiles: out, style: Theme.t.openMs > 0 ? Settings.hideStyle : "none", glow: Theme.t.glowA.toString(), gaps: Settings.snapGaps,
                                        dark: Theme.t.dark, frost: !Settings.reduceTransparency && !Settings.contrast,
-                                       remember: Settings.rememberPlaces, vrr: Settings.adaptiveSync, x11sharp: Settings.sharpX11, tearing: Settings.allowTearing })
+                                       remember: Settings.rememberPlaces, vrr: Settings.adaptiveSync, x11sharp: Settings.sharpX11, tearing: Settings.allowTearing,
+                                       keepSnapped: Settings.keepSnapped, spacesAllScreens: Settings.spacesAllScreens })
             if (text !== last) { last = text; Status.dockLayout(text) }
         }
     }
@@ -64,6 +65,9 @@ QtObject {
     }
     // the Welcome tour (TourHost: full-screen pages, then the island on the desktop)
     property bool touring: false
+    // With "Make room for windows" the dock reserves no strip of the screen, so the surfaces over the work area reach
+    // the bottom edge: what they place just above the dock moves up by its height.
+    readonly property int dockRoom: Settings.dockMakeRoom ? dockWin.full : 0
     function startTour(kind) { touring = true; open = ""; tour.start(kind || "first") }
     // the first time (or after a big update): once the desktop has come in, and not over the installer
     property Timer tourAuto: Timer {
@@ -141,17 +145,40 @@ QtObject {
     },
     Window {   // dock. Wider than the dock, so the live island can grow and shrink without the surface changing size
         id: dockWin
-        visible: true; width: Math.max(dock.width, dock.restWidth + 780); height: dock.tile + 34; color: "transparent"
+        visible: true; width: Math.max(dock.width, dock.restWidth + 780); color: "transparent"
+        readonly property int full: dock.tile + 34
+        // Settings › Desktop & Dock › "Make room for windows": while a window covers the dock's place (filled, full
+        // screen, or just big), the dock slides down out of the way and its surface shrinks to a strip along the
+        // bottom edge; pointing there brings it back over the window. Nothing it opened (an app's island, its
+        // windows, a stack, the start menu) is left without it.
+        readonly property bool covered: {
+            var sh = dockWin.screen ? dockWin.screen.height : 0, sw = dockWin.screen ? dockWin.screen.width : 0
+            if (!sh) return false
+            var top = sh - full, left = (sw - dock.restWidth) / 2, right = left + dock.restWidth, cur = Status.spaces.current || 0
+            return Status.windows.some(function (w) {
+                return !w.minimised && (w.space || 0) === cur && w.w > 0 && (w.full || (w.y + w.h > top + 6 && w.x < right && w.x + w.w > left))
+            })
+        }
+        property bool peek: false
+        readonly property bool busy: shell.open === "launcher" || shell.dockIsland !== null || shell.winApp !== null || shell.stackFolder !== ""
+                                     || shell.liveShown || shell.tabsOpen || shell.touring || !shell.settled
+        readonly property bool away: Settings.dockMakeRoom && covered && !peek && !busy
+        property bool shrunk: false
+        onAwayChanged: if (away) shrink.restart(); else { shrink.stop(); shrunk = false }
+        Timer { id: shrink; interval: Theme.t.openMs > 0 ? 300 : 0; onTriggered: dockWin.shrunk = true }
+        HoverHandler { id: dockHover; onHoveredChanged: if (hovered) { unpeek.stop(); dockWin.peek = true } else unpeek.restart() }
+        Timer { id: unpeek; interval: 700; onTriggered: dockWin.peek = false }
+        height: shrunk ? 3 : full
         LayerShell.Window.scope: "huginn-dock"
         LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
         LayerShell.Window.layer: LayerShell.Window.LayerTop
         LayerShell.Window.anchors: LayerShell.Window.AnchorBottom
-        LayerShell.Window.exclusionZone: dock.tile + 34
+        LayerShell.Window.exclusionZone: Settings.dockMakeRoom ? 0 : full     // making room: windows may use the whole height
         Dock {
-            id: dock; inlineTips: false; anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: shell.settled ? 0 : 24 }
+            id: dock; inlineTips: false; anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: !shell.settled ? 24 : dockWin.away ? dockWin.full + 12 : 0 }
             opacity: shell.settled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } }
-            Behavior on anchors.topMargin { NumberAnimation { duration: 550; easing.type: Easing.OutCubic } }
+            Behavior on anchors.topMargin { NumberAnimation { duration: shell.settled ? Theme.t.openMs > 0 ? 280 : 0 : 550; easing.type: Easing.OutCubic } }
             onLauncher: shell.open = shell.open === "launcher" ? "" : "launcher"
             onControlCentre: shell.open = shell.open === "cc" ? "" : "cc"
             activate: function (app) { return Status.activateApp(app) }   // a running app's window comes forward (KWin)
@@ -213,7 +240,7 @@ QtObject {
             folder: shell.stackFolder; startWithMenu: shell.stackMenu
             visible: shell.stackFolder !== ""; focus: true
             x: Math.max(8, Math.min(stackWin.width - width - 8, (stackWin.width - dock.width) / 2 + shell.stackX - width / 2))
-            y: stackWin.height - height - 8
+            y: stackWin.height - shell.dockRoom - height - 8
             onDone: shell.stackFolder = ""
         }
     },
@@ -252,7 +279,7 @@ QtObject {
                 var w = Status.windows.filter(function (w) { return w.active && !w.minimised })[0]
                 var sw = flightWin.screen ? flightWin.screen.width : 1280, sh = flightWin.screen ? flightWin.screen.height : 800
                 flightWin.from = w && w.w > 0 ? Qt.point(w.x + w.w / 2, w.y + w.h / 2) : Qt.point(sw / 2, sh / 2)
-                flightWin.to = Qt.point((sw - dock.width) / 2 + dock.stackX(folder), sh - dockWin.height + 32)
+                flightWin.to = Qt.point((sw - dock.width) / 2 + dock.stackX(folder), sh - dockWin.full + 32)
                 flightWin.folder = folder
                 flight.restart()
             }
@@ -317,17 +344,22 @@ QtObject {
             onDone: shell.open = ""
         }
     },
-    Window {   // control centre: slides in from the right edge, and back out
+    Window {   // control centre: slides in from the right edge, and back out. Over the whole work area, so a click
+               // anywhere beside it (on a window, the desktop) closes it, as Today's and the menus' do.
         id: ccWin
-        visible: shell.open === "cc" || ccPanel.x < width - 1; width: 364; color: "transparent"
+        visible: shell.open === "cc" || ccPanel.x < width - 1; color: "transparent"
         LayerShell.Window.scope: "huginn-control-centre"
         LayerShell.Window.layer: LayerShell.Window.LayerOverlay
-        LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorRight
+        LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
         LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityOnDemand
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; enabled: shell.open === "cc"; onClicked: shell.open = ""
+                    onWheel: function (w) { w.accepted = true } }
+        MouseArea { x: ccPanel.x; y: ccPanel.y; width: ccPanel.width; height: ccPanel.height; acceptedButtons: Qt.AllButtons }   // clicks on the panel stay there
+        Item { focus: shell.open === "cc"; Keys.onEscapePressed: shell.open = "" }
         ControlCentre {
             id: ccPanel
-            y: 10; width: parent.width - 20; height: parent.height - 20
-            x: shell.open === "cc" ? 10 : parent.width
+            y: 10; width: 344; height: parent.height - 20
+            x: shell.open === "cc" ? parent.width - width - 10 : parent.width
             opacity: shell.open === "cc" ? 1 : 0
             Behavior on x { NumberAnimation { duration: Theme.t.openMs ? 260 : 0; easing.type: Easing.OutCubic } }
             Behavior on opacity { NumberAnimation { duration: Theme.t.openMs ? 200 : 0 } }
@@ -345,10 +377,10 @@ QtObject {
         Launcher {
             id: launcher; shown: shell.open === "launcher"; onDone: shell.open = ""
             onSearchEverything: function (text) { shell.searchText = text; shell.open = "search" }
-            anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 10 }
-            height: Math.min(660, parent.height - 20)
+            anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 10 + shell.dockRoom }
+            height: Math.min(660, parent.height - 20 - shell.dockRoom)
             // the dock's orb (its window sits just below this one): where the menu grows from
-            orb: Qt.point((launcherWin.width - dock.width) / 2 + 32 - x, launcherWin.height + 32 - y)
+            orb: Qt.point((launcherWin.width - dock.width) / 2 + 32 - x, launcherWin.height - shell.dockRoom + 32 - y)
         }
     },
     Window {   // Search everything: over the whole screen, bar and dock included
@@ -373,7 +405,7 @@ QtObject {
             id: dockIsland
             visible: shell.dockIsland !== null
             x: Math.max(8, Math.min(islandWin.width - width - 8, (islandWin.width - dock.width) / 2 + shell.dockIslandX - width / 2))
-            y: islandWin.height - height - 8
+            y: islandWin.height - shell.dockRoom - height - 8
             onDone: shell.dockIsland = null
         }
         onVisibleChanged: if (visible) dockIsland.open(shell.dockIsland)
@@ -396,7 +428,7 @@ QtObject {
             snapped: { var w = shell.frontWindow(); return !!w && w.x <= 24 && w.w < tourWin.width * 0.62 && w.h > tourWin.height * 0.55 }
             target: function (name) {
                 var W = tourWin.width, H = tourWin.height, dx = (W - dock.width) / 2
-                var isl = dock.tile + 20, top = H - dockWin.height
+                var isl = dock.tile + 20, top = H - dockWin.full
                 if (name === "dock") return Qt.rect(dx, top, dock.restWidth, isl)
                 if (name === "orb") return Qt.rect(dx, top, isl, isl)
                 if (name === "date") return Qt.rect(topBar.dateLeft, 4, topBar.dateWidth, 22)
@@ -407,6 +439,7 @@ QtObject {
             onMaskChanged: function (r) { Tour.setMask(tourWin, r.x, r.y, r.width, r.height) }
             onCloseOpenThings: if (shell.open === "today" || shell.open === "menu") shell.open = ""
             onInstallWanted: Apps.launch("python3 /usr/share/huginn-apps/huginn_app.py installer")
+            onWindowWanted: dock.openApp("Files")
             onFinished: shell.touring = false
         }
     }

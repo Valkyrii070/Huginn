@@ -23,7 +23,8 @@ breeze-gtk-theme
 kde-config-gtk-style
 qt6-style-kvantum
 qt-style-kvantum-themes
-papirus-icon-theme
+# Icons: Huginn's own theme (scripts/make-icons.py, in the overlay), with Breeze's underneath for anything it doesn't draw
+breeze-icon-theme
 fonts-inter-variable
 fonts-jetbrains-mono
 fonts-noto-core

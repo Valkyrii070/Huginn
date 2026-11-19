@@ -111,13 +111,19 @@ Row {
         var app = appNamed(name)
         if (app && !(dock.activate && dock.activate(app))) Apps.launch(app.exec)
     }
+    // Pinned apps, then every other app that is running: found by its process (Apps.running) or by having a window
+    // (Status.windows). A window whose app has no .desktop file at all (an AppImage, a game started by a launcher, a
+    // program run from a terminal) still gets a tile, made from the window itself (Status.otherApps).
     readonly property var natives: {
-        var all = Apps.all, run = Apps.running, out = [], i
+        var all = Apps.all, run = Apps.running, out = [], seen = {}, i
+        function add(a) { if (!seen[a.name]) { seen[a.name] = true; out.push(a) } }
         for (i = 0; i < pinnedNames.length; i++)
             for (var j = 0; j < all.length; j++)
-                if (!all[j].web && all[j].name === pinnedNames[i]) { out.push(all[j]); break }
+                if (!all[j].web && all[j].name === pinnedNames[i]) { add(all[j]); break }
         for (i = 0; i < all.length; i++)
-            if (!all[i].web && pinnedNames.indexOf(all[i].name) < 0 && run.indexOf(all[i].name) >= 0) out.push(all[i])
+            if (!all[i].web && (run.indexOf(all[i].name) >= 0 || winsByApp[all[i].name])) add(all[i])
+        var others = Status.otherApps || []
+        for (i = 0; i < others.length; i++) add(others[i])
         return out
     }
     readonly property var webApps: Apps.all.filter(function (a) { return a.web }).slice(0, 4)
@@ -144,7 +150,8 @@ Row {
         Rectangle { visible: slot.open && !slot.allHidden; width: 34; height: 9; radius: 5; color: Theme.t.accent; opacity: 0.22; anchors { horizontalCenter: parent.horizontalCenter; top: parent.bottom; topMargin: 1 } }
         Row {
             visible: slot.open && !slot.launching
-            readonly property int n: slot.allHidden ? 1 : Math.max(1, Math.min(3, slot.wins.length))
+            // Settings › Desktop & Dock › "Bars under open apps": off, one bar however many windows
+            readonly property int n: slot.allHidden || !Settings.dockDots ? 1 : Math.max(1, Math.min(3, slot.wins.length))
             anchors { horizontalCenter: parent.horizontalCenter; top: parent.bottom; topMargin: 4 }
             spacing: 3
             Repeater {

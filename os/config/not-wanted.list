@@ -25,3 +25,5 @@ kwin-common
 plasma-workspace
 plasma-session-wayland
 kscreen
+# Papirus: replaced by Huginn's own icon theme (2026-11-19)
+papirus-icon-theme

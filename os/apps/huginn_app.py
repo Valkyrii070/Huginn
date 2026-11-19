@@ -436,10 +436,19 @@ class Files(QObject):
             self._go(TRASH)
             return
         target = Path(path)
-        if self._in_trash:
+        if not target.exists() and not self._in_trash and str(target) in {p["path"] for p in self.places}:
+            try:                                  # Desktop, Documents, Videos…: a place in the bar is always there to go to
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as err:
+                self.failed.emit(f"Couldn't make your {target.name} folder: {err.strerror or err}")
+                return
+        inside_trash = str(target).startswith(str(trash_home()))
+        if self._in_trash and inside_trash:                   # something in the Bin: it opens once it's put back
             self.said.emit("Put it back to open it.")
         elif target.is_dir():
             self._go(target)
+        elif not target.exists():
+            self.failed.emit(f"“{target.name}” isn't there any more.")
         elif not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
             self.failed.emit("No app is set up to open this kind of file.")
 

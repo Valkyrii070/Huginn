@@ -215,6 +215,33 @@ its job needs it.
   and the common kinds of file as smoked-glass pages with their kind glowing on them and a label in its colour (text,
   PDF, pictures, music, video, archives, documents, sheets, slides, code, web pages, programs). Lists get plainer
   drawings at 24 and 16 pixels.
+- **The whole icon theme (2026-11-19), in place of Papirus.** The Huginn theme now covers what Papirus did, in
+  about 5 MB instead of 260: more folders (Remote, Recent, Favourites, Development, Games, Cloud), the Bin (empty and
+  full) and Huginn's mark for `start-here`; **devices** (drives, SSDs, USB sticks, SD cards, discs, screens, laptops,
+  phones, keyboards, mice, game pads, printers, scanners, cameras, webcams, headphones, speakers, microphones,
+  servers, batteries, routers) and the **dialogs' and security pictures** as lit objects on nothing (the app
+  pictures' look without the tile, which is for apps); more kinds of file (e-books, fonts, calendars, contact cards,
+  disc images, .deb and Flatpak packages, Markdown, more code, pictures, music and video). Every **action and
+  -symbolic icon** (toolbars, menus, GTK's symbolic set: over 500 names) is one of Huginn's own line glyphs:
+  `scripts/icon_symbols.py` runs the drawing code in `shell/qml/Glyph.qml` with a context that writes down what it
+  draws, outlines every stroke into one filled shape and writes it with KDE's colour-scheme class, so Qt apps draw
+  them in the scheme's text colour and GTK recolours them itself. Glyph.qml gained the glyphs this needed (copy,
+  paste, cut, save, bold, italic, link, reply, eject, the window buttons, volume levels…), which the shell and apps
+  can use too. Breeze stays underneath for anything not drawn.
+- **Other apps' icons on Huginn's glass.** `apps/huginn_iconwrap.py` takes each installed app's own icon (from
+  hicolor, Flatpak's exports, Breeze or pixmaps) and puts it on Huginn's smoked-glass tile: an icon that's already a
+  square tile is cut to Huginn's squircle and takes its glass edges; any other shape sits on the glass at the size
+  Huginn's pictures look, with a soft shadow, the glass glowing in the icon's own main colour. The build does every
+  app in the image (`/usr/share/icons/Huginn/wrapped/apps`); the shell does each user's new ones (apt, Flatpak, a
+  `.desktop` file of their own) into `~/.local/share/icons/Huginn` within seconds of their arrival. They're kept
+  under the icon's own name, so every program asking the theme for that icon gets the wrapped one, and the dock and
+  start menu show them as whole tiles like Huginn's own.
+- **App icons, round five.** The pictures are solid objects with depth: a soft light from the upper left across
+  them, a lit rim along their top edges and a shaded one along their foot, and their white details standing a
+  little proud with a small shadow in the object's own deep colour (`picture()`, masks keep each effect to its part).
+  Redrawn: Maps (a folded map under its pin), Disks (a drive with its partitions), Video (a screen with its play
+  button and scrubber), Shortcuts (a bolt on stacked cards), Phone (with its signal). Terminal and Reminders keep
+  their own drawings.
 - **The two marks.** `branding/huginn-os.svg` is the system's logo (a white raven on a vivid aurora tile; shown in
   Welcome) and `branding/huginn-browser.svg` the browser's (the same raven in deep indigo on a pale aurora tile). The
   raven is a soft, rounded drawing made for these icons. The browser carries its icon itself (pull request #4).
@@ -897,7 +924,7 @@ The goal is a desktop that is Huginn's from the first screen to the last. Where 
 - **Everyone else's apps wear the realm** (`apps/huginn_look.py`, run by the shell at sign-in and on every change):
   Qt and KDE apps get a Kvantum style generated from the tokens (KvAdapta's shapes, Huginn's colours, all four realms
   dark and light) and the realm's KDE colours; GTK 3/4 apps get Breeze-GTK in Huginn's colours, and libadwaita apps
-  its named colours. Inter is the font everywhere. Icons are still Papirus.
+  its named colours. Inter is the font everywhere. Icons are Huginn's own theme (see "Icons and looks"); Papirus is gone.
 - **The compositor**: being replaced with Huginn's own, in Rust on Smithay (see "Huginn's own compositor" below): it
   is now the session **"Huginn OS (own compositor, preview)"**. The earlier preview in Python
   (`shell/huginn_compositor.py`, `shell/qml/Compositor.qml`, inside cage) is what the notes below describe; it stays
@@ -1391,6 +1418,63 @@ over when the side island would reach them (`GlassWindow.middleX`).
 - **The sign-in screen** on the compositor: with no session of anyone's it never locks, and the first key goes to the
   greeter (a layer that otherwise only takes keys once clicked). Checked in the VM: the greeter comes up on our
   compositor, takes the password, and signs in to the desktop.
+
+## Fixes from testing on the PC (2026-11-19)
+
+- **Settings that did nothing now work.** Every Huginn process watched the settings file's folder, which only says
+  when a file is added or replaced, while the settings were written over in place: a realm, the wallpaper, the dock's
+  size and the rest only showed after signing in again. The file is now written whole and put in place
+  (`save_atomically`), and the file itself is watched too. Separately, every switch on the Desktop & Dock page called
+  a function that made the change instead of making it; they all work now. "Bars under open apps", "Keep snapped
+  windows together" and "Spaces on every screen" (off: only the main screen has spaces) were never wired up; they are.
+- **The dock makes room** (Settings › Desktop & Dock, on by default): while a window covers its place (filled, full
+  screen, or just big, like Settings) the dock slides down out of the way and its surface becomes a strip along the
+  bottom edge; pointing there brings it back. It reserves no strip of the screen, so filled windows use the whole
+  height; the start menu, an app's island and stacks still open above it.
+- **Panels close when you click away.** The Control Centre is now over the whole work area like Today and the menus,
+  so a click on a window or the desktop closes it (Escape too).
+- **New apps show up at once.** The start menu watches every folder of `.desktop` files (the user's, the system's,
+  Flatpak's), and reads them again when one changes; before, a new app appeared only after a restart.
+- **Other apps in the dock.** A window is matched to its app by app id, X11 class, the process that made it (a
+  Flatpak's own id), and looser likenesses (`org.foo.Bar` ~ bar, `steamwebhelper` ~ steam). A window from a program
+  with no `.desktop` file at all (an AppImage, a game a launcher started) still gets a tile, named and pictured from
+  the window, with Show and Quit in its island; the bar names it the same way.
+- **An app's island stays on the screen.** In the start menu it was placed by the height of the island shown before
+  (the rows are laid out a moment later), so a tall one under a tile low in a scrolled list ran off the bottom. It's
+  placed again whenever its height changes, above the tile when there's no room below.
+- **App menus that fit their apps.** Edit (Undo, Cut, Copy, Paste) is only in apps about typing, or while you're
+  typing in a field of another app. Easel, Clips and Tempo have their own groups (File, Edit, Select, Layer, View;
+  Clip, Playback, Tools; Transport), as do Books, Passwords, Scan, Contacts, Reminders, Documents, Camera, Machines
+  and Recorder, each item only if the app really has it. The menu is taken from the app whose name is in the bar
+  (it could be the previous app's while the window list was a moment behind), and `StandardKey` shortcuts are
+  recognised, so Undo and friends find Easel's own.
+- **Wi‑Fi & Network**: the network in use (Wi‑Fi or the cable) has its own card with its name; its addresses (IP,
+  router, DNS, hardware) show as dots until "Show addresses", and hide again when you leave the page. The Ethernet row
+  names the connection instead of showing the address.
+- **The welcome tour** opens Files for the "Windows and spaces" step when nothing's open (if "open an app" was
+  skipped), and points at the window once it's there.
+- **Files**: Desktop, Documents, Videos… in the places bar are made if they aren't there yet (clicking one did
+  nothing), and the places bar works from the Trash.
+- **Software Update tells the truth.** The list is what apt would really put in (`apt-get -s dist-upgrade`), not
+  `apt list --upgradable`, which also lists the updates Ubuntu is holding back (phased updates): those were shown as
+  ready, "installed", and still there afterwards. After installing, it looks again and says how many went in and what
+  is still waiting, with the reason the tool gave. Its arrows now turn the way they point.
+- **Code**: suggestions come likeliest first, not in alphabetical order: how well each matches what's typed (the
+  same start, any case, the capitals or parts of a name: `gV`, `get_v` → getValue), what you picked lately (kept
+  across runs), and what's used near the cursor and often in the file, with the language server's own order as a
+  hint. **New File** without a folder asks for a language and starts with a few lines of it; in a folder, "In a
+  Language…" does the same. **Languages…** (the start screen, the palette) lists every language with what's there,
+  and **Add** puts in its helper and tools: Ubuntu's packages through the system's password prompt (clangd and
+  build-essential, Rust, Go and gopls, Node and npm, a JDK, Qt's qmlls, Lua, SQLite, CMake), and the helpers Ubuntu
+  doesn't package (TypeScript, Bash, YAML, HTML/CSS/JSON) from npm into `~/.local/share/huginn/code-tools`.
+- **Easel paints without lag.** The canvas was put together from every layer (styles and adjustment layers
+  included) for each pointer movement, even just hovering with a brush. Now it's made at most once a frame, hovering
+  only moves the brush's outline, and during a stroke what's under and over the layer is put together once and each
+  frame only the patch the new dabs touched is made again (pixel for pixel the same: checked against the full
+  picture). On a 4000×3000 picture a brush step went from about a fifth of a second to under a millisecond.
+- **Steam's overlay** (Shift+Tab): nothing in Huginn takes Shift+Tab; the overlay only works in games that draw
+  through X11, and SDL 3 picks Wayland on a compositor that offers what Huginn's does. The session now asks SDL games
+  for X11 (`SDL_VIDEODRIVER=x11`, overridable per game).
 
 ## Huginn, the browser
 

@@ -156,14 +156,14 @@ class Settings(QObject):
     Each process watches the file, so a change made anywhere (realm, dark mode, menu style) shows everywhere."""
     changed = Signal()
     DEFAULTS = {"menuStyle": "one", "dark": "true", "realm": "aurora", "clock24": "true", "barDate": "true", "batteryPercent": "false",
-                "dockHide": "false", "dockDots": "true", "autoUpdate": "true", "liveWallpaper": "false",
+                "dockMakeRoom": "true", "dockDots": "true", "autoUpdate": "true", "liveWallpaper": "false",
                 "contrast": "false", "reduceTransparency": "false", "reduceMotion": "false", "uiScale": "1",       # accessibility
                 # Settings › Desktop & Dock
                 "dockSize": "44", "hideStyle": "drop", "dockClickHides": "true", "overviewOpen": "glide", "hotCorner": "false",
                 "spacesAllScreens": "true", "inAppMotion": "grow", "fillButtonLayouts": "true", "snapGaps": "true", "keepSnapped": "true",
                 # windows and screens on Huginn's own compositor
                 "reopenApps": "true", "rememberPlaces": "true", "adaptiveSync": "auto", "sharpX11": "true", "allowTearing": "true"}
-    SWITCHES = ("clock24", "barDate", "batteryPercent", "dockHide", "dockDots", "autoUpdate", "liveWallpaper", "contrast", "reduceTransparency", "reduceMotion",
+    SWITCHES = ("clock24", "barDate", "batteryPercent", "dockMakeRoom", "dockDots", "autoUpdate", "liveWallpaper", "contrast", "reduceTransparency", "reduceMotion",
                 "dockClickHides", "hotCorner", "spacesAllScreens", "fillButtonLayouts", "snapGaps", "keepSnapped", "reopenApps", "rememberPlaces", "sharpX11", "allowTearing")
     SCALES = ("1", "1.25", "1.5", "1.75", "2")
 
@@ -179,10 +179,18 @@ class Settings(QObject):
         if persist:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
+                # The folder tells of the file being replaced (how every Huginn process saves it, save_atomically);
+                # the file itself of being written over in place (anything else that edits it).
                 self._watcher.addPath(str(path.parent))
                 self._watcher.directoryChanged.connect(self._reload)
+                self._watcher.fileChanged.connect(self._reload)
+                self._watch_file()
             except OSError:
                 pass
+
+    def _watch_file(self) -> None:
+        if self._path.exists() and str(self._path) not in self._watcher.files():
+            self._watcher.addPath(str(self._path))
 
     def _load(self) -> None:
         try:
@@ -194,6 +202,7 @@ class Settings(QObject):
     def _reload(self) -> None:
         before = dict(self._values)
         self._load()
+        self._watch_file()                 # a replaced file is a new file: watch that one
         if before != self._values:
             self.changed.emit()
 
@@ -203,7 +212,9 @@ class Settings(QObject):
     clock24 = Property(bool, lambda self: self._values["clock24"] == "true", notify=changed)
     barDate = Property(bool, lambda self: self._values["barDate"] == "true", notify=changed)
     batteryPercent = Property(bool, lambda self: self._values["batteryPercent"] == "true", notify=changed)
-    dockHide = Property(bool, lambda self: self._values["dockHide"] == "true", notify=changed)
+    # "Make room for windows": the dock slides away while a window covers its place (a filled one, or one dragged
+    # over it), and comes back when the pointer reaches the bottom edge. (Was "dockHide", which nothing read.)
+    dockMakeRoom = Property(bool, lambda self: self._values["dockMakeRoom"] == "true", notify=changed)
     dockDots = Property(bool, lambda self: self._values["dockDots"] == "true", notify=changed)
     autoUpdate = Property(bool, lambda self: self._values["autoUpdate"] == "true", notify=changed)
     liveWallpaper = Property(bool, lambda self: self._values["liveWallpaper"] == "true", notify=changed)   # the wallpaper moves on the desktop too
@@ -240,12 +251,22 @@ class Settings(QObject):
         self.changed.emit()
         if self._persist:
             try:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                self._path.write_text(json.dumps(self._values, indent=2), encoding="utf-8")
+                save_atomically(self._path, json.dumps(self._values, indent=2))
+                self._watch_file()
                 if key == "realm":
                     write_look(value)
             except OSError as err:
                 print(f"Could not save settings: {err}", file=sys.stderr)
+
+
+def save_atomically(path: Path, text: str) -> None:
+    """Writes a file whole and then puts it in place, so a reader never sees half of it, and every process watching
+    its folder (the shell, each app, the session daemon) is told: writing over a file in place only tells those
+    watching the file itself, which is how a change made in Settings could go unseen until the next sign-in."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(f".{path.name}.{os.getpid()}.part")
+    part.write_text(text, encoding="utf-8")
+    os.replace(part, path)
 
 
 def write_look(realm: str) -> None:
@@ -406,6 +427,25 @@ def own_icon(key: str) -> str:
     return ""
 
 
+def _iconwrap():
+    """huginn_iconwrap.py (other apps' icons in Huginn's glass), from the installed apps or the kit's."""
+    for d in (Path("/usr/share/huginn-apps"), HERE.parent / "apps"):
+        if (d / "huginn_iconwrap.py").exists():
+            if str(d) not in sys.path:
+                sys.path.append(str(d))
+            import huginn_iconwrap
+            return huginn_iconwrap
+    return None
+
+
+def wrapped_icon(icon: str, desktop_id: str) -> str:
+    """Another app's icon on Huginn's glass tile (huginn_iconwrap.py made it), as an address QML can show; "" if
+    there's none yet."""
+    wrap = _iconwrap()
+    found = wrap.find_wrapped(icon, desktop_id) if wrap and icon else ""
+    return QUrl.fromLocalFile(found).toString() if found else ""
+
+
 def app_key(command: str) -> str:
     """'python3 /usr/share/huginn-apps/huginn_app.py files' -> 'files'; anything else -> ''."""
     parts = shlex.split(command) if command else []
@@ -449,6 +489,16 @@ class Apps(QObject):
             self._matchers = [(a["name"], self._matcher(a["exec"])) for a in self._apps]
             self._timer = QTimer(self, interval=2000, timeout=self._poll)
             self._timer.start()
+            # New apps (installed with apt, Flatpak or the App Store, or a .desktop file dropped in place) show up in
+            # the start menu at once, not at the next sign-in: every folder of .desktop files is watched, and a
+            # folder that doesn't exist yet (Flatpak's, before the first Flatpak app) is looked for now and then.
+            self._app_watch = QFileSystemWatcher(self)
+            self._app_watch.directoryChanged.connect(lambda _path: self._rescan_soon.start())
+            self._rescan_soon = QTimer(self, singleShot=True, interval=1200, timeout=self.rescan)
+            self._watch_folders()
+            self._folder_check = QTimer(self, interval=15000, timeout=self._watch_folders)
+            self._folder_check.start()
+            QTimer.singleShot(4000, self._wrap_new)              # icons for apps installed while signed out
             self._told = {}
             self._due = QTimer(self, interval=30000, timeout=self._reminders_due)
             self._due.start()
@@ -463,10 +513,73 @@ class Apps(QObject):
             return QUrl.fromLocalFile(icon).toString() if os.path.isfile(icon) else ""
         return "image://sysicon/" + icon if QIcon.hasThemeIcon(icon) else ""
 
+    @staticmethod
+    def _app_dirs() -> list:
+        """Where .desktop files live: the user's own, every XDG data folder's, and Flatpak's exports (in case the
+        session was started without Flatpak's XDG_DATA_DIRS)."""
+        home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+        dirs = [home / "applications"]
+        dirs += [Path(d) / "applications" for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":") if d]
+        dirs += [home / "flatpak/exports/share/applications", Path("/var/lib/flatpak/exports/share/applications")]
+        out = []
+        for d in dirs:
+            if d not in out:
+                out.append(d)
+        return out
+
+    def _watch_folders(self) -> None:
+        have = set(self._app_watch.directories())
+        new = [str(d) for d in self._app_dirs() if d.is_dir() and str(d) not in have]
+        if new:
+            self._app_watch.addPaths(new)
+            if have:                                  # a folder that appeared since: it may already hold apps
+                self._rescan_soon.start()
+
+    @Slot()
+    def rescan(self) -> None:
+        """Read the .desktop files again (something was installed, removed or changed)."""
+        apps = self._scan()
+        if apps == self._apps:
+            return
+        try:                                          # new apps' icons: Qt keeps what it found in the icon theme
+            from PySide6.QtGui import QIcon
+            QIcon.setThemeSearchPaths(QIcon.themeSearchPaths())
+            apps = self._scan()
+        except Exception:
+            pass
+        self._apps = apps
+        self._matchers = [(a["name"], self._matcher(a["exec"])) for a in self._apps]
+        self.changed.emit()
+        self._poll()
+        self._wrap_new()
+
+    def _wrap_new(self) -> None:
+        """Apps whose icon isn't on Huginn's glass yet (just installed): wrap them in the background, then look
+        again. Each set of new icons is tried once, so an icon that can't be found doesn't keep it busy."""
+        if self._demo or getattr(self, "_wrapping", None) is not None:
+            return
+        missing = sorted({a["icon"] for a in self._apps if not a.get("own") and not a.get("web") and a.get("icon") and not a.get("glyph")})
+        tried = getattr(self, "_wrap_tried", set())
+        if not missing or set(missing) <= tried:
+            return
+        self._wrap_tried = tried | set(missing)
+        wrap = _iconwrap()
+        if wrap is None:
+            return
+        proc = QProcess(self)
+        proc.finished.connect(lambda code, _status, proc=proc: self._wrapped(proc, code))
+        self._wrapping = proc
+        proc.start(sys.executable, [wrap.__file__, "--user", "--quiet"])
+
+    def _wrapped(self, proc, code: int) -> None:
+        self._wrapping = None
+        proc.deleteLater()
+        if code == 0:
+            self.rescan()
+
     @classmethod
     def _scan(cls) -> list:
-        dirs = [Path.home() / ".local/share/applications"]
-        dirs += [Path(d) / "applications" for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
+        dirs = cls._app_dirs()
         seen, apps = set(), []
         colours = app_colours()
         for folder in dirs:
@@ -495,7 +608,8 @@ class Apps(QObject):
                              "wm": entry.get("StartupWMClass", "") or (f"huginn-{key}" if key else path.stem),
                              "web": entry.get(WEB_APP_KEY, "false").lower() == "true",
                              "glyph": glyph, "image": "" if glyph else cls._image(entry.get("Icon", "")),
-                             "own": own_icon("browser" if name == "Huginn" else app_key(command) if app_key(command) in APP_GLYPHS else ""),
+                             "own": own_icon("browser" if name == "Huginn" else app_key(command) if app_key(command) in APP_GLYPHS else "")
+                                    or wrapped_icon(entry.get("Icon", ""), path.stem),
                              "execRaw": entry.get("Exec", ""), "mimes": [m for m in entry.get("MimeType", "").split(";") if m],
                              "actions": cls._actions(parser, entry), "file": str(path),
                              "flatpak": "flatpak" in str(path) or bool(entry.get("X-Flatpak", ""))})
@@ -524,6 +638,12 @@ class Apps(QObject):
         if key:
             return ("huginn_app.py", key)
         first = os.path.basename(parts[0])
+        if first == "flatpak":                       # flatpak run [options] org.example.App: that app's id, anywhere in a process's arguments
+            ident = next((p for p in parts[2:] if not p.startswith("-") and "." in p), "")
+            return ("@flatpak", ident) if ident else None
+        if first == "env":                           # env FOO=1 program …
+            rest = [p for p in parts[1:] if "=" not in p and not p.startswith("-")]
+            first = os.path.basename(rest[0]) if rest else first
         if first.startswith("python") and len(parts) > 1:
             return (os.path.basename(parts[1]), "")
         return (first, "")
@@ -542,18 +662,25 @@ class Apps(QObject):
                 procs.append(argv)
         running = []
         for name, match in self._matchers:
-            if not match:
-                continue
-            program, arg = match
-            for argv in procs:
-                head = argv[:2]
-                if program in head and (not arg or arg in argv[head.index(program) + 1:head.index(program) + 2]):
-                    running.append(name)
-                    break
+            if match and any(self._argv_matches(match, argv) for argv in procs):
+                running.append(name)
         badges = self.read_badges(running)
         if running != self._running or badges != self._badges:
             self._running, self._badges = running, badges
             self.runningChanged.emit()
+
+    @staticmethod
+    def _argv_matches(match, argv: list) -> bool:
+        program, arg = match
+        if program == "@flatpak":
+            return arg in argv
+        head = argv[:2]
+        return program in head and (not arg or arg in argv[head.index(program) + 1:head.index(program) + 2])
+
+    def app_for_argv(self, argv: list) -> str:
+        """The installed app whose command this process is (the window list asks, for windows it can't name)."""
+        argv = [os.path.basename(a) for a in argv]
+        return next((name for name, match in getattr(self, "_matchers", []) if match and self._argv_matches(match, argv)), "")
 
     def _reminders_due(self) -> None:
         """Every half minute: has a reminder just come due? Then say so, whether or not Reminders is open."""
@@ -948,6 +1075,7 @@ def main() -> int:
     ctx.setContextProperty("Glance", glance)
     from huginn_system import System
     status = System(demo=args.preview, apps=apps)              # battery, network, Bluetooth, levels, the app in front
+    apps.changed.connect(status._name_windows)                  # an app just installed: its open windows are its now
     ctx.setContextProperty("Status", status)
     from huginn_stacks import Stacks
     stacks = Stacks(demo=args.preview, icon=own_icon)               # the dock's stacks: Downloads, and folders put there

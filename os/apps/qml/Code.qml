@@ -63,6 +63,8 @@ GlassWindow {
     }
     function view() { return docs.itemAt(Backend.current) }
     function ask(kind, extra) { var s = extra || {}; s.kind = kind; sheet = s }
+    // New File: in an open folder, a name (its ending picks the language); with no folder, which language
+    function newFile() { if (Backend.root) ask("new", { folder: Backend.root, dir: false }); else ask("langs", { mode: "new" }) }
     function closeTab(i) { if (Backend.close(i, false) === "dirty") ask("dirty", { tab: i, name: Backend.tabs[i].name }) }
     function save() { if (Backend.current < 0) return; if (Backend.save(Backend.current, false) === "changed") ask("clash", { tab: Backend.current }) }
     function openPalette(prefix) { palBox.text = prefix; palList.model = paletteRows(prefix); palOpen = true; palBox.forceActiveFocus(); palBox.cursorPosition = prefix.length; palList.currentIndex = 0 }
@@ -135,7 +137,9 @@ GlassWindow {
         { name: "Toggle Word Wrap", key: "Alt+Z", run: function () { Backend.setWrap(!Backend.wrap) } },
         { name: "Bigger Text", key: "Ctrl+=", run: function () { Backend.setSize(Backend.size + 1) } },
         { name: "Smaller Text", key: "Ctrl+-", run: function () { Backend.setSize(Backend.size - 1) } },
-        { name: "New File", key: "Ctrl+N", run: function () { win.ask("new", { folder: Backend.root, dir: false }) } },
+        { name: "New File", key: "Ctrl+N", run: function () { win.newFile() } },
+        { name: "New File in a Language…", key: "", run: function () { win.ask("langs", { mode: "new" }) } },
+        { name: "Languages: Add Support…", key: "", run: function () { win.ask("langs", { mode: "manage" }) } },
         { name: "New Folder", key: "", run: function () { win.ask("new", { folder: Backend.root, dir: true }) } },
         { name: "Open Folder…", key: "Ctrl+O", run: function () { win.browseAt = Backend.root || Backend.home; win.ask("open") } },
         { name: "Close Folder", key: "", run: function () { Backend.closeFolder() } },
@@ -288,7 +292,7 @@ GlassWindow {
     Shortcut { sequence: "F11"; onActivated: win.dbg.stepIn() }
     Shortcut { sequence: "Shift+F11"; onActivated: win.dbg.stepOut() }
     Shortcut { sequence: "Ctrl+\\"; onActivated: win.toggleSplit() }
-    Shortcut { sequence: "Ctrl+N"; onActivated: win.ask("new", { folder: Backend.root, dir: false }) }
+    Shortcut { sequence: "Ctrl+N"; onActivated: win.newFile() }
     Shortcut { sequence: "Ctrl+O"; onActivated: { win.browseAt = Backend.root || Backend.home; win.ask("open") } }
     Shortcut { sequence: "Ctrl+Shift+I"; onActivated: if (Backend.current >= 0) Backend.format(Backend.current) }
     Shortcut { sequence: "Ctrl+Shift+V"; onActivated: win.mdPreview = !win.mdPreview }
@@ -371,14 +375,32 @@ GlassWindow {
             Rectangle { anchors.fill: parent; radius: win.r; color: "#77000000"; MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onClicked: if (win.sheet && win.sheet.kind !== "dirty") win.sheet = null } }
             Rectangle { id: card; anchors.centerIn: parent; radius: 18; color: Theme.t.menu_bg; border.width: 1; border.color: Theme.t.menu_border
                 readonly property string kind: win.sheet ? win.sheet.kind : ""
-                width: kind === "diff" ? win.width - 120 : kind === "open" ? 560 : 470
-                height: kind === "diff" ? win.height - 100 : kind === "open" ? Math.min(win.height - 80, 520) : kind === "dirty" || kind === "clash" || kind === "trash" || kind === "discard" ? 170 : 200
+                width: kind === "diff" ? win.width - 120 : kind === "open" || kind === "langs" ? 560 : 470
+                height: kind === "diff" ? win.height - 100 : kind === "open" || kind === "langs" ? Math.min(win.height - 80, 560) : kind === "dirty" || kind === "clash" || kind === "trash" || kind === "discard" ? 170 : 200
                 MouseArea { anchors.fill: parent }
                 Label { x: 24; y: 20; width: parent.width - 48; elide: Text.ElideMiddle; font.pixelSize: 17; font.weight: Font.DemiBold
                     text: ({ "open": "Open a folder", "dirty": "Save changes to “" + (win.sheet ? win.sheet.name : "") + "”?", "clash": "This file changed on disk",
                              "new": win.sheet && win.sheet.dir ? "New folder" : "New file", "rename": "Rename “" + (win.sheet ? win.sheet.name : "") + "”",
                              "trash": "Move “" + (win.sheet ? win.sheet.name : "") + "” to the Trash?", "renamesym": "Rename “" + (win.sheet ? win.sheet.name : "") + "” everywhere", "debugprog": "Which program should be debugged?", "run": "What Run does", "discard": "Throw away the changes to “" + (win.sheet ? win.sheet.rel : "") + "”?",
+                             "langs": win.sheet && win.sheet.mode === "new" ? "New file in…" : "Languages",
                              "diff": (win.sheet ? win.sheet.rel : "") + (win.sheet && win.sheet.staged ? "  ·  staged" : "") })[card.kind] || "" }
+                // Languages: pick one for a new file (it starts with a few lines of it), or add what one needs: its helper
+                // for suggestions and problems, and its tools for Run (from Ubuntu, or npm into your own folder)
+                Label { visible: card.kind === "langs"; x: 24; y: 48; width: parent.width - 48; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 12
+                    text: win.sheet && win.sheet.mode === "new" ? "The file starts with a few lines of the language, in " + (Backend.root ? Backend.rootName : "Documents") + "."
+                                                                : "Every language is coloured. Adding one puts in its helper (suggestions, problems, go to definition) and the tools Run uses." }
+                ListView { id: langList; visible: card.kind === "langs"; x: 12; y: 86; width: parent.width - 24; height: parent.height - 150; clip: true; boundsBehavior: Flickable.StopAtBounds
+                    model: card.kind === "langs" ? Backend.languages : []
+                    delegate: Pressable { required property var modelData; width: langList.width; height: 46; radius: 10; color: hovered ? Theme.t.hover : "transparent"
+                        onClicked: if (win.sheet.mode === "new") { Backend.newFileIn(modelData.name); win.sheet = null }   // (closing the sheet ends this row)
+                        Label { x: 12; y: 6; text: modelData.name; font.weight: Font.DemiBold }
+                        Label { x: 12; y: 25; font.pixelSize: 11; secondary: true
+                            text: modelData.adding ? "Adding…" : modelData.helper ? "Ready · " + modelData.helper + (modelData.tools ? "" : " · its tools aren't in yet")
+                                  : modelData.hasHelper ? "Colours only until its helper is added" : "Colours" + (modelData.tools ? "" : " · its tools aren't in yet") }
+                        Label { anchors { right: addLang.left; rightMargin: 12; verticalCenter: parent.verticalCenter } text: modelData.ext; font.family: win.mono; font.pixelSize: 11; secondary: true }
+                        Btn { id: addLang; anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter }
+                            visible: modelData.canAdd || modelData.adding; enabled: !modelData.adding; text: modelData.adding ? "Adding…" : "Add"
+                            onClicked: { var lang = modelData.name; Backend.addLanguage(lang) } } } }
                 Label { visible: ["dirty", "clash", "trash", "discard"].indexOf(card.kind) >= 0; x: 24; y: 52; width: parent.width - 48; wrapMode: Text.WordWrap; secondary: true
                     text: card.kind === "dirty" ? "If you don't save, your changes are lost." : card.kind === "clash" ? "Something else changed it since you opened it. Keep yours (overwrite) or take what's on disk?"
                         : card.kind === "trash" ? "You can put it back from the Trash in Files." : "This can't be undone: the file goes back to how it was at the last commit." }
@@ -419,10 +441,11 @@ GlassWindow {
                 Label { visible: card.kind === "diff" && diffList.count === 0; anchors.centerIn: parent; secondary: true; text: "No differences" }
                 Row { anchors { right: parent.right; rightMargin: 20; bottom: parent.bottom; bottomMargin: 18 } spacing: 8
                     Btn { visible: card.kind === "dirty"; text: "Don't Save"; onClicked: { var t = win.sheet.tab; win.sheet = null; Backend.close(t, true) } }
-                    Btn { text: card.kind === "diff" ? "Done" : "Cancel"; onClicked: win.sheet = null }
+                    Btn { visible: card.kind === "new" && !(win.sheet && win.sheet.dir); text: "In a Language…"; onClicked: win.ask("langs", { mode: "new" }) }
+                    Btn { text: card.kind === "diff" || card.kind === "langs" && win.sheet.mode !== "new" ? "Done" : "Cancel"; onClicked: win.sheet = null }
                     Btn { visible: card.kind === "diff" && !win.sheet.staged && !!win.sheet.canStage; text: "Stage"; onClicked: { Backend.stage(win.sheet.rel); win.sheet = null } }
                     Btn { visible: card.kind === "clash"; text: "Take Theirs"; onClicked: { var t = win.sheet.tab; win.sheet = null; Backend.reload(t) } }
-                    Btn { id: sheetOk; visible: card.kind !== "diff"; primary: card.kind !== "trash" && card.kind !== "discard"; danger: card.kind === "trash" || card.kind === "discard"
+                    Btn { id: sheetOk; visible: card.kind !== "diff" && card.kind !== "langs"; primary: card.kind !== "trash" && card.kind !== "discard"; danger: card.kind === "trash" || card.kind === "discard"
                         text: ({ "open": "Open This Folder", "dirty": "Save", "clash": "Keep Mine", "new": "Make", "rename": "Rename", "trash": "Move to Trash", "run": "Use It", "discard": "Throw Away", "renamesym": "Rename", "debugprog": "Debug" })[card.kind] || "OK"
                         onClicked: {
                             var s = win.sheet, why = ""
@@ -645,14 +668,39 @@ GlassWindow {
                 function hover() { var lc = lineCol(); Backend.hover(index, lc[0], lc[1]) }
                 function wordBefore() { var t = edit.getText(Math.max(0, edit.cursorPosition - 80), edit.cursorPosition); var m = /[A-Za-z_][A-Za-z0-9_]*$/.exec(t); return m ? m[0] : "" }
                 function offer(items) { win.compAll = items; filterOffer() }
+                // How well a suggestion matches what's typed: the same letters at its start, then in any case, then
+                // its capitals or the parts of its name (gV, get_v: getValue, get_value), then the letters in order.
+                function matchScore(label, p) {
+                    if (!p) return 1
+                    if (label.indexOf(p) === 0) return 4
+                    var l = label.toLowerCase(), q = p.toLowerCase()
+                    if (l.indexOf(q) === 0) return 3
+                    if (l[0] !== q[0]) return 0
+                    var heads = label.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_]+/).map(function (w) { return w[0] ? w[0].toLowerCase() : "" }).join("")
+                    if (heads.indexOf(q) === 0) return 2
+                    var at = 0
+                    for (var n = 0; n < q.length; n++) { at = l.indexOf(q[n], at); if (at < 0) return 0; at++ }
+                    return 1
+                }
                 function filterOffer() {
-                    var p = wordBefore(), out = [], lower = p.toLowerCase()
-                    for (var k = 0; k < win.compAll.length && out.length < 50; k++) { var it = win.compAll[k]; if (!p || it.label.toLowerCase().indexOf(lower) === 0) out.push(it) }
+                    var p = wordBefore(), scored = []
+                    for (var k = 0; k < win.compAll.length; k++) {
+                        var it = win.compAll[k], m = matchScore(it.label, p)
+                        if (m <= 0) continue
+                        // likeliest first: how well it matches, then picked lately, used near here and often in this file,
+                        // the language server's own order, and shorter before longer when all else is even
+                        var s = m * 10 + (it.recent || 0) * 6 + (it.near !== undefined && it.near < 1e6 ? 3 / (1 + it.near / 25) : 0)
+                                + Math.min(3, Math.log(1 + (it.freq || 0))) - (it.rank || 0) * 0.01 - it.label.length * 0.02 + (it.snippet ? 0.5 : 0)
+                        scored.push([s, k, it])
+                    }
+                    scored.sort(function (a, b) { return b[0] - a[0] || a[1] - b[1] })
+                    var out = scored.slice(0, 50).map(function (x) { return x[2] })
                     if (out.length === 1 && out[0].label === p) out = []
                     win.compPrefix = p; win.comp = out; win.compAt = 0
                 }
                 function accept(item) {
                     var p = win.compPrefix, at = edit.cursorPosition
+                    Backend.picked(item.label)
                     win.comp = []; win.compAll = []
                     if (item.snippet) { startSnippet(at - p.length, at, item.snippet); return }
                     edit.remove(at - p.length, at); edit.insert(at - p.length, item.insert)
@@ -1123,7 +1171,8 @@ GlassWindow {
                 text: Backend.root ? "Pick a file on the left, or press Ctrl+P and type part of its name." : "Open a project folder to start. Code reads its files, its Git history and speaks to your language's tools." }
             Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: 8
                 Btn { visible: !Backend.root; primary: true; text: "Open Folder…"; onClicked: { win.browseAt = Backend.home; win.ask("open") } }
-                Btn { text: "New File"; onClicked: Backend.root ? win.ask("new", { folder: Backend.root, dir: false }) : Backend.newUntitled() } }
+                Btn { text: "New File"; onClicked: win.newFile() }
+                Btn { text: "Languages…"; onClicked: win.ask("langs", { mode: "manage" }) } }
             Column { visible: !Backend.root && Backend.recent.length > 0; width: parent.width; spacing: 2; topPadding: 8
                 Label { text: "RECENT"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2; secondary: true }
                 Repeater { model: Backend.recent.slice(0, 6)

@@ -17,6 +17,7 @@
 use std::{
     cell::Cell,
     collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -135,6 +136,10 @@ pub struct Hiding {
     pub style: String,
 }
 
+/// From the shell's settings (dock_layout): snapped pairs come forward together; switching space switches every screen.
+pub static KEEP_SNAPPED: AtomicBool = AtomicBool::new(true);
+pub static SPACES_ALL_SCREENS: AtomicBool = AtomicBool::new(true);
+
 #[derive(Default)]
 pub struct Wm {
     pub spaces: Vec<String>,
@@ -217,6 +222,22 @@ impl<B: Backend + 'static> HuginnState<B> {
             return;
         }
         wm.current = n;
+        // Settings › Desktop & Dock › "Spaces on every screen" off: only the main screen has spaces; windows on the
+        // other screens stay where they are whichever space is in front (they move along to it).
+        if !SPACES_ALL_SCREENS.load(Ordering::Relaxed) && self.space.outputs().count() > 1 {
+            let main = crate::displays::main_name();
+            let first = self.space.outputs().next().map(|o| o.name());
+            let main = main.filter(|m| self.space.outputs().any(|o| &o.name() == m)).or(first);
+            let others: Vec<WindowElement> = self
+                .space
+                .elements()
+                .filter(|w| self.output_of(w).is_some_and(|o| Some(o.name()) != main))
+                .cloned()
+                .collect();
+            for w in others {
+                Self::set_window_space(&w, n);
+            }
+        }
         let leaving: Vec<WindowElement> = self
             .space
             .elements()
@@ -819,7 +840,12 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
     }
 
-    /// Windows snapped side by side come forward together.
+    /// Windows snapped side by side come forward together (Settings › Desktop & Dock › "Keep snapped windows
+    /// together"; off, each comes forward alone).
+    pub fn partner_together(&self, window: &WindowElement) -> Option<WindowElement> {
+        if KEEP_SNAPPED.load(Ordering::Relaxed) { self.partner_of(window) } else { None }
+    }
+
     pub fn partner_of(&self, window: &WindowElement) -> Option<WindowElement> {
         let id = window_id(window);
         let mine = *self.huginn.wm.snapped.get(&id)?;
@@ -873,6 +899,12 @@ impl<B: Backend + 'static> HuginnState<B> {
         }
         if let Some(g) = v.get("gaps").and_then(|s| s.as_bool()) {
             self.huginn.wm.gaps = g;
+        }
+        if let Some(k) = v.get("keepSnapped").and_then(|s| s.as_bool()) {
+            KEEP_SNAPPED.store(k, Ordering::Relaxed);
+        }
+        if let Some(a) = v.get("spacesAllScreens").and_then(|s| s.as_bool()) {
+            SPACES_ALL_SCREENS.store(a, Ordering::Relaxed);
         }
         // the look: dark or light title islands, and frost behind the glass unless transparency is turned down
         if let Some(d) = v.get("dark").and_then(|s| s.as_bool()) {

@@ -11,6 +11,7 @@ All of it is D-Bus through Gio; nothing here blocks the screen for long (every c
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -221,17 +222,103 @@ if (!w || w.normalWindow || w.dialog)
         rows = []
         for w in data.get("windows", []):
             app_id = w.get("app", "")
-            rows.append({"id": str(w.get("id", "")), "appId": app_id, "pid": int(w.get("pid", 0) or 0), "name": self._app_name(app_id) or self._app_name(w.get("cls", "")),
+            pid = int(w.get("pid", 0) or 0)
+            rows.append({"id": str(w.get("id", "")), "appId": app_id, "pid": pid, "cls": w.get("cls", ""),
+                         "name": self.app_for_window(app_id, w.get("cls", ""), pid),
                          "title": w.get("title", ""), "minimised": bool(w.get("minimised")), "active": bool(w.get("active") or w.get("focused")),
                          "space": int(w.get("space", 0)), "full": bool(w.get("full")), "x": w.get("x", 0), "y": w.get("y", 0), "w": w.get("w", 0), "h": w.get("h", 0)})
         self._windows = rows
+        self._others = self._other_apps(rows)
         self._spaces = {"current": int(data.get("current", 0)), "names": list(data.get("spaces") or ["Main"])}
         self.windowsChanged.emit()
 
     def _name_windows(self):
         for w in self._windows:
-            w["name"] = self._app_name(w["appId"]) or w["name"]
+            w["name"] = self.app_for_window(w["appId"], w.get("cls", ""), w.get("pid", 0))   # "" again: _other_apps names the rest
+        self._others = self._other_apps(self._windows)
         self.windowsChanged.emit()
+
+    # ------------------------------------------------------------------ which app a window belongs to
+    def app_for_window(self, app_id: str, cls: str = "", pid: int = 0) -> str:
+        """The name of the installed app a window is from: by its app id or X11 class against each .desktop file's id
+        and StartupWMClass, then by the process that made it, then by looser likenesses (org.foo.Bar ~ bar, a
+        class that starts with the app's program: steamwebhelper ~ steam). '' when none fits."""
+        return (self._app_name(app_id) or self._app_name(cls) or self._app_by_pid(pid)
+                or self._app_loose(app_id) or self._app_loose(cls))
+
+    def _app_by_pid(self, pid: int) -> str:
+        if not pid or self._apps is None:
+            return ""
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as fh:                 # a Flatpak app says which it is
+                env = dict(kv.split(b"=", 1) for kv in fh.read(65536).split(b"\0") if b"=" in kv)
+            flatpak = env.get(b"FLATPAK_ID", b"").decode("utf-8", "replace")
+            if flatpak:
+                found = self._app_name(flatpak)
+                if found:
+                    return found
+        except OSError:
+            pass
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = [os.path.basename(a.decode("utf-8", "replace")) for a in fh.read(4096).split(b"\0") if a]
+        except OSError:
+            return ""
+        return self._apps.app_for_argv(argv) if hasattr(self._apps, "app_for_argv") else ""
+
+    GENERIC_PROGRAMS = {"flatpak", "env", "sh", "bash", "python", "python3", "java", "wine", "mono", "electron", "gjs", "exo-open", "xdg-open"}
+
+    def _app_loose(self, wid: str) -> str:
+        low = (wid or "").lower().removesuffix(".desktop")
+        if len(low) < 3 or self._apps is None:
+            return ""
+        last = low.rsplit(".", 1)[-1]
+        for a in self._apps.all:
+            if a.get("web"):
+                continue
+            ident = a.get("id", "").lower()
+            names = {ident, ident.rsplit(".", 1)[-1], a.get("wm", "").lower(), a.get("name", "").lower(), a.get("name", "").lower().replace(" ", "")}
+            if low in names or last in names:
+                return a["name"]
+            try:
+                prog = os.path.basename(shlex.split(a.get("exec") or "")[0]).lower()
+            except (ValueError, IndexError):
+                prog = ""
+            if len(prog) >= 4 and prog not in self.GENERIC_PROGRAMS and (low == prog or low.startswith(prog) or last == prog):
+                return a["name"]
+        return ""
+
+    @staticmethod
+    def _pretty(wid: str) -> str:
+        """A name for an app nobody installed a .desktop file for: org.example.FooBar -> FooBar, my_game -> My game."""
+        last = (wid or "").removesuffix(".desktop").rsplit(".", 1)[-1].replace("_", " ").replace("-", " ").strip()
+        return (last[:1].upper() + last[1:]) if last else ""
+
+    def _other_apps(self, rows: list) -> list:
+        """Tiles for windows of apps that aren't installed as apps (no .desktop file): named from the window, with
+        the icon its app id or class names in the icon theme, if any. Their windows take that name, so the dock
+        groups them like any app's."""
+        out, seen = [], set()
+        for w in rows:
+            if w.get("name"):
+                continue
+            ident = w.get("appId") or w.get("cls") or ""
+            name = self._pretty(ident) or (w.get("title") or "").split(" — ")[-1].split(" - ")[-1].strip() or "App"
+            w["name"] = name
+            if name in seen:
+                continue
+            seen.add(name)
+            image = ""
+            if self._apps is not None and hasattr(self._apps, "_image"):
+                for cand in (w.get("appId", ""), w.get("cls", ""), (w.get("cls") or "").lower(), (w.get("appId") or "").lower()):
+                    image = self._apps._image(cand) if cand else ""
+                    if image:
+                        break
+            out.append({"name": name, "exec": "", "icon": ident, "image": image, "glyph": "", "own": "", "web": False, "id": ident,
+                        "wm": ident, "colours": [], "actions": [], "mimes": [], "group": "utilities", "keywords": "", "about": "", "other": True})
+        return out
+
+
 
     @Slot(str, str)
     def windowDo(self, wid: str, action: str) -> None:
@@ -288,12 +375,16 @@ for (var i = 0; i < all.length; i++) {{ var w = all[i]; if (String(w.internalId)
                 "bottom": [it("Minimise", "shell:minimise"), it("Close window", "shell:close", "Ctrl+W"), it(f"Quit {name}", "shell:quit", "Ctrl+Q")]}
 
     def _front_window(self):
-        """The window whose app is in the bar (the shell's own panels can have the keyboard meanwhile)."""
-        front = next((w for w in self._windows if w.get("active") and not w.get("minimised")), None)
-        if front is None and self._active.get("appId"):
-            mine = [w for w in self._windows if not w.get("minimised") and w.get("appId", "").lower() == self._active["appId"].lower()]
-            front = mine[-1] if mine else None
-        return front
+        """The window whose app is in the bar (the shell's own panels can have the keyboard meanwhile). The bar's app
+        (Active) and the window list come separately from the compositor; when the list is a moment behind, the
+        window it calls active can be the previous app's, and its menus would sit under this app's name. So the
+        app in the bar decides: its active window, else its newest one."""
+        want = (self._active.get("appId") or "").lower()
+        if want:
+            mine = [w for w in self._windows if not w.get("minimised") and (w.get("appId", "").lower() == want or w.get("cls", "").lower() == want)]
+            if mine:
+                return next((w for w in mine if w.get("active")), mine[-1])
+        return next((w for w in self._windows if w.get("active") and not w.get("minimised")), None)
 
     @Slot()
     def loadMenus(self) -> None:
@@ -756,7 +847,7 @@ for (var i = 0; i < all.length; i++) {{ var win = all[i]; if (String(win.interna
             return
         if method == "Active":
             caption, resource, desktop, maximized = params.unpack()
-            app = self._app_name(desktop or resource)
+            app = self.app_for_window(desktop or resource, resource) or self._pretty(desktop or resource)
             self._active = {"name": app or caption, "appId": desktop or resource, "caption": caption, "maximized": bool(maximized)}
             self.activeChanged.emit()
         elif method == "Key":
@@ -939,6 +1030,7 @@ callDBus("org.huginn.Shell", "/org/huginn/Shell", "org.huginn.Shell", "Activated
     waiting = Property(bool, lambda self: self._waiting(), notify=changed)
     active = Property("QVariantMap", lambda self: self._active, notify=activeChanged)
     windows = Property("QVariantList", lambda self: self._windows, notify=windowsChanged)
+    otherApps = Property("QVariantList", lambda self: getattr(self, "_others", []), notify=windowsChanged)
     menus = Property("QVariantMap", lambda self: self._menus, notify=menusChanged)
     overview = Property("QVariantMap", lambda self: self._overview, notify=sceneChanged)
     snapPreview = Property("QVariantMap", lambda self: self._snap_preview, notify=sceneChanged)

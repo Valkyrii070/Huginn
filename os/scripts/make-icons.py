@@ -36,7 +36,8 @@ PICS = {
                + f'<path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" d="M62 132h24l14-34 22 66 18-48 12 16h42"/>',
     "store": f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" d="M98 102V90a30 30 0 0 1 60 0v12"/><path {W} d="M70 98h116l10 86a12 12 0 0 1-12 14H72a12 12 0 0 1-12-14z"/>'
              f'<circle fill="{{c}}" cx="100" cy="124" r="8"/><circle fill="{{c}}" cx="156" cy="124" r="8"/>',
-    "video": f'<rect {W} x="52" y="80" width="152" height="96" rx="20"/><path fill="{{c}}" d="M114 104l40 24-40 24z"/>',
+    "video": f'<rect {W} x="44" y="66" width="168" height="124" rx="22"/><path fill="{{c}}" d="M112 92l44 26-44 26z"/>'
+             f'<rect fill="{{c}}" opacity=".4" x="66" y="164" width="124" height="8" rx="4"/><rect fill="{{c}}" x="66" y="164" width="58" height="8" rx="4"/><circle fill="{{c}}" cx="124" cy="168" r="9"/>',
     "music": f'<path {W} d="M104 82l84-16v22l-84 16z"/><rect {W} x="104" y="90" width="12" height="86"/><rect {W} x="176" y="76" width="12" height="86"/><ellipse {W} cx="96" cy="176" rx="22" ry="17"/><ellipse {W} cx="168" cy="162" rx="22" ry="17"/>',
     "notes": f'<path {W} d="M80 56h96a16 16 0 0 1 16 16v88l-40 40H80a16 16 0 0 1-16-16V72a16 16 0 0 1 16-16z"/><path fill="{{c}}" opacity=".35" d="M152 200v-28a12 12 0 0 1 12-12h28z"/>'
              + "".join(f'<rect fill="{{c}}" opacity=".8" x="86" y="{84 + i * 24}" width="{[84, 84, 52][i]}" height="10" rx="5"/>' for i in range(3)),
@@ -69,16 +70,22 @@ PICS = {
               f'<path fill="none" stroke="{{c}}" stroke-width="11" stroke-linecap="round" d="M128 84a44 44 0 1 1-41 28"/>'
               f'<path fill="{{c}}" d="M133 62l-30 20 28 22z"/>'
               f'<path fill="none" stroke="{{c}}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" d="M128 108v22l15 10"/>',
-    "disks": f'<circle {W} cx="128" cy="128" r="72"/><circle fill="{{c}}" opacity=".25" cx="128" cy="128" r="50"/><circle fill="{{c}}" cx="128" cy="128" r="22"/><circle {W} cx="128" cy="128" r="7"/>',
+    "disks": f'<rect {W} x="44" y="70" width="168" height="116" rx="24"/>'
+             + "".join(f'<rect fill="{{c}}" opacity="{o}" x="{x}" y="92" width="{w}" height="38" rx="9"/>' for x, w, o in ((64, 62, 1), (130, 34, .62), (168, 24, .32)))
+             + f'<rect fill="{{c}}" opacity=".35" x="64" y="152" width="74" height="7" rx="3.5"/><rect fill="{{c}}" opacity=".35" x="64" y="165" width="50" height="7" rx="3.5"/>'
+             f'<circle fill="{{c}}" cx="184" cy="160" r="8"/>',
     "camera": f'<rect {W} x="98" y="66" width="60" height="30" rx="10"/><rect {W} x="48" y="84" width="160" height="110" rx="22"/><circle fill="{{c}}" cx="128" cy="140" r="34"/><circle {W} opacity=".45" cx="128" cy="140" r="16"/><circle fill="{{c}}" cx="184" cy="106" r="7"/>',
     "recorder": f'<rect {W} x="102" y="48" width="52" height="94" rx="26"/><path fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" d="M80 124a48 48 0 0 0 96 0"/><rect {W} x="122" y="170" width="12" height="26"/><rect {W} x="98" y="192" width="60" height="13" rx="6.5"/>',
     "reminders": f'<circle {W} cx="84" cy="90" r="17"/><path fill="none" stroke="{{c}}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M76 90l6 7 11-13"/>'
                  + "".join(f'<circle fill="none" stroke="#fff" stroke-width="9" cx="84" cy="{y}" r="13"/>' for y in (130, 170))
                  + "".join(f'<rect {W} opacity="{o}" x="114" y="{y}" width="{w}" height="14" rx="7"/>' for y, w, o in ((83, 82, 0.6), (123, 82, 1), (163, 56, 1))),
-    "phone": f'<rect {W} x="84" y="44" width="88" height="168" rx="22"/><rect fill="{{c}}" x="96" y="64" width="64" height="118" rx="10"/><rect {W} opacity=".5" x="112" y="76" width="32" height="8" rx="4"/><circle fill="{{c}}" cx="128" cy="196" r="7"/>',
+    "phone": f'<rect {W} x="66" y="44" width="88" height="168" rx="22"/><rect fill="{{c}}" x="78" y="64" width="64" height="118" rx="10"/><rect {W} opacity=".5" x="94" y="76" width="32" height="8" rx="4"/><circle fill="{{c}}" cx="110" cy="196" r="7"/>'
+             + "".join(f'<path fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" opacity="{o}" d="M{172 + i * 22} {104 - i * 14}a{30 + i * 22} {30 + i * 22} 0 0 1 0 {48 + i * 28}"/>' for i, o in ((0, 1), (1, .6))),
     "print": f'<rect {W} opacity=".8" x="84" y="52" width="88" height="48" rx="8"/><rect {W} x="48" y="92" width="160" height="76" rx="18"/><circle fill="{{c}}" cx="182" cy="116" r="7"/>'
              f'<rect {W} stroke="{{c}}" stroke-width="5" x="80" y="140" width="96" height="64" rx="8"/><rect fill="{{c}}" opacity=".7" x="96" y="160" width="64" height="8" rx="4"/><rect fill="{{c}}" opacity=".7" x="96" y="178" width="40" height="8" rx="4"/>',
-    "maps": f'<path {W} d="M128 46a54 54 0 0 1 54 54c0 40-54 110-54 110S74 140 74 100a54 54 0 0 1 54-54z"/><circle fill="{{c}}" cx="128" cy="100" r="21"/>',
+    "maps": f'<path {W} opacity=".86" d="M44 112l54-14 60 14 54-14v92l-54 14-60-14-54 14z"/><path {W} d="M98 98l60 14v92l-60-14z"/>'
+            f'<path fill="none" stroke="{{c}}" stroke-width="8" stroke-linecap="round" opacity=".75" d="M52 172c30-4 46-26 74-24s40 20 78-16"/>'
+            f'<path fill="{{c}}" d="M150 34a38 38 0 0 1 38 38c0 28-38 76-38 76s-38-48-38-76a38 38 0 0 1 38-38z"/><circle {W} cx="150" cy="72" r="14"/>',
     "podcasts": f'<circle {W} cx="128" cy="128" r="78"/>'
                 f'<path fill="none" stroke="{{c}}" stroke-width="10" stroke-linecap="round" d="M92 158a48 48 0 1 1 72 0"/>'
                 f'<path fill="none" stroke="{{c}}" stroke-width="10" stroke-linecap="round" d="M110 144a25 25 0 1 1 36 0"/>'
@@ -99,7 +106,8 @@ PICS = {
     "clips": f'<rect {W} x="50" y="58" width="156" height="140" rx="20"/>'
              + "".join(f'<rect fill="{{c}}" x="{x}" y="{y}" width="12" height="16" rx="4"/>' for x in (62, 182) for y in (72, 100, 128, 156))
              + f'<path fill="{{c}}" d="M112 100l46 28-46 28z"/>',
-    "shortcuts": f'<path {W} d="M146 36L74 140h46l-14 80 78-110h-48z"/>',
+    "shortcuts": f'<rect {W} opacity=".55" x="78" y="44" width="132" height="132" rx="34" transform="rotate(10 144 110)"/><rect {W} x="48" y="76" width="140" height="140" rx="36"/>'
+                 f'<path fill="{{c}}" d="M128 96l-38 54h26l-8 42 40-56h-26z"/>',
     "money": f'<rect {W} opacity=".72" x="66" y="54" width="118" height="44" rx="12"/><rect {W} x="42" y="80" width="172" height="122" rx="24"/>'
              f'<rect fill="{{c}}" x="146" y="118" width="68" height="46" rx="16"/><circle {W} cx="170" cy="141" r="9"/>',
     "characters": f'<circle {W} cx="128" cy="128" r="80"/><circle fill="{{c}}" cx="100" cy="110" r="11"/><circle fill="{{c}}" cx="156" cy="110" r="11"/>'
@@ -256,15 +264,38 @@ def picture(paint, style: str, bright: str, deep: str, cut: str) -> str:
                 f'<rect width="256" height="256" fill="url(#gloss)" mask="url(#shape)"/><rect width="256" height="256" fill="url(#foot)" mask="url(#shape)"/>')
     hi, lo = mix(bright, "#FFFFFF", 0.22), mix(bright, deep, 0.35)
     body, detail = {"solid": ("url(#solid)", cut), "paper": ("url(#paper)", bright), "lit": ("url(#solid)", "#FFFFFF")}[style]
+    shade = mix(deep, "#000000", 0.45)
+    # The object is a solid thing with depth (round 5): a soft light from the upper left across it, a lit rim along
+    # its top edges and a shaded one along its foot, and its details standing a little proud of it, each with a
+    # small shadow in the object's own deep colour. Masks keep each of these to where it belongs:
+    #   every  everything the picture covers        body  where the colour shows       detail  where the white shows
+    #   top    the every-shape less itself moved down (its top edges)     base  less itself moved up (its foot)
+    def mask(body_ink: str, detail_ink: str, other: str) -> str:   # pictures may use colours of their own (the sun)
+        drawn = re.sub(r'(fill|stroke)="#[0-9A-Fa-f]{3,6}"', lambda m: f'{m.group(1)}="{other}"', paint("BODY", "DETAIL"))
+        return drawn.replace('"BODY"', f'"{body_ink}"').replace('"DETAIL"', f'"{detail_ink}"')
+    every, body_only, detail_only = mask("#fff", "#fff", "#fff"), mask("#fff", "#000", "#000"), mask("#000", "#fff", "#000")
+    rim = 3.5
     return (f'<defs><linearGradient id="solid" gradientUnits="userSpaceOnUse" x1="0" y1="60" x2="0" y2="200">'
             f'<stop offset="0" stop-color="{hi}"/><stop offset="1" stop-color="{lo}"/></linearGradient>'
             f'<linearGradient id="paper" gradientUnits="userSpaceOnUse" x1="0" y1="60" x2="0" y2="200">'
             f'<stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#DADDE3"/></linearGradient>'
             f'<filter id="under" x="-30%" y="-30%" width="160%" height="170%"><feGaussianBlur stdDeviation="5"/><feOffset dy="5"/></filter>'
-            f'<linearGradient id="edge" gradientUnits="userSpaceOnUse" x1="0" y1="56" x2="0" y2="96">'
-            f'<stop offset="0" stop-color="#fff" stop-opacity=".45"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>'
+            f'<filter id="lift" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="2.4"/><feOffset dy="2.6"/></filter>'
+            f'<radialGradient id="light" gradientUnits="userSpaceOnUse" cx="92" cy="58" r="170"><stop offset="0" stop-color="#fff" stop-opacity=".30"/>'
+            f'<stop offset=".55" stop-color="#fff" stop-opacity=".05"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
+            f'<linearGradient id="toplit" gradientUnits="userSpaceOnUse" x1="0" y1="40" x2="0" y2="216"><stop offset="0" stop-color="#fff" stop-opacity=".85"/>'
+            f'<stop offset="1" stop-color="#fff" stop-opacity=".25"/></linearGradient>'
+            f'<mask id="every" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{every}</mask>'
+            f'<mask id="body" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{body_only}</mask>'
+            f'<mask id="detail" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{detail_only}</mask>'
+            f'<mask id="top" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{every}<g transform="translate(0 {rim})">{mask("#000", "#000", "#000")}</g></mask>'
+            f'<mask id="base" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">{every}<g transform="translate(0 -{rim})">{mask("#000", "#000", "#000")}</g></mask>'
+            f'</defs>'
             f'<g opacity=".55" filter="url(#under)">{paint("#000", "#000")}</g>{paint(body, detail)}'
-            f'<rect width="256" height="256" fill="url(#edge)" mask="url(#shape)" opacity=".5"/>')
+            f'<rect width="256" height="256" fill="url(#light)" mask="url(#body)"/>'
+            f'<g mask="url(#body)"><g filter="url(#lift)" opacity=".55"><rect width="256" height="256" fill="{shade}" mask="url(#detail)"/></g></g>'
+            f'<rect width="256" height="256" fill="url(#toplit)" mask="url(#top)" opacity=".7"/>'
+            f'<rect width="256" height="256" fill="{shade}" mask="url(#base)" opacity=".38"/>')
 
 
 # ------------------------------------------------------------------------------------------------ folders and files
@@ -285,11 +316,20 @@ EMBLEM = {   # what's on a folder's front (drawn around 128,156 in a 256 box)
     "home": f'<path {W} d="M128 112l40 34v40a6 6 0 0 1-6 6h-22v-26h-24v26H94a6 6 0 0 1-6-6v-40z"/>',
     "templates": f'<rect fill="none" stroke="#fff" stroke-width="9" stroke-dasharray="14 9" x="100" y="122" width="56" height="66" rx="8"/>',
     "public": f'<circle {W} cx="112" cy="140" r="12"/><circle {W} cx="146" cy="140" r="12"/><path {W} d="M90 188a22 18 0 0 1 44 0zM124 188a22 18 0 0 1 44 0z"/>',
+    "remote": f'<circle fill="none" stroke="#fff" stroke-width="8" cx="128" cy="156" r="32"/><path fill="none" stroke="#fff" stroke-width="6" d="M96 156h64M128 124c-14 18-14 46 0 64M128 124c14 18 14 46 0 64"/>',
+    "recent": f'<circle {W} cx="128" cy="156" r="34"/><path fill="none" stroke="{{c}}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" d="M128 136v22l14 9"/>',
+    "favorites": f'<path {W} d="M128 120l11 23 25 3-18 17 5 25-23-12-23 12 5-25-18-17 25-3z"/>',
+    "code": f'<path fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" d="M112 136l-22 20 22 20M144 136l22 20-22 20"/>',
+    "games": f'<path {W} d="M106 136h44c20 0 30 18 30 34 0 18-16 22-26 10l-6-8h-40l-6 8c-10 12-26 8-26-10 0-16 10-34 30-34z"/><rect fill="{{c}}" x="94" y="151" width="22" height="7" rx="3.5"/><rect fill="{{c}}" x="101.5" y="143.5" width="7" height="22" rx="3.5"/><circle fill="{{c}}" cx="150" cy="154" r="5"/><circle fill="{{c}}" cx="162" cy="146" r="5"/>',
+    "cloud": f'<circle {W} cx="112" cy="164" r="18"/><circle {W} cx="136" cy="152" r="24"/><circle {W} cx="156" cy="168" r="14"/><rect {W} x="112" y="164" width="44" height="18"/>',
 }
 FOLDERS = {"folder": "", "folder-open": "", "inode-directory": "", "folder-documents": "documents", "folder-download": "download",
            "folder-downloads": "download", "folder-music": "music", "folder-pictures": "pictures", "folder-images": "pictures",
            "folder-videos": "videos", "folder-video": "videos", "folder-desktop": "desktop", "user-desktop": "desktop",
-           "user-home": "home", "folder-home": "home", "folder-templates": "templates", "folder-publicshare": "public"}
+           "user-home": "home", "folder-home": "home", "folder-templates": "templates", "folder-publicshare": "public",
+           "folder-remote": "remote", "network-workgroup": "remote", "folder-network": "remote", "folder-recent": "recent",
+           "folder-favorites": "favorites", "user-bookmarks": "favorites", "folder-development": "code", "folder-code": "code",
+           "folder-games": "games", "folder-cloud": "cloud", "folder-onedrive": "cloud", "folder-gdrive": "cloud"}
 # kinds of file: (colour key in tokens' apps, label, picture key)
 KINDS = {
     "text-plain": ("disks", "TXT", "lines"), "text-x-generic": ("disks", "TXT", "lines"),
@@ -309,6 +349,25 @@ KINDS = {
     "text-x-csrc": ("code", "C", "code"), "text-x-rust": ("code", "RS", "code"), "application-javascript": ("code", "JS", "code"),
     "text-html": ("help", "HTML", "globe"), "application-x-executable": ("terminal", "", "prompt"), "application-x-shellscript": ("terminal", "SH", "prompt"),
     "application-x-sharedlib": ("terminal", "SO", "prompt"), "unknown": ("disks", "", "dots"), "application-octet-stream": ("disks", "", "dots"),
+    "image-gif": ("photos", "GIF", "image"), "image-webp": ("photos", "WEBP", "image"), "image-tiff": ("photos", "TIFF", "image"),
+    "image-heif": ("photos", "HEIC", "image"), "image-bmp": ("photos", "BMP", "image"), "image-x-xcf": ("easel", "XCF", "image"),
+    "image-vnd.adobe.photoshop": ("easel", "PSD", "image"), "image-openraster": ("easel", "ORA", "image"),
+    "audio-ogg": ("music", "OGG", "note"), "audio-x-vorbis+ogg": ("music", "OGG", "note"), "audio-mp4": ("music", "M4A", "note"), "audio-aac": ("music", "AAC", "note"),
+    "audio-x-opus+ogg": ("music", "OPUS", "note"), "video-quicktime": ("video", "MOV", "play"), "video-x-msvideo": ("video", "AVI", "play"),
+    "application-epub+zip": ("books", "EPUB", "book"), "application-x-mobipocket-ebook": ("books", "MOBI", "book"),
+    "font-x-generic": ("fonts", "", "font"), "font-ttf": ("fonts", "TTF", "font"), "font-otf": ("fonts", "OTF", "font"),
+    "application-x-font-ttf": ("fonts", "TTF", "font"), "font-woff2": ("fonts", "WOFF", "font"),
+    "text-calendar": ("calendar", "ICS", "cal"), "x-office-calendar": ("calendar", "", "cal"),
+    "text-vcard": ("contacts", "VCF", "card"), "text-x-vcard": ("contacts", "VCF", "card"), "x-office-address-book": ("contacts", "", "card"),
+    "application-x-cd-image": ("disks", "ISO", "disc"), "application-x-iso9660-image": ("disks", "ISO", "disc"), "application-x-raw-disk-image": ("disks", "IMG", "disc"),
+    "application-vnd.debian.binary-package": ("store", "DEB", "bag"), "application-x-deb": ("store", "DEB", "bag"),
+    "application-vnd.flatpak.ref": ("store", "", "bag"), "application-vnd.flatpak": ("store", "", "bag"), "application-vnd.flatpak.repo": ("store", "", "bag"),
+    "application-x-appimage": ("store", "APP", "bag"),
+    "text-markdown": ("writer", "MD", "lines"), "text-x-markdown": ("writer", "MD", "lines"),
+    "text-css": ("code", "CSS", "code"), "text-x-c++src": ("code", "CPP", "code"), "text-x-chdr": ("code", "H", "code"), "text-x-java": ("code", "JAVA", "code"),
+    "text-x-go": ("code", "GO", "code"), "application-x-yaml": ("code", "YAML", "code"), "application-toml": ("code", "TOML", "code"),
+    "application-xml": ("code", "XML", "code"), "text-xml": ("code", "XML", "code"), "text-x-makefile": ("terminal", "MAKE", "prompt"),
+    "application-x-desktop": ("settings", "", "dots"), "application-x-bittorrent": ("store", "", "zip"),
 }
 GLYPH = {   # drawn around 128,128 in a 256 box, inside a page
     "lines": "".join(f'<rect {W} x="84" y="{96 + i * 20}" width="{[88, 88, 88, 56][i]}" height="10" rx="5"/>' for i in range(4)),
@@ -322,6 +381,14 @@ GLYPH = {   # drawn around 128,128 in a 256 box, inside a page
     "globe": f'<circle fill="none" stroke="#fff" stroke-width="9" cx="128" cy="124" r="40"/><path fill="none" stroke="#fff" stroke-width="7" d="M88 124h80M128 84c-18 22-18 58 0 80M128 84c18 22 18 58 0 80"/>',
     "prompt": f'<path fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" d="M86 100l28 24-28 24"/><rect {W} x="126" y="142" width="44" height="12" rx="6"/>',
     "dots": "".join(f'<circle {W} cx="{100 + i * 28}" cy="126" r="9"/>' for i in range(3)),
+    "book": f'<path {W} d="M124 94c-14-10-30-12-46-6v68c16-6 32-4 46 6z"/><path {W} opacity=".8" d="M132 94c14-10 30-12 46-6v68c-16-6-32-4-46 6z"/>',
+    "font": f'<path {W} d="M98 160l26-70h12l26 70h-16l-6-18h-20l-6 18zm26-32h12l-6-20z"/>',
+    "cal": f'<rect fill="none" stroke="#fff" stroke-width="8" x="84" y="92" width="88" height="76" rx="10"/><rect {W} x="84" y="92" width="88" height="20" rx="8"/>'
+           + "".join(f'<circle {W} cx="{104 + i * 24}" cy="{130 + j * 20}" r="5"/>' for i in range(3) for j in range(2)),
+    "card": f'<rect fill="none" stroke="#fff" stroke-width="8" x="80" y="96" width="96" height="68" rx="10"/><circle {W} cx="110" cy="122" r="11"/><path {W} d="M92 152a18 14 0 0 1 36 0z"/>'
+            f'<rect {W} x="140" y="114" width="24" height="7" rx="3.5"/><rect {W} x="140" y="130" width="18" height="7" rx="3.5"/>',
+    "disc": f'<circle fill="none" stroke="#fff" stroke-width="9" cx="128" cy="126" r="40"/><circle {W} cx="128" cy="126" r="12"/>',
+    "bag": f'<path fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" d="M110 108v-6a18 18 0 0 1 36 0v6"/><path {W} d="M90 108h76l6 56a8 8 0 0 1-8 9H92a8 8 0 0 1-8-9z"/>',
 }
 FOLDER_BACK = "M28 76a20 20 0 0 1 20-20h52l22 22h86a20 20 0 0 1 20 20v16H28z"
 FOLDER_FRONT = "M28 112a20 20 0 0 1 20-20h160a20 20 0 0 1 20 20v94a20 20 0 0 1-20 20H48a20 20 0 0 1-20-20z"
@@ -394,27 +461,167 @@ def file_small(kind: str, colours: dict) -> str:
             f'<g transform="translate(128 128) scale(1.2) translate(-128 -128)">{GLYPH[glyph].replace("#fff", deep)}</g></svg>\n')
 
 
+# ---------------------------------------------------------------------------------------- devices, status, the Bin
+# Devices and the status pictures (the dialogs' information, warning, error…) are solid objects, drawn as the app
+# icons' pictures are (lit: the colour with white details, light from the upper left, a lit top edge) but on
+# nothing: no glass tile, which is for apps. Small sizes (16 to 24) are flat: the colour with white details.
+DEVICE_PICS = {
+    "ssd": f'<rect {W} x="40" y="76" width="176" height="104" rx="20"/>'
+           + "".join(f'<rect fill="{{c}}" opacity=".9" x="{x}" y="98" width="{w}" height="34" rx="6"/>' for x, w in ((62, 40), (112, 40), (162, 32)))
+           + f'<rect fill="{{c}}" opacity=".35" x="62" y="146" width="110" height="8" rx="4"/><circle fill="{{c}}" cx="194" cy="156" r="6"/>',
+    "usb": f'<rect {W} opacity=".7" x="104" y="40" width="48" height="50" rx="6"/><rect fill="{{c}}" x="116" y="54" width="9" height="12" rx="2"/>'
+           f'<rect fill="{{c}}" x="131" y="54" width="9" height="12" rx="2"/><rect {W} x="88" y="84" width="80" height="132" rx="22"/>'
+           f'<rect fill="{{c}}" opacity=".35" x="106" y="108" width="44" height="56" rx="8"/><circle fill="{{c}}" cx="128" cy="194" r="7"/>',
+    "sdcard": f'<path {W} d="M84 40h68l30 32v128a14 14 0 0 1-14 14H84a14 14 0 0 1-14-14V54a14 14 0 0 1 14-14z"/>'
+              + "".join(f'<rect fill="{{c}}" x="{x}" y="52" width="10" height="28" rx="3"/>' for x in (92, 108, 124, 140))
+              + f'<rect fill="{{c}}" opacity=".3" x="86" y="124" width="82" height="60" rx="8"/>',
+    "optical": f'<circle {W} cx="128" cy="128" r="84"/><circle fill="{{c}}" opacity=".25" cx="128" cy="128" r="60"/><circle fill="{{c}}" cx="128" cy="128" r="24"/><circle {W} cx="128" cy="128" r="8"/>',
+    "monitor": f'<rect {W} x="28" y="44" width="200" height="132" rx="16"/><rect fill="#18202B" x="40" y="56" width="176" height="108" rx="8"/>'
+               f'<path {W} opacity=".55" d="M40 140c40-28 92-34 176-18v34a8 8 0 0 1-8 8H48a8 8 0 0 1-8-8z"/>'
+               f'<rect {W} x="114" y="176" width="28" height="20"/><rect {W} x="82" y="194" width="92" height="12" rx="6"/>',
+    "laptop": f'<rect {W} x="54" y="52" width="148" height="108" rx="12"/><rect fill="#18202B" x="64" y="62" width="128" height="88" rx="6"/>'
+              f'<path {W} opacity=".55" d="M64 132c30-20 70-24 128-12v24a6 6 0 0 1-6 6H70a6 6 0 0 1-6-6z"/>'
+              f'<path {W} d="M28 166h200l-12 22a12 12 0 0 1-11 7H51a12 12 0 0 1-11-7z"/><rect fill="{{c}}" opacity=".45" x="110" y="168" width="36" height="6" rx="3"/>',
+    "handset": f'<rect {W} x="84" y="44" width="88" height="168" rx="22"/><rect fill="{{c}}" x="96" y="64" width="64" height="118" rx="10"/><circle fill="{{c}}" cx="128" cy="196" r="7"/>',
+    "keyboard": f'<rect {W} x="24" y="84" width="208" height="96" rx="18"/>'
+                + "".join(f'<rect fill="{{c}}" opacity=".9" x="{40 + c * 18 + (r % 2) * 6}" y="{100 + r * 18}" width="13" height="12" rx="3"/>' for r in range(3) for c in range(10 - r % 2))
+                + f'<rect fill="{{c}}" x="84" y="156" width="88" height="12" rx="4"/>',
+    "mouse": f'<rect {W} x="84" y="42" width="88" height="168" rx="44"/><rect fill="{{c}}" opacity=".35" x="127" y="42" width="2" height="66"/><rect fill="{{c}}" x="121" y="68" width="14" height="30" rx="7"/>',
+    "scanner": f'<rect {W} opacity=".75" x="36" y="84" width="184" height="26" rx="10"/><rect {W} x="32" y="112" width="192" height="76" rx="16"/>'
+               f'<rect fill="{{c}}" x="56" y="132" width="144" height="8" rx="4"/><rect fill="{{c}}" opacity=".35" x="56" y="156" width="90" height="7" rx="3.5"/><circle fill="{{c}}" cx="200" cy="164" r="6"/>',
+    "webcam": f'<circle {W} cx="128" cy="104" r="64"/><circle fill="{{c}}" cx="128" cy="104" r="30"/><circle {W} cx="128" cy="104" r="13"/><circle fill="{{c}}" cx="128" cy="58" r="5"/>'
+              f'<rect {W} x="116" y="164" width="24" height="22"/><rect {W} x="80" y="184" width="96" height="14" rx="7"/>',
+    "headphones": f'<path fill="none" stroke="#fff" stroke-width="18" stroke-linecap="round" d="M60 156v-24a68 68 0 0 1 136 0v24"/>'
+                  f'<rect {W} x="40" y="136" width="46" height="76" rx="18"/><rect {W} x="170" y="136" width="46" height="76" rx="18"/>'
+                  f'<rect fill="{{c}}" opacity=".35" x="74" y="148" width="10" height="52" rx="5"/><rect fill="{{c}}" opacity=".35" x="172" y="148" width="10" height="52" rx="5"/>',
+    "speakers": f'<rect {W} x="70" y="36" width="116" height="184" rx="26"/><circle fill="{{c}}" cx="128" cy="84" r="18"/><circle {W} cx="128" cy="84" r="7"/>'
+                f'<circle fill="{{c}}" cx="128" cy="156" r="40"/><circle {W} cx="128" cy="156" r="15"/>',
+    "server": f'<rect {W} x="40" y="48" width="176" height="72" rx="16"/><rect {W} x="40" y="136" width="176" height="72" rx="16"/>'
+              f'<rect fill="{{c}}" opacity=".35" x="62" y="80" width="80" height="8" rx="4"/><rect fill="{{c}}" opacity=".35" x="62" y="168" width="80" height="8" rx="4"/>'
+              f'<circle fill="{{c}}" cx="186" cy="84" r="7"/><circle fill="{{c}}" cx="186" cy="172" r="7"/>',
+    "battery": f'<rect {W} x="36" y="86" width="168" height="84" rx="20"/><rect {W} x="204" y="112" width="18" height="32" rx="6"/><rect fill="{{c}}" x="52" y="102" width="104" height="52" rx="10"/>',
+    "router": f'<rect {W} x="64" y="60" width="12" height="76" rx="6"/><rect {W} x="180" y="60" width="12" height="76" rx="6"/><rect {W} x="36" y="128" width="184" height="64" rx="18"/>'
+              + "".join(f'<circle fill="{{c}}" cx="{x}" cy="160" r="6"/>' for x in (66, 90, 114)) + f'<rect fill="{{c}}" opacity=".35" x="140" y="156" width="56" height="8" rx="4"/>',
+    "info": f'<circle {W} cx="128" cy="128" r="80"/><circle fill="{{c}}" cx="128" cy="90" r="12"/><rect fill="{{c}}" x="116" y="112" width="24" height="66" rx="12"/>',
+    "warning": f'<path fill="#fff" stroke="#fff" stroke-width="28" stroke-linejoin="round" d="M128 60L202 190H54z"/><rect fill="{{c}}" x="116" y="100" width="24" height="54" rx="12"/><circle fill="{{c}}" cx="128" cy="176" r="12"/>',
+    "error": f'<circle {W} cx="128" cy="128" r="80"/><rect fill="{{c}}" x="116" y="80" width="24" height="96" rx="12" transform="rotate(45 128 128)"/>'
+             f'<rect fill="{{c}}" x="116" y="80" width="24" height="96" rx="12" transform="rotate(-45 128 128)"/>',
+    "shield": f'<path {W} d="M128 42l68 26v50c0 46-28 78-68 96-40-18-68-50-68-96V68z"/><path fill="none" stroke="{{c}}" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" d="M100 128l20 20 38-40"/>',
+}
+# name -> (colour key in tokens' apps, picture: a DEVICE_PICS key, or an app's picture as "app:<key>")
+DEVICES = {
+    "drive-harddisk": ("disks", "app:disks"), "drive-multidisk": ("disks", "app:disks"), "drive-harddisk-system": ("disks", "app:disks"),
+    "drive-harddisk-solidstate": ("disks", "ssd"), "drive-removable-media": ("disks", "usb"), "drive-removable-media-usb": ("disks", "usb"),
+    "drive-removable-media-usb-pendrive": ("disks", "usb"), "media-removable": ("disks", "usb"), "media-flash": ("disks", "sdcard"),
+    "media-flash-sd-mmc": ("disks", "sdcard"), "drive-optical": ("disks", "optical"), "media-optical": ("disks", "optical"),
+    "media-optical-cd": ("disks", "optical"), "media-optical-dvd": ("disks", "optical"),
+    "computer": ("machines", "monitor"), "video-display": ("machines", "monitor"), "computer-laptop": ("machines", "laptop"),
+    "phone": ("phone", "handset"), "smartphone": ("phone", "handset"), "pda": ("phone", "handset"),
+    "input-keyboard": ("machines", "keyboard"), "input-mouse": ("machines", "mouse"), "input-gaming": ("games", "app:games"),
+    "printer": ("print", "app:print"), "scanner": ("scan", "scanner"), "camera-photo": ("camera", "app:camera"),
+    "camera-web": ("camera", "webcam"), "camera-video": ("camera", "webcam"), "audio-headphones": ("music", "headphones"),
+    "audio-headset": ("music", "headphones"), "audio-speakers": ("music", "speakers"), "audio-card": ("music", "speakers"),
+    "audio-input-microphone": ("recorder", "app:recorder"), "network-server": ("machines", "server"), "battery": ("backup", "battery"),
+    "network-wired": ("sharing", "router"), "modem": ("sharing", "router"),
+}
+STATUSES = {
+    "dialog-information": ("messages", "info"), "dialog-warning": ("calculator", "warning"), "dialog-error": ("documents", "error"),
+    "dialog-question": ("help", "app:help"), "dialog-password": ("passwords", "app:passwords"), "security-high": ("authenticator", "shield"),
+    "security-medium": ("calculator", "shield"), "security-low": ("documents", "shield"),
+}
+
+
+def object_pic(key: str) -> str:
+    return PICS[key[4:]] if key.startswith("app:") else DEVICE_PICS[key]
+
+
+def object_svg(pic: str, bright: str, deep: str) -> str:
+    """A device or status picture on its own, lit as the app pictures are, filling most of its square."""
+    pic = fit(pic, visual=184, keep=224, most=1.6)
+
+    def paint(white: str, detail: str) -> str:
+        return pic.replace('fill="#fff"', f'fill="{white}"').replace('stroke="#fff"', f'stroke="{white}"').replace("{c}", detail)
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">'
+            f'{picture(paint, "lit", bright, deep, "#16191E")}</svg>\n')
+
+
+def object_small(pic: str, bright: str) -> str:
+    pic = fit(pic, visual=200, keep=236, most=1.7).replace('fill="#fff"', f'fill="{bright}"').replace('stroke="#fff"', f'stroke="{bright}"').replace("{c}", "#FFFFFF")
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">{pic}</svg>\n'
+
+
+BIN_BODY = "M74 96h108l-9 112a16 16 0 0 1-16 14H99a16 16 0 0 1-16-14z"
+BIN_LID = "M60 78a10 10 0 0 1 10-10h116a10 10 0 0 1 10 10v8a6 6 0 0 1-6 6H66a6 6 0 0 1-6-6z"
+
+
+def trash_svg(full: bool) -> str:
+    """The Bin, in the folders' smoked glass with Files' blue light: ribs of light down it, papers when it's full."""
+    bright, deep = FOLDER_BLUE
+    tint_top, tint_bottom = mix(bright, "#2B3038", 0.55), mix(deep, "#121519", 0.55)
+    papers = (f'<g opacity=".95"><rect fill="#fff" x="92" y="52" width="40" height="52" rx="4" transform="rotate(-14 112 78)"/>'
+              f'<rect fill="#E8ECF1" x="124" y="46" width="42" height="56" rx="4" transform="rotate(10 145 74)"/></g>') if full else ""
+    lid = f'<g transform="rotate(-8 70 80) translate(0 -8)">' if full else "<g>"
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs>{_glass_defs(bright, deep)}'
+            f'<linearGradient id="tint" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{tint_top}"/><stop offset="1" stop-color="{tint_bottom}"/></linearGradient></defs>'
+            f'<path d="{BIN_BODY}" fill="#000" opacity=".45" filter="url(#drop)"/>{papers}'
+            f'<path d="{BIN_BODY}" fill="url(#tint)"/><path d="{BIN_BODY}" fill="url(#glow)"/>'
+            + "".join(f'<rect x="{x - 4}" y="118" width="8" height="82" rx="4" fill="{bright}" opacity=".85"/>' for x in (106, 128, 150))
+            + f'<path d="{BIN_BODY}" fill="none" stroke="url(#rim)" stroke-width="3"/>'
+            f'{lid}<path d="M110 68v-6a8 8 0 0 1 8-8h20a8 8 0 0 1 8 8v6" fill="none" stroke="{mix(bright, "#FFFFFF", 0.3)}" stroke-width="7"/>'
+            f'<path d="{BIN_LID}" fill="url(#smoke)"/><path d="{BIN_LID}" fill="none" stroke="url(#rim)" stroke-width="3"/></g></svg>\n')
+
+
+def trash_small(full: bool) -> str:
+    bright, deep = FOLDER_BLUE
+    papers = f'<rect fill="#E9EDF2" x="96" y="50" width="64" height="44" rx="4"/>' if full else ""
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">{papers}'
+            f'<path fill="{bright}" d="{BIN_BODY}"/><path fill="{deep}" d="{BIN_LID}"/>'
+            + "".join(f'<rect x="{x - 6}" y="120" width="12" height="80" rx="6" fill="#fff" opacity=".85"/>' for x in (106, 128, 150)) + '</svg>\n')
+
+
 def theme(colours: dict) -> int:
-    """Writes the Huginn icon theme: folders and kinds of file, big (scalable) and small (16, 22, 24)."""
-    dirs = []
-    for ctx, items, big, small in (("places", FOLDERS, lambda n: folder_svg(FOLDERS[n]), lambda n: folder_small(FOLDERS[n])),
-                                   ("mimetypes", KINDS, lambda n: file_svg(n, colours), lambda n: file_small(n, colours))):
-        for folder, draw, size in (("scalable", big, None), ("24", small, 24), ("22", small, 22), ("16", small, 16)):
+    """Writes the Huginn icon theme: folders, the Bin and Huginn's mark (places), kinds of file (mimetypes), devices,
+    the dialogs' and security pictures (status), each big (scalable) and small (16, 22, 24); and the line glyphs
+    as every action and -symbolic icon (icon_symbols.py). Breeze is underneath, for anything not drawn here."""
+    import icon_symbols
+    folder_draw = {n: (lambda n=n: folder_svg(FOLDERS[n]), lambda n=n: folder_small(FOLDERS[n])) for n in FOLDERS}
+    folder_draw["user-trash"] = (lambda: trash_svg(False), lambda: trash_small(False))
+    folder_draw["user-trash-full"] = (lambda: trash_svg(True), lambda: trash_small(True))
+    mark = (OUT / "scalable" / "apps" / "huginn-os.svg")
+    for name in ("start-here", "distributor-logo", "start-here-kde"):
+        folder_draw[name] = (lambda: mark.read_text(encoding="utf-8"), lambda: mark.read_text(encoding="utf-8"))
+    contexts = {
+        "places": folder_draw,
+        "mimetypes": {n: (lambda n=n: file_svg(n, colours), lambda n=n: file_small(n, colours)) for n in KINDS},
+        "devices": {n: (lambda k=k, c=c: object_svg(object_pic(k), *colours[c]), lambda k=k, c=c: object_small(object_pic(k), colours[c][0]))
+                    for n, (c, k) in DEVICES.items()},
+        "status": {n: (lambda k=k, c=c: object_svg(object_pic(k), *colours[c]), lambda k=k, c=c: object_small(object_pic(k), colours[c][0]))
+                   for n, (c, k) in STATUSES.items()},
+    }
+    dirs, count = [], 0
+    for ctx, items in contexts.items():
+        for folder, which, size in (("scalable", 0, None), ("24", 1, 24), ("22", 1, 22), ("16", 1, 16)):
             where = THEME / folder / ctx
             where.mkdir(parents=True, exist_ok=True)
-            for name in items:
-                (where / f"{name}.svg").write_text(draw(name), encoding="utf-8")
-            dirs.append((f"{folder}/{ctx}", ctx, size))
-    lines = ["[Icon Theme]", "Name=Huginn", "Comment=Huginn OS: folders and files in smoked glass", "Inherits=breeze,hicolor",
-             "Directories=" + ",".join(d for d, _, _ in dirs), ""]
-    for d, ctx, size in dirs:
-        context = "Places" if ctx == "places" else "MimeTypes"
+            for name, draws in items.items():
+                (where / f"{name}.svg").write_text(draws[which](), encoding="utf-8")
+            dirs.append((f"{folder}/{ctx}", ctx.title() if ctx != "mimetypes" else "MimeTypes", size))
+        count += len(items)
+    sym_dirs, sym_count = icon_symbols.write(THEME)
+    lines = ["[Icon Theme]", "Name=Huginn", "Comment=Huginn OS: folders, files and devices in smoked glass, and Huginn's own line icons",
+             "Inherits=breeze,hicolor", "Example=folder", "Directories=" + ",".join([d for d, _, _ in dirs] + [d for d, _ in sym_dirs] + ["wrapped/apps"]), ""]
+    for d, context, size in dirs:
         if size is None:
             lines += [f"[{d}]", "Size=256", "MinSize=32", "MaxSize=512", f"Context={context}", "Type=Scalable", ""]
         else:
             lines += [f"[{d}]", f"Size={size}", f"Context={context}", "Type=Fixed", ""]
+    for d, context in sym_dirs:
+        lines += [f"[{d}]", "Size=16", "MinSize=8", "MaxSize=512", f"Context={context}", "Type=Scalable", ""]
+    # other apps' icons on Huginn's glass (apps/huginn_iconwrap.py fills this, in /usr/share and in each user's
+    # ~/.local/share/icons/Huginn): asked for by their own names, they come wrapped everywhere
+    lines += ["[wrapped/apps]", "Size=256", "MinSize=16", "MaxSize=512", "Context=Applications", "Type=Scalable", ""]
     (THEME / "index.theme").write_text("\n".join(lines), encoding="utf-8")
-    return len(FOLDERS) + len(KINDS)
+    return count + sym_count
 
 
 # Every picture is brought to the same visual size and centred, as Apple's icon grid does by eye: what's measured is
@@ -424,7 +631,7 @@ def theme(colours: dict) -> int:
 VISUAL_SIZE, KEEP_INSIDE, MOST = 144.0, 164.0, 1.25
 
 
-def fit(pic: str) -> str:
+def fit(pic: str, visual: float = VISUAL_SIZE, keep: float = KEEP_INSIDE, most: float = MOST) -> str:
     from PySide6.QtCore import QByteArray, QRectF, Qt
     from PySide6.QtGui import QImage, QPainter
     from PySide6.QtSvg import QSvgRenderer
@@ -447,7 +654,7 @@ def fit(pic: str) -> str:
     my = sum(y * sum(alpha[y * 256:(y + 1) * 256]) for y in range(256)) / 255 / ink
     w, h = x1 - x0, y1 - y0
     size = (ink ** 0.5 + (w * h) ** 0.5) / 2
-    scale = min(max(VISUAL_SIZE / size, 1 / MOST), MOST, KEEP_INSIDE / max(w, h))
+    scale = min(max(visual / size, 1 / most), most, keep / max(w, h))
     cx, cy = ((x0 + x1) / 2 + mx + 0.5) / 2, ((y0 + y1) / 2 + my + 0.5) / 2
     if abs(scale - 1) < 0.02 and abs(cx - 128) < 2 and abs(cy - 128) < 2:
         return pic
@@ -511,7 +718,7 @@ def main() -> int:
     for name, (bright, deep, ink) in MARKS.items():
         write(name, icon(name, bright, deep, pic=RAVEN, ink=ink, clip=True), sizes=(512, 256, 128, 64, 48, 32, 24, 16))
     print(f"Drew {len(made)} icons into {OUT}")
-    print(f"Drew {theme(colours)} folders and kinds of file into {THEME}")
+    print(f"Drew {theme(colours)} icons for the Huginn theme (places, files, devices, status, actions) into {THEME}")
     if "--sheet" in sys.argv:
         target, cols = sys.argv[sys.argv.index("--sheet") + 1], 7
         rows = -(-len(made) // cols)

@@ -5,7 +5,15 @@ Column {
     id: pg
     width: parent ? parent.width : 600; spacing: 18
     readonly property var n: Backend.network
-    readonly property var here: n.details && n.wifiDevice ? (n.details[n.wifiDevice] || null) : null
+    // The network in use: Wi‑Fi if it's connected, else the cable. Its addresses stay hidden until asked for
+    // (anyone looking over your shoulder or at a shared screen sees dots), and hide again when you leave the page.
+    readonly property bool onWifi: !!(n.details && n.wifiDevice && n.details[n.wifiDevice])
+    readonly property bool onCable: !!(n.wired && n.wired.state === "connected" && n.details && n.details[n.wired.device])
+    readonly property var here: onWifi ? n.details[n.wifiDevice] : onCable ? n.details[n.wired.device] : null
+    readonly property string hereName: onWifi ? (n.current || "Wi‑Fi") : onCable ? (n.wired.connection || "Ethernet") : ""
+    property bool reveal: false
+    onVisibleChanged: if (!visible) reveal = false
+    function hidden(text) { return reveal || !text ? (text || "—") : String(text).replace(/[0-9A-Fa-f]/g, "•") }
     function join(w) {
         if (w.inUse) return
         if (w.saved) Backend.joinSaved(w.ssid)
@@ -27,14 +35,16 @@ Column {
         SetRow { title: "Airplane mode"; sub: "Wi‑Fi and Bluetooth off, for flights and quiet"; glyph: "send"; tile: "#F08C3B"
             Toggle { on: !!pg.n.airplane; onToggled: function (v) { Backend.setAirplane(v) } } }
         SetRow { visible: !!pg.n.wired; title: "Ethernet"; glyph: "route"; tile: "#5A6474"
-            sub: pg.n.wired ? (pg.n.wired.state === "connected" ? "Connected" + (pg.n.details[pg.n.wired.device] ? " · " + pg.n.details[pg.n.wired.device].ip : "") : pg.n.wired.state === "unavailable" ? "No cable plugged in" : "Not connected") : "" } }
+            sub: pg.n.wired ? (pg.n.wired.state === "connected" ? "Connected to " + (pg.n.wired.connection || "the network") : pg.n.wired.state === "unavailable" ? "No cable plugged in" : "Not connected") : "" } }
 
     SetCard { visible: !!pg.here; title: "This network"
-        SetRow { title: "IP address"; Label { text: pg.here ? pg.here.ip : ""; secondary: true; font.family: Theme.t.fontMono } }
-        SetRow { title: "Router"; Label { text: pg.here ? pg.here.gateway : ""; secondary: true; font.family: Theme.t.fontMono } }
-        SetRow { title: "DNS"; Label { text: pg.here ? pg.here.dns : ""; secondary: true; font.family: Theme.t.fontMono } }
-        SetRow { title: "Hardware address"; sub: "Some routers use it to recognise this computer"; Label { text: pg.here ? pg.here.mac : ""; secondary: true; font.family: Theme.t.fontMono } }
-        SetRow { title: ""; Row { spacing: 8
+        SetRow { title: pg.hereName; sub: pg.onWifi ? "Wi‑Fi" : "Ethernet"; glyph: pg.onWifi ? "wifi" : "ethernet"; tile: pg.onWifi ? "#3B8DF0" : "#5A6474"
+            Btn { text: pg.reveal ? "Hide addresses" : "Show addresses"; onClicked: pg.reveal = !pg.reveal } }
+        SetRow { title: "IP address"; Label { text: pg.hidden(pg.here ? pg.here.ip : ""); secondary: true; font.family: Theme.t.fontMono } }
+        SetRow { title: "Router"; Label { text: pg.hidden(pg.here ? pg.here.gateway : ""); secondary: true; font.family: Theme.t.fontMono } }
+        SetRow { title: "DNS"; Label { text: pg.hidden(pg.here ? pg.here.dns : ""); secondary: true; font.family: Theme.t.fontMono } }
+        SetRow { title: "Hardware address"; sub: "Some routers use it to recognise this computer"; Label { text: pg.hidden(pg.here ? pg.here.mac : ""); secondary: true; font.family: Theme.t.fontMono } }
+        SetRow { visible: pg.onWifi; title: ""; Row { spacing: 8
             Btn { text: "Disconnect"; onClicked: Backend.disconnect(pg.n.wifiDevice) }
             Btn { text: "Forget This Network"; danger: true; onClicked: { var s = pg.n.current; win.confirm("Forget “" + s + "”?", "This computer won't join it by itself any more, and you'll need its password again.", "Forget", function () { Backend.forgetNetwork(s) }) } } } } }
 

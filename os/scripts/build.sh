@@ -375,6 +375,11 @@ stage_customise() {
     fi
     rm -rf "$CHROOT/tmp/huginn-icons"
     in_chroot gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+    # Every other app's icon on Huginn's glass tile (apps/huginn_iconwrap.py; the shell does the same for each
+    # user's apps installed later), then the Huginn theme's cache.
+    in_chroot env QT_QPA_PLATFORM=offscreen HOME=/tmp python3 /usr/share/huginn-apps/huginn_iconwrap.py --system --quiet \
+        || warn "Other apps' icons could not be put on Huginn's glass here; the shell will do it at sign-in"
+    in_chroot gtk-update-icon-cache -q -t -f /usr/share/icons/Huginn || true
     in_chroot update-mime-database /usr/share/mime || true            # Easel's .easel files
     in_chroot python3 -c "import PySide6.QtWebEngineWidgets, cryptography" \
         || die "Huginn's browser engine (Qt WebEngine) is not importable in the image"

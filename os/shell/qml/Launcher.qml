@@ -64,14 +64,28 @@ Item {
         grid.positionViewAtIndex(current, GridView.Contain)
         lit = results[current]; litItem = grid.itemAtIndex(current)
     }
+    // An app's island opens under its tile, or over it when there's no room below. It is placed again whenever its
+    // height changes: right after open() it still has the last app's height (its rows are laid out a moment later),
+    // and placing it by that height could put a tall island past the bottom of the screen.
+    property point islandAt: Qt.point(0, 0)        // the tile's bottom centre, in this item's coordinates
+    property real islandItemH: 0
     function islandFor(app, item) {
         if (!app || !item) return
-        var p = item.mapToItem(root, item.width / 2, item.height)
+        islandAt = item.mapToItem(root, item.width / 2, item.height)
+        islandItemH = item.height
         island.open(app)
-        island.x = Math.max(0, Math.min(root.width - island.width, p.x - island.width / 2))
-        island.y = p.y + island.height + 6 < root.height ? p.y + 4 : Math.max(0, p.y - item.height - island.height - 4)
         island.visible = true
+        placeIsland()
     }
+    function placeIsland() {
+        var p = islandAt, host = root.parent
+        var top = host ? -root.y + 8 : 0, bottom = root.height + 4       // above the screen's top, not over the dock below
+        island.x = Math.max(0, Math.min(root.width - island.width, p.x - island.width / 2))
+        var below = p.y + 4, above = p.y - islandItemH - island.height - 4
+        var y = below + island.height <= bottom ? below : above >= top ? above : bottom - island.height
+        island.y = Math.max(top, Math.min(bottom - island.height, y))
+    }
+    Connections { target: island; function onHeightChanged() { if (island.visible) root.placeIsland() } }
     function closeIsland() { island.visible = false; input.forceActiveFocus() }
     function act(p) {
         if (p.ask && confirm !== p.id) { confirm = p.id; return }

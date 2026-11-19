@@ -89,9 +89,26 @@ def parse_apt(text: str) -> list:
     return out
 
 
+def parse_apt_simulation(text: str) -> list:
+    """`apt-get -s dist-upgrade` → the same rows as parse_apt, for what apt would really put in: its "Inst" lines.
+    Ubuntu holds some updates back for a while (phased updates, rolled out to a few computers at a time) and some
+    need a choice apt won't make by itself; `apt list --upgradable` lists those too, so they'd be shown as ready,
+    "installed", and still be there afterwards."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"^Inst\s+(\S+)\s+(?:\[([^\]]+)\]\s+)?\((\S+)\s+([^)]*)\)", line)
+        if m:
+            out.append({"id": "deb:" + m.group(1), "name": m.group(1), "version": m.group(3), "from": (m.group(2) or "").strip(),
+                        "security": "-security" in m.group(4), "kind": "system", "new": not m.group(2)})
+    return out
+
+
 def check_system(refresh: bool = True) -> list:
     if refresh and pk("refresh"):
         RUN(pk("refresh"), None, 300)
+    code, out, _ = RUN(["apt-get", "-s", "-o", "Debug::NoLocking=1", "dist-upgrade"], None, 180)
+    if code == 0:
+        return [i for i in parse_apt_simulation(out) if not i.get("new")]      # new packages come with an update; they aren't one
     code, out, _ = RUN(["apt", "list", "--upgradable"], None, 120)
     return parse_apt(out) if code == 0 else []
 
@@ -431,6 +448,16 @@ class Updates(QObject):
                 frac = min(1.0, int(m.group(1)) / 100) if m else None
                 self._emit("progress", (base + (frac or 0) / len(steps), text[:140]))
             stopped = lambda: self._stop                                      # noqa: E731
+            last = {"text": ""}
+
+            def line(text, base=base, line=line, last=last):
+                if text.strip():
+                    last["text"] = text.strip()
+                line(text)
+
+            def why(what: str) -> str:
+                tail = re.sub(r"^(E|Error|error):\s*", "", last["text"])[:120]
+                return what + (f" ({tail})" if tail and not re.search(r"\d+%", tail) else "")
             try:
                 if kind == "app":
                     for where in sorted({i["where"] for i in part}):
@@ -440,7 +467,7 @@ class Updates(QObject):
                         if code == 0:
                             done |= {i["id"] for i in part if i["where"] == where}
                         else:
-                            problems.append("Some apps weren't updated")
+                            problems.append(why("Some apps weren't updated"))
                 elif kind == "huginn":
                     line("Fetching Huginn…")
                     self._emit("said", (install_huginn(part[0]), False))
@@ -451,7 +478,7 @@ class Updates(QObject):
                         done |= {i["id"] for i in part}
                         restart = True
                     else:
-                        problems.append("The firmware wasn't updated")
+                        problems.append(why("The firmware wasn't updated"))
                 else:
                     if pk("update"):
                         code = run_stream(pk("update"), line, stopped)
@@ -461,17 +488,33 @@ class Updates(QObject):
                         done |= {i["id"] for i in part}
                         restart = restart or needs_restart(part)
                     else:
-                        problems.append("The system wasn't updated" + (" (the password wasn't given)" if code in (126, 127) else ""))
+                        problems.append("The system wasn't updated" + (" (the password wasn't given)" if code in (126, 127) else why("")))
             except Exception as err:                                      # noqa: BLE001
                 problems.append(str(err)[:160])
             if self._stop:
                 problems.append("Stopped")
                 break
-        self._emit("done", (done, restart))
-        if problems:
-            self._emit("said", ("; ".join(problems) + ".", True))
-        elif done:
+        # What's really still waiting: look again rather than trusting the tools' exit codes (PackageKit and apt can
+        # end well having put in only part of it), and say so plainly.
+        self._emit("progress", (1.0, "Checking what went in…"))
+        try:
+            fresh = look_everywhere(False)
+        except Exception:                                                 # noqa: BLE001
+            fresh = None
+        if fresh is None:
+            self._emit("done", (done, restart))
+        else:
+            self._emit("done", ({i["id"] for i in chosen} | done, restart))
+            self._emit("items", fresh)
+        waiting = [i for i in chosen if fresh is not None and any(f["id"] == i["id"] for f in fresh)]
+        put_in = len(chosen) - len(waiting)
+        if not waiting and not problems:
             self._emit("said", ("Up to date." + (" Restart to finish." if restart else ""), False))
+        else:
+            names = ", ".join(i["name"] for i in waiting[:3]) + (f" and {len(waiting) - 3} more" if len(waiting) > 3 else "")
+            text = (f"{put_in} of {len(chosen)} updates went in. " if put_in else "The updates didn't go in. ") + \
+                   (f"Still waiting: {names}. " if waiting else "") + ("; ".join(problems) + "." if problems else "")
+            self._emit("said", (text.strip(), True))
 
     @Slot()
     def stop(self) -> None:

@@ -77,8 +77,48 @@ APP_MENUS = {
                        item("Word wrap", "short:Alt+Z", "Alt+Z"), SEP, item("Zoom in", "short:Ctrl+=", "Ctrl++"), item("Zoom out", "short:Ctrl+-", "Ctrl+−")])],
     "terminal": [("Shell", [item("New tab", "qml:newTab", "Ctrl+Shift+T"), item("Close tab", "qml:closeTab", "Ctrl+Shift+W")]),
                  ("Edit", [item("Copy", "qml:copy", "Ctrl+Shift+C"), item("Paste", "qml:paste", "Ctrl+Shift+V"), SEP, item("Find…", "qml:find", "Ctrl+Shift+F")])],
+    # the pro apps: their own groups, from the shortcuts they already have (an item shows only if its shortcut is there)
+    "easel": [("File", [item("New…", "short:Ctrl+N", "Ctrl+N"), item("Open…", "short:Ctrl+O", "Ctrl+O"), SEP, item("Save", "short:Ctrl+S", "Ctrl+S"),
+                        item("Save as…", "short:Ctrl+Shift+S", "Ctrl+Shift+S"), item("Export…", "short:Ctrl+E", "Ctrl+E")]),
+              ("Edit", [item("Undo", "short:Ctrl+Z", "Ctrl+Z"), item("Redo", "short:Ctrl+Shift+Z", "Ctrl+Shift+Z"), SEP, item("Cut", "short:Ctrl+X", "Ctrl+X"),
+                        item("Copy", "short:Ctrl+C", "Ctrl+C"), item("Paste", "short:Ctrl+V", "Ctrl+V"), SEP, item("Free transform", "short:Ctrl+T", "Ctrl+T")]),
+              ("Select", [item("All", "short:Ctrl+A", "Ctrl+A"), item("Deselect", "short:Ctrl+D", "Ctrl+D"), item("Invert", "short:Ctrl+Shift+I", "Ctrl+Shift+I")]),
+              ("Layer", [item("New layer", "short:Ctrl+Shift+N", "Ctrl+Shift+N"), item("Duplicate layer", "short:Ctrl+J", "Ctrl+J"), SEP,
+                         item("Group", "short:Ctrl+G", "Ctrl+G"), item("Ungroup", "short:Ctrl+Shift+G", "Ctrl+Shift+G")]),
+              ("View", [item("Zoom in", "short:Ctrl+=", "Ctrl++"), item("Zoom out", "short:Ctrl+-", "Ctrl+−"), item("Fit on screen", "short:Ctrl+0", "Ctrl+0"),
+                        item("Actual size", "short:Ctrl+1", "Ctrl+1"), SEP, item("Rulers", "short:Ctrl+R", "Ctrl+R"), item("Snap to guides", "short:Ctrl+;", "Ctrl+;")])],
+    "clips": [("File", [item("Export…", "short:Ctrl+E", "Ctrl+E")]),
+              ("Edit", [item("Undo", "short:Ctrl+Z", "Ctrl+Z"), item("Redo", "short:Ctrl+Shift+Z", "Ctrl+Shift+Z"), SEP, item("Cut at the playhead", "short:S", "S"),
+                        item("Duplicate", "short:Ctrl+D", "Ctrl+D"), item("Delete", "short:Delete", "Delete"), item("Delete and close the gap", "short:Shift+Delete", "Shift+Delete")]),
+              ("Clip", [item("Make a compound clip", "short:Alt+G", "Alt+G"), item("Open the compound clip", "short:Return", "Return"), SEP,
+                        item("Add a marker", "short:M", "M"), item("Add a title", "short:T", "T")]),
+              ("Playback", [item("Play or pause", "short:Space", "Space"), item("Play", "short:L", "L"), item("Pause", "short:K", "K"), SEP,
+                            item("Back a frame", "short:Left", "←"), item("Forward a frame", "short:Right", "→"), item("Back a second", "short:Shift+Left", "Shift+←"),
+                            item("Forward a second", "short:Shift+Right", "Shift+→"), SEP, item("Previous edit", "short:Up", "↑"), item("Next edit", "short:Down", "↓"),
+                            item("Go to the start", "short:Home", "Home"), item("Go to the end", "short:End", "End")]),
+              ("Tools", [item("Select", "short:A", "A"), item("Blade", "short:B", "B")]),
+              ("View", [item("Zoom in", "short:=", "="), item("Zoom out", "short:-", "−")])],
+    "tempo": [("Edit", [item("Undo", "short:Ctrl+Z", "Ctrl+Z"), item("Redo", "short:Ctrl+Shift+Z", "Ctrl+Shift+Z"), SEP, item("Duplicate region", "short:Ctrl+D", "Ctrl+D"),
+                        item("Split region at the playhead", "short:Ctrl+T", "Ctrl+T"), item("Delete region", "short:Delete", "Delete")]),
+              ("Transport", [item("Play or stop", "short:Space", "Space"), item("Record", "short:R", "R"), item("Go to the start", "short:Return", "Return"), SEP,
+                             item("Cycle", "short:C", "C"), item("Metronome", "short:K", "K")]),
+              ("View", [item("Musical typing", "short:Ctrl+K", "Ctrl+K")])],
+    # everyday apps: what each one does, by its own shortcuts
+    "books": [("Read", [item("Next page", "short:Space", "Space"), item("Previous page", "short:Shift+Space", "Shift+Space"), SEP,
+                        item("Turn forward", "short:Right", "→"), item("Turn back", "short:Left", "←"), SEP, item("Close the book", "short:Escape", "Esc")])],
+    "passwords": [("Vault", [item("New password", "short:Ctrl+N", "Ctrl+N"), item("Find…", "short:Ctrl+F", "Ctrl+F"), SEP, item("Lock", "short:Ctrl+L", "Ctrl+L")])],
+    "scan": [("File", [item("Save as PDF", "short:Ctrl+S", "Ctrl+S")]), ("Page", [item("Turn", "short:Ctrl+R", "Ctrl+R"), item("Delete page", "short:Delete", "Delete")])],
+    "contacts": [("Contact", [item("New contact", "short:Ctrl+N", "Ctrl+N"), item("Find…", "short:Ctrl+F", "Ctrl+F")])],
+    "reminders": [("Reminder", [item("New reminder", "short:Ctrl+N", "Ctrl+N")])],
+    "documents": [("File", [item("Save", "short:Ctrl+S", "Ctrl+S")]), ("Edit", EDIT + [SEP, item("Find…", "short:Ctrl+F", "Ctrl+F")])],
+    "camera": [("Camera", [item("Take", "short:Space", "Space")])],
+    "machines": [("Machine", [item("New machine", "short:Ctrl+N", "Ctrl+N")])],
+    "recorder": [("Recording", [item("Record or stop", "short:Space", "Space")])],
 }
 NAMES = {"files": "Files"}
+# Apps that are about typing: they always have the Edit menu. Every other app has it only while you're typing in one
+# of its fields (a search box, a name), where cut, copy and paste mean something.
+TEXT_APPS = {"writer", "sheets", "slides", "notes", "mail", "code", "documents", "messages", "translate", "terminal"}
 
 
 class AppMenu(QObject):
@@ -168,7 +208,7 @@ class AppMenu(QObject):
                 rows.pop()
             if rows:
                 groups.append({"name": name, "items": rows})
-        if not any(g["name"] == "Edit" for g in groups):
+        if not any(g["name"] == "Edit" for g in groups) and (self._key in TEXT_APPS or self._typing()):
             groups.insert(min(1, len(groups)), {"name": "Edit", "items": [dict(i, enabled=True) if not i.get("sep") else i for i in EDIT]})
         if not any(g["name"] == "View" for g in groups):
             groups.append({"name": "View", "items": [item("Full screen", "win:fullscreen", "F11", enabled=True)]})
@@ -180,6 +220,15 @@ class AppMenu(QObject):
                 "top": [item(f"About {self._title}", "app:about", enabled=True), item(f"{self._title} Settings…", "app:settings", "Ctrl+,", enabled=self._has_qml("openSettings"))],
                 "bottom": [item("Minimise", "win:minimise", enabled=True), item("Close window", "win:close", "Ctrl+W", enabled=True),
                            item(f"Quit {self._title}", "app:quit", "Ctrl+Q", enabled=True)]}
+
+    def _typing(self) -> bool:
+        """Is a text field what had the keyboard in this app (its window keeps that while the bar's menu is open)?"""
+        root = self._root()
+        focus = getattr(root, "activeFocusItem", lambda: None)() if isinstance(root, QWindow) else None
+        if focus is None:
+            return False
+        name = focus.metaObject().className()
+        return any(k in name for k in ("TextInput", "TextEdit", "TextField", "TextArea")) or focus.property("selectedText") is not None
 
     # ------------------------------------------------------------------ doing it
     def _shortcut(self, seq: str):
@@ -197,8 +246,13 @@ class AppMenu(QObject):
                     continue
                 for s in (v if isinstance(v, list) else [v]):
                     try:
-                        seqs.append(QKeySequence(s) if not isinstance(s, QKeySequence) else s)
-                    except TypeError:
+                        if isinstance(s, QKeySequence):
+                            seqs.append(s)
+                        elif isinstance(s, int) or hasattr(s, "value"):        # StandardKey.Undo and friends: their keys here
+                            seqs.extend(QKeySequence.keyBindings(QKeySequence.StandardKey(int(getattr(s, "value", s)))))
+                        else:
+                            seqs.append(QKeySequence(s))
+                    except (TypeError, ValueError):
                         pass
             if any(s.matches(want) == QKeySequence.ExactMatch for s in seqs if not s.isEmpty()) and obj.property("enabled") is not False:
                 return obj

@@ -106,9 +106,9 @@ Column {
             SetChoice { each: 104; options: [["drop", "Drop and ring"], ["line", "Line"], ["comet", "Comet"]]; value: Settings.hideStyle
                 onPicked: function (v) { Settings.set("hideStyle", v); pg.show("hide:" + v) }
                 HoverHandler { onHoveredChanged: if (hovered) pg.show("hide:" + Settings.hideStyle) } } }
-        SetRow { title: "Clicking the app in front hides it"; sub: "Click it again and it comes back."; Toggle { on: Settings.dockClickHides; onToggled: pg.sw("dockClickHides") } }
-        SetRow { title: "Bars under open apps"; sub: "One bar for each window, up to three."; Toggle { on: Settings.dockDots; onToggled: pg.sw("dockDots") } }
-        SetRow { title: "Make room for windows"; sub: "The dock slides away when a window needs the space."; Toggle { on: Settings.dockHide; onToggled: pg.sw("dockHide") } }
+        SetRow { title: "Clicking the app in front hides it"; sub: "Click it again and it comes back."; Toggle { on: Settings.dockClickHides; onToggled: function (v) { pg.sw("dockClickHides")(v) } } }
+        SetRow { title: "Bars under open apps"; sub: "One bar for each window, up to three."; Toggle { on: Settings.dockDots; onToggled: function (v) { pg.sw("dockDots")(v) } } }
+        SetRow { title: "Make room for windows"; sub: "The dock slides away while a window covers it, and comes back when you point at the bottom edge."; Toggle { on: Settings.dockMakeRoom; onToggled: function (v) { pg.sw("dockMakeRoom")(v) } } }
     }
     // ---------------------------------------------------------------- stacks
     SetCard { title: "Stacks"
@@ -125,9 +125,9 @@ Column {
             SetChoice { each: 120; options: [["one", "One menu"], ["row", "A row of menus"]]; value: Settings.menuStyle === "inline" ? "row" : Settings.menuStyle === "dropdown" ? "one" : Settings.menuStyle
                 onPicked: function (v) { Settings.set("menuStyle", v); pg.show("menu:" + v) }
                 HoverHandler { onHoveredChanged: if (hovered) pg.show("menu:" + (Settings.menuStyle === "row" || Settings.menuStyle === "inline" ? "row" : "one")) } } }
-        SetRow { title: "24-hour clock"; Toggle { on: Settings.clock24; onToggled: pg.sw("clock24") } }
-        SetRow { title: "Show the date"; Toggle { on: Settings.barDate; onToggled: pg.sw("barDate") } }
-        SetRow { title: "Battery percentage"; Toggle { on: Settings.batteryPercent; onToggled: pg.sw("batteryPercent") } }
+        SetRow { title: "24-hour clock"; Toggle { on: Settings.clock24; onToggled: function (v) { pg.sw("clock24")(v) } } }
+        SetRow { title: "Show the date"; Toggle { on: Settings.barDate; onToggled: function (v) { pg.sw("barDate")(v) } } }
+        SetRow { title: "Battery percentage"; Toggle { on: Settings.batteryPercent; onToggled: function (v) { pg.sw("batteryPercent")(v) } } }
     }
     // ---------------------------------------------------------------- Today
     SetCard { title: "Today"
@@ -155,14 +155,14 @@ Column {
     }
     // ---------------------------------------------------------------- windows
     SetCard { title: "Windows"
-        SetRow { title: "Layouts from the fill button"; sub: "Hold the pointer on a window's fill button for halves, thirds and quarters."; Toggle { on: Settings.fillButtonLayouts; onToggled: pg.sw("fillButtonLayouts") } }
-        SetRow { title: "Gaps between snapped windows"; Toggle { on: Settings.snapGaps; onToggled: pg.sw("snapGaps") } }
-        SetRow { title: "Keep snapped windows together"; sub: "Bring them forward together, and see them as a pair in the Overview."; Toggle { on: Settings.keepSnapped; onToggled: pg.sw("keepSnapped") } }
-        SetRow { title: "Windows open where they were"; sub: "Each app's window comes back at the size and place you left it."; Toggle { on: Settings.rememberPlaces; onToggled: pg.sw("rememberPlaces") } }
-        SetRow { title: "Reopen apps when you sign in"; sub: "The apps you had open come back after signing out or restarting."; Toggle { on: Settings.reopenApps; onToggled: pg.sw("reopenApps") } }
+        SetRow { title: "Layouts from the fill button"; sub: "Hold the pointer on a window's fill button for halves, thirds and quarters."; Toggle { on: Settings.fillButtonLayouts; onToggled: function (v) { pg.sw("fillButtonLayouts")(v) } } }
+        SetRow { title: "Gaps between snapped windows"; Toggle { on: Settings.snapGaps; onToggled: function (v) { pg.sw("snapGaps")(v) } } }
+        SetRow { title: "Keep snapped windows together"; sub: "Bring them forward together, and see them as a pair in the Overview."; Toggle { on: Settings.keepSnapped; onToggled: function (v) { pg.sw("keepSnapped")(v) } } }
+        SetRow { title: "Windows open where they were"; sub: "Each app's window comes back at the size and place you left it."; Toggle { on: Settings.rememberPlaces; onToggled: function (v) { pg.sw("rememberPlaces")(v) } } }
+        SetRow { title: "Reopen apps when you sign in"; sub: "The apps you had open come back after signing out or restarting."; Toggle { on: Settings.reopenApps; onToggled: function (v) { pg.sw("reopenApps")(v) } } }
         SetRow { title: "Adaptive sync for games and videos"; sub: "Smoother motion on screens that support FreeSync or G-Sync, while something fills the screen."
             SetChoice { each: 90; options: [["auto", "On"], ["off", "Off"]]; value: Settings.adaptiveSync; onPicked: function (v) { Settings.set("adaptiveSync", v) } } }
-        SetRow { title: "Let games tear"; sub: "A game with V-Sync off shows each frame at once, for the lowest delay (where the graphics card can)."; Toggle { on: Settings.allowTearing; onToggled: pg.sw("allowTearing") } }
+        SetRow { title: "Let games tear"; sub: "A game with V-Sync off shows each frame at once, for the lowest delay (where the graphics card can)."; Toggle { on: Settings.allowTearing; onToggled: function (v) { pg.sw("allowTearing")(v) } } }
     }
     // ---------------------------------------------------------------- the Overview and spaces
     SetCard { title: "Overview & spaces"
@@ -170,8 +170,8 @@ Column {
             SetChoice { each: 120; options: [["glide", "Glide apart"], ["light", "Glide with light"]]; value: Settings.overviewOpen
                 onPicked: function (v) { Settings.set("overviewOpen", v); pg.show("overview:" + v) }
                 HoverHandler { onHoveredChanged: if (hovered) pg.show("overview:" + Settings.overviewOpen) } } }
-        SetRow { title: "Hot corner"; sub: "Push the pointer into the top-right corner for the Overview."; Toggle { on: Settings.hotCorner; onToggled: pg.sw("hotCorner") } }
-        SetRow { title: "Spaces on every screen"; sub: "Switching space switches every screen together."; Toggle { on: Settings.spacesAllScreens; onToggled: pg.sw("spacesAllScreens") } }
+        SetRow { title: "Hot corner"; sub: "Push the pointer into the top-right corner for the Overview."; Toggle { on: Settings.hotCorner; onToggled: function (v) { pg.sw("hotCorner")(v) } } }
+        SetRow { title: "Spaces on every screen"; sub: "Switching space switches every screen together. Off: only the main screen has spaces, the others keep their windows."; Toggle { on: Settings.spacesAllScreens; onToggled: function (v) { pg.sw("spacesAllScreens")(v) } } }
     }
     // ---------------------------------------------------------------- motion
     SetCard { title: "Motion"

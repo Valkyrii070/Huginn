@@ -334,7 +334,7 @@ impl<B: Backend + 'static> HuginnState<B> {
             self.animate_hide(&w, rect, true);
         }
         // a window snapped beside it comes forward too
-        if let Some(partner) = self.partner_of(window) {
+        if let Some(partner) = self.partner_together(window) {
             self.space.raise_element(&partner, false);
         }
         self.space.raise_element(window, true);

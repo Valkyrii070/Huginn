@@ -23,7 +23,9 @@ Column {
         Rectangle { x: 24; width: 72; height: 72; radius: 36; anchors.verticalCenter: parent.verticalCenter
             color: pg.visibleItems.length || pg.working || pg.checking ? Qt.rgba(0.3, 0.55, 1, 0.18) : Qt.rgba(0.15, 0.76, 0.5, 0.18)
             Glyph { anchors.centerIn: parent; name: pg.visibleItems.length || pg.working || pg.checking ? "refresh" : "check"; size: 38; ink: pg.visibleItems.length || pg.working || pg.checking ? "#4C8DFF" : "#27C281"
-                RotationAnimation on rotation { running: pg.working || pg.checking; loops: Animation.Infinite; from: 0; to: 360; duration: 1400 } } }
+                // turns the way its arrow points (anticlockwise), and comes to rest upright when the work is done
+                RotationAnimation on rotation { id: turning; running: pg.working || pg.checking; loops: Animation.Infinite; from: 360; to: 0; duration: 1400
+                    onRunningChanged: if (!running) parent.rotation = 0 } } }
         Column { x: 116; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 116 - 200; spacing: 4
             Label { font.pixelSize: 21; font.weight: Font.Light
                 text: !pg.have ? "Software Update isn't available" : pg.checking ? "Looking for updates…" : pg.working ? "Updating…" : pg.visibleItems.length ? pg.visibleItems.length + (pg.visibleItems.length === 1 ? " update is ready" : " updates are ready") : "Everything is up to date" }

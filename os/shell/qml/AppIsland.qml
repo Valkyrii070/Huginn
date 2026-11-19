@@ -25,6 +25,7 @@ Glass {
                 out.push({ kind: "file", glyph: "doc", label: info.recent[i].name, sub: info.recent[i].where + " · " + info.recent[i].when, path: info.recent[i].path })
         }
         out.push({ kind: "line" })
+        if (app.other) { out.push({ kind: "quit", glyph: "x", label: "Quit " + app.name }); return out }   // no .desktop file: nothing to keep
         if (!app.web) out.push({ kind: "pin", glyph: "pin", label: info.pinned ? "Remove from the dock" : "Keep in the dock" })
         if (info.removable) out.push({ kind: "store", glyph: "bag", label: "Uninstall…" })
         return out
@@ -32,12 +33,17 @@ Glass {
     readonly property var picks: rows.map(function (r, i) { return r.kind === "head" || r.kind === "line" ? -1 : i }).filter(function (i) { return i >= 0 })
 
     function open(a) {
-        app = a; info = a ? Apps.island(a.name) : ({}); current = -1
+        app = a; current = -1
+        // an app known only by its windows (Status.otherApps) has no .desktop file to ask about
+        info = !a ? ({}) : a.other ? { name: a.name, running: true, actions: [], recent: [], pinned: false, removable: false } : Apps.island(a.name)
         forceActiveFocus()
     }
+    function windowsOfApp() { return Status.windows.filter(function (w) { return w.name === app.name }) }
     function act(r) {
         if (!r) return
-        if (r.kind === "open") Apps.launch(app.exec)
+        if (r.kind === "open" && app.other) { var ws = windowsOfApp(); if (ws.length) Status.windowDo(ws[ws.length - 1].id, "activate") }
+        else if (r.kind === "quit") windowsOfApp().forEach(function (w) { Status.windowDo(w.id, "close") })
+        else if (r.kind === "open") Apps.launch(app.exec)
         else if (r.kind === "action") Apps.runAction(app.name, r.index)
         else if (r.kind === "file") Apps.openWith(app.name, r.path)
         else if (r.kind === "pin") Apps.setPinned(app.name, !info.pinned)

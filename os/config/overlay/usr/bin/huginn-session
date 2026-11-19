@@ -12,6 +12,10 @@ export XDG_MENU_PREFIX=plasma-
 export PLASMA_INTEGRATION_USE_PORTAL=1
 export GTK_USE_PORTAL=1
 export GDK_DEBUG=portals
+# Games made with SDL (most native Linux games, and Steam's runtime) draw through X11 (XWayland): Steam's overlay
+# (Shift+Tab) and its screenshots only work in X11 games, and SDL 3 would otherwise pick Wayland on a compositor as
+# capable as Huginn's. A game can still be told otherwise in its launch options (SDL_VIDEODRIVER=wayland %command%).
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-x11}" SDL_VIDEO_DRIVER="${SDL_VIDEO_DRIVER:-x11}"
 # The pointer: Breeze's (the compositor draws it, and so does X11 apps' server).
 export XCURSOR_THEME=breeze_cursors XCURSOR_SIZE=24
 # The compositor starts the session (services, then the shell) once it's listening, and ends when the shell does.

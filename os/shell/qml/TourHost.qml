@@ -22,6 +22,7 @@ Item {
     signal finished()
     signal closeOpenThings()                         // what a try opened (Today, a menu) closes as the tour moves on
     signal installWanted()
+    signal windowWanted()                             // a step that needs a window, and none is open: the host opens one
     signal maskChanged(var rect)                      // where the tour takes clicks (empty: the whole screen)
     readonly property bool motion: Theme.t.openMs > 0
     component Btn: Rectangle {
@@ -88,6 +89,9 @@ Item {
         return { x: Math.max(12, Math.min(width - iw - 12, x)), y: Math.max(40, Math.min(height - ih - 12, y)), nub: n, aim: r }
     }
     function place() {
+        // "Windows and spaces" needs a window to drag. If the first step's "open an app" was skipped, nothing is open:
+        // open one (Files) rather than point at an empty desktop; the island moves to it once it's there.
+        if (cur.target === "window" && windowCount === 0 && !waitingForWindow) { waitingForWindow = true; windowWanted() }
         var s = spot()
         aim = s.aim; nub = s.nub
         line.reset()
@@ -139,10 +143,16 @@ Item {
 
     // ---------------------------------------------------------------- the try-it checks
     property int windowsAtStep: 0
+    property bool waitingForWindow: false
     onStepChanged: windowsAtStep = windowCount
+    // a window came (or went) while the island points at one: point at where it is now
     onTodayOpenChanged: if (todayOpen && running && phase === "island" && cur.check === "today") tick()
     onMenuOpenChanged: if (menuOpen && running && phase === "island" && cur.check === "menu") tick()
-    onWindowCountChanged: if (running && phase === "island" && cur.check === "window" && windowCount > windowsAtStep) tick()
+    onWindowCountChanged: {
+        if (!running || phase !== "island") return
+        if (cur.check === "window" && windowCount > windowsAtStep) tick()
+        if (cur.target === "window" && !glide.running) { waitingForWindow = false; place() }   // point at where the window is now
+    }
     onSnappedChanged: if (snapped && running && phase === "island" && cur.check === "snap") tick()
     function tick() { if (done) return; done = true; moveOn.restart() }
     Timer { id: moveOn; interval: tour.cur.check === "today" || tour.cur.check === "menu" ? 2400 : 1500; onTriggered: if (tour.done && tour.running) tour.next() }

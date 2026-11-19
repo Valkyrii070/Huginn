@@ -43,6 +43,7 @@ def _hex(c: QColor) -> str:
 class Easel(QObject):
     changed = Signal()                      # layers, tools, settings: what the panels show
     painted = Signal()                      # the canvas needs drawing again
+    overlaid = Signal()                     # only what's drawn over the picture moved (the brush's outline): no new picture
     said = Signal(str, bool)
     editText = Signal(str, float, float)    # the text shape to edit, and where (document pixels)
     _call = Signal(object)
@@ -419,7 +420,84 @@ class Easel(QObject):
     def render(self) -> QImage:
         if not self.doc:
             return QImage()
+        d = self._drag
+        if d and d.get("kind") == "brush" and d.get("which") == "image" and self._live is not None:
+            return self._brush_frame(d)
         return self.doc.composite(self._live)
+
+    # While a brush stroke goes on, the canvas isn't put together from every layer for each step of the pointer (on a
+    # big picture with styles that took long enough to freeze Easel): what's under the layer and what's over it are
+    # put together once when the stroke starts, and each frame only the patch the new dabs touched is made again,
+    # from those two and the layer with the stroke so far. It holds when everything over the layer is drawn
+    # normally (no blend modes or adjustment layers above, no styles on the layer itself); otherwise the whole
+    # picture is made as before.
+    def _stroke_parts(self, layer: dict):
+        import huginn_easel_more as more
+        doc = self.doc
+        if layer["kind"] != "pixel" or more.has_fx(layer) or more.ancestors(doc.layers, layer):
+            return None
+        items = more.tree(doc.layers)
+        at = next((i for i, it in enumerate(items) if not isinstance(it, tuple) and it["id"] == layer["id"]), -1)
+        if at < 0:
+            return None
+        above = items[at + 1:]
+        for it in above:
+            head = it[1] if isinstance(it, tuple) else it
+            if head.get("kind") == "adjust" or head.get("blend", "normal") != "normal":
+                return None
+        return doc._stack(items[:at]), (doc._stack(above) if above else None)
+
+    def _brush_frame(self, d: dict) -> QImage:
+        doc = self.doc
+        if "parts" not in d:
+            d["parts"] = self._stroke_parts(d["layer"])
+            d["frame"] = doc.composite(self._live)
+            d["new"] = None
+            return d["frame"]
+        if d["parts"] is None:
+            return doc.composite(self._live)
+        patch = d.get("new")
+        d["new"] = None
+        if patch is None:
+            return d["frame"]
+        r = patch.toAlignedRect().intersected(QRect(0, 0, doc.w, doc.h))
+        if r.isEmpty():
+            return d["frame"]
+        below, above = d["parts"]
+        layer = d["layer"]
+        mine = layer["image"].copy(r)                                  # the layer with the stroke so far, in the patch
+        stroke = d["stroke"].copy(r)
+        if doc.selection is not None:
+            p = QPainter(stroke)
+            p.setCompositionMode(ez.CM.CompositionMode_DestinationIn)
+            p.drawImage(0, 0, doc.selection.copy(r))
+            p.end()
+        p = QPainter(mine)
+        p.setOpacity(self.opacity)
+        p.setCompositionMode(ez.CM.CompositionMode_DestinationOut if d["erase"] else ez.CM.CompositionMode_SourceOver)
+        p.drawImage(0, 0, stroke)
+        p.end()
+        if layer.get("mask") is not None and layer.get("maskOn", True):
+            p = QPainter(mine)
+            p.setCompositionMode(ez.CM.CompositionMode_DestinationIn)
+            p.drawImage(0, 0, layer["mask"].copy(r))
+            p.end()
+        piece = below.copy(r)
+        p = QPainter(piece)
+        if layer["visible"]:
+            p.setOpacity(layer["opacity"])
+            p.setCompositionMode(ez.BLENDS.get(layer["blend"], ez.CM.CompositionMode_SourceOver))
+            p.drawImage(0, 0, mine)
+        if above is not None:
+            p.setOpacity(1.0)
+            p.setCompositionMode(ez.CM.CompositionMode_SourceOver)
+            p.drawImage(0, 0, above.copy(r))
+        p.end()
+        p = QPainter(d["frame"])
+        p.setCompositionMode(ez.CM.CompositionMode_Source)
+        p.drawImage(r.topLeft(), piece)
+        p.end()
+        return d["frame"]
 
     def overlay(self) -> dict:
         """What the canvas draws over the picture, in document pixels."""
@@ -1090,7 +1168,9 @@ class Easel(QObject):
         else:
             p.drawImage(QPointF(x + jx - img.width() / 2, y + jy - img.height() / 2), img)
         r = size / 2 + size * scatter + 2
-        d["box"] = d["box"].united(QRectF(x - r, y - r, r * 2, r * 2)) if d.get("box") else QRectF(x - r, y - r, r * 2, r * 2)
+        dab = QRectF(x - r, y - r, r * 2, r * 2)
+        d["box"] = d["box"].united(dab) if d.get("box") else dab
+        d["new"] = d["new"].united(dab) if d.get("new") else dab        # drawn since the canvas last showed it
 
     def _stroke_to(self, d: dict, x: float, y: float) -> None:
         lx, ly = d["last"]
@@ -1166,7 +1246,7 @@ class Easel(QObject):
             self._cursor = text
             self.changed.emit()
         if self.tool in ("brush", "eraser", "dodge", "smudge", "liquify"):
-            self.painted.emit()
+            self.overlaid.emit()                                     # the outline follows; the picture hasn't changed
 
     @Slot(float, float)
     def doubleClick(self, x: float, y: float) -> None:
@@ -3343,6 +3423,7 @@ class EaselView(QQuickPaintedItem):
         self._easel = easel
         if easel is not None:
             easel.painted.connect(self._repaint)
+            easel.overlaid.connect(self.update)
             easel.changed.connect(self._changed)
             easel.rulersToggled.connect(lambda: self.fit() if not getattr(self, "_user_zoom", False) else self.update())
         self._fitted = False
@@ -3380,10 +3461,18 @@ class EaselView(QQuickPaintedItem):
         self.update()
 
     def _repaint(self):
-        self._img = self._easel.render() if self._easel and self._easel.doc else QImage()
-        if not self._fitted and not self._img.isNull():
-            self.fit()
+        """The picture changed. It's made again when the canvas is next drawn, once a frame however many times it
+        changed in between (a fast pointer gives several moves a frame)."""
+        self._stale = True
+        if self._img.isNull() or not self._fitted:
+            self._fresh()
+            if not self._fitted and not self._img.isNull():
+                self.fit()
         self.update()
+
+    def _fresh(self):
+        self._stale = False
+        self._img = self._easel.render() if self._easel and self._easel.doc else QImage()
 
     def _refit(self):
         if not self._fitted_by_user():
@@ -3612,6 +3701,8 @@ class EaselView(QQuickPaintedItem):
     # -------------------------------------------------------------- drawing
     def paint(self, p: QPainter):
         e = self._easel
+        if getattr(self, "_stale", False):
+            self._fresh()
         if not e or not e.doc or self._img.isNull():
             return
         doc = e.doc

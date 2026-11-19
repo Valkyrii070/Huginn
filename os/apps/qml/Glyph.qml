@@ -148,6 +148,67 @@ Canvas {
         case "transform": c.setLineDash([2.5, 2.5]); box(4, 4, 16, 16, 1); c.setLineDash([]); box(2.5, 2.5, 3.5, 3.5, 0.5); box(18, 2.5, 3.5, 3.5, 0.5); box(2.5, 18, 3.5, 3.5, 0.5); box(18, 18, 3.5, 3.5, 0.5); break
         case "bug": c.beginPath(); c.ellipse(7.5, 8, 9, 12); c.stroke(); line(12, 10, 12, 20); line(7.5, 13, 4, 12); line(16.5, 13, 20, 12); line(7.5, 17, 4, 19); line(16.5, 17, 20, 19); line(9.5, 8.5, 8, 5); line(14.5, 8.5, 16, 5); break
         case "split": box(3, 5, 18, 14, 2); line(12, 5, 12, 19); break
+        // The rest are for Huginn's icon theme as well (scripts/icon_symbols.py turns every glyph here into an icon).
+        case "copy": box(8.5, 8.5, 11.5, 11.5, 2.2); c.beginPath(); c.moveTo(15.5, 6); c.quadraticCurveTo(15.5, 4, 13.5, 4); c.lineTo(6, 4); c.quadraticCurveTo(4, 4, 4, 6); c.lineTo(4, 13.5); c.quadraticCurveTo(4, 15.5, 6, 15.5); c.stroke(); break
+        case "paste": box(5, 5, 14, 16, 2.5); box(9, 3, 6, 4, 1.2); line(8.5, 11.5, 15.5, 11.5); line(8.5, 15.5, 13, 15.5); break
+        case "cut": ring(7, 17.5, 2.8); ring(17, 17.5, 2.8); line(8.8, 15.2, 16.5, 3.5); line(15.2, 15.2, 7.5, 3.5); break
+        case "save": poly(4, 4, 16.5, 4, 20, 7.5, 20, 20, 4, 20); line(8, 4, 8, 8.5, 15, 8.5, 15, 4); box(8, 13.5, 8, 6.5, 1); break
+        case "minus": line(5, 12, 19, 12); break
+        case "dots": dot(5.5, 12, 1.6); dot(12, 12, 1.6); dot(18.5, 12, 1.6); break
+        case "menu": line(4, 7, 20, 7); line(4, 12, 20, 12); line(4, 17, 20, 17); break
+        case "minimize": line(6, 16, 18, 16); break
+        case "maximize": box(5.5, 5.5, 13, 13, 2); break
+        case "restore": box(5, 9, 10, 10, 1.8); line(9, 7, 9, 5, 19, 5, 19, 15, 17, 15); break
+        case "bold": c.beginPath(); c.moveTo(7, 12); c.lineTo(7, 4); c.lineTo(12.5, 4); c.quadraticCurveTo(16.5, 4, 16.5, 8); c.quadraticCurveTo(16.5, 12, 12.5, 12); c.lineTo(7, 12); c.lineTo(13.5, 12); c.quadraticCurveTo(18, 12, 18, 16); c.quadraticCurveTo(18, 20, 13.5, 20); c.lineTo(7, 20); c.lineTo(7, 12); c.lineWidth = 2.5; c.stroke(); c.lineWidth = 1.7; break
+        case "italic": line(10, 4, 18, 4); line(6, 20, 14, 20); line(14, 4, 10, 20); break
+        case "underline": c.beginPath(); c.moveTo(7, 4); c.lineTo(7, 10.5); c.quadraticCurveTo(7, 16, 12, 16); c.quadraticCurveTo(17, 16, 17, 10.5); c.lineTo(17, 4); c.stroke(); line(5.5, 20, 18.5, 20); break
+        case "strike": line(4, 12, 20, 12); c.beginPath(); c.moveTo(16.5, 6.5); c.quadraticCurveTo(15, 4, 12, 4); c.quadraticCurveTo(7.5, 4, 7.5, 7.5); c.quadraticCurveTo(7.5, 10, 11, 11); c.stroke(); c.beginPath(); c.moveTo(14.5, 13.5); c.quadraticCurveTo(16.5, 14.5, 16.5, 16.5); c.quadraticCurveTo(16.5, 20, 12, 20); c.quadraticCurveTo(8.5, 20, 7, 17.5); c.stroke(); break
+        case "link": c.beginPath(); c.moveTo(10.5, 7.5); c.lineTo(12.5, 5.5); c.quadraticCurveTo(15.5, 2.5, 18.5, 5.5); c.quadraticCurveTo(21.5, 8.5, 18.5, 11.5); c.lineTo(16.5, 13.5); c.stroke()
+            c.beginPath(); c.moveTo(13.5, 16.5); c.lineTo(11.5, 18.5); c.quadraticCurveTo(8.5, 21.5, 5.5, 18.5); c.quadraticCurveTo(2.5, 15.5, 5.5, 12.5); c.lineTo(7.5, 10.5); c.stroke(); line(9.5, 14.5, 14.5, 9.5); break
+        case "reply": c.beginPath(); c.moveTo(6, 9); c.lineTo(14, 9); c.quadraticCurveTo(20, 9, 20, 15); c.lineTo(20, 19); c.stroke(); line(10, 4.5, 5.5, 9, 10, 13.5); break
+        case "replyall": line(13, 4.5, 8.5, 9, 13, 13.5); line(8, 4.5, 3.5, 9, 8, 13.5); c.beginPath(); c.moveTo(9.5, 9); c.lineTo(15, 9); c.quadraticCurveTo(20.5, 9, 20.5, 15); c.lineTo(20.5, 19); c.stroke(); break
+        case "forwardmail": c.beginPath(); c.moveTo(18, 9); c.lineTo(10, 9); c.quadraticCurveTo(4, 9, 4, 15); c.lineTo(4, 19); c.stroke(); line(14, 4.5, 18.5, 9, 14, 13.5); break
+        case "upload": line(12, 16, 12, 4); line(7, 9, 12, 4, 17, 9); line(5, 20, 19, 20); break
+        case "eject": poly(12, 5, 19, 13, 5, 13); line(5, 18, 19, 18); break
+        case "eyeoff": c.beginPath(); c.moveTo(2.5, 12); c.bezierCurveTo(6, 6, 18, 6, 21.5, 12); c.bezierCurveTo(18, 18, 6, 18, 2.5, 12); c.stroke(); ring(12, 12, 2.8); line(4, 4, 20, 20); break
+        case "unlock": box(5, 10.5, 14, 10, 2.5); c.beginPath(); c.moveTo(8, 10.5); c.lineTo(8, 7); c.arc(12, 7, 4, Math.PI, Math.PI * 1.85); c.stroke(); dot(12, 15.5, 1.2); break
+        case "tag": poly(4, 4, 12, 4, 20.5, 12.5, 12.5, 20.5, 4, 12); ring(8.5, 8.5, 1.5); break
+        case "bookmark": poly(6, 3.5, 18, 3.5, 18, 20.5, 12, 15.5, 6, 20.5); break
+        case "filter": poly(3.5, 5, 20.5, 5, 14, 12.5, 14, 19, 10, 21, 10, 12.5); break
+        case "sort": line(7, 4, 7, 20); line(4, 17, 7, 20, 10, 17); line(17, 20, 17, 4); line(14, 7, 17, 4, 20, 7); break
+        case "zoomout": ring(10.5, 10.5, 6.5); line(15.5, 15.5, 20.5, 20.5); line(8, 10.5, 13, 10.5); break
+        case "fit": line(4, 9, 4, 4, 9, 4); line(15, 4, 20, 4, 20, 9); line(20, 15, 20, 20, 15, 20); line(9, 20, 4, 20, 4, 15); break
+        case "shrink": line(10, 5, 10, 10, 5, 10); line(14, 19, 14, 14, 19, 14); break
+        case "newfile": poly(6, 3, 14, 3, 18, 7, 18, 21, 6, 21); line(14, 3, 14, 7, 18, 7); line(12, 10.5, 12, 17.5); line(8.5, 14, 15.5, 14); break
+        case "newfolder": poly(3, 7, 3, 18, 21, 18, 21, 9, 12, 9, 10, 6, 4, 6); line(12, 11, 12, 16); line(9.5, 13.5, 14.5, 13.5); break
+        case "folderopen": poly(3, 18, 3, 6, 9.5, 6, 11.5, 8.5, 19, 8.5, 19, 11); poly(3, 18, 6, 11, 21.5, 11, 18.5, 18); break
+        case "clear": poly(8, 5, 21, 5, 21, 19, 8, 19, 2.5, 12); line(11.5, 9, 17.5, 15); line(17.5, 9, 11.5, 15); break
+        case "attach": c.beginPath(); c.moveTo(16.5, 7); c.lineTo(16.5, 16); c.quadraticCurveTo(16.5, 20.5, 12, 20.5); c.quadraticCurveTo(7.5, 20.5, 7.5, 16); c.lineTo(7.5, 6.5); c.quadraticCurveTo(7.5, 3.5, 10.5, 3.5); c.quadraticCurveTo(13.5, 3.5, 13.5, 6.5); c.lineTo(13.5, 15.5); c.quadraticCurveTo(13.5, 17, 12, 17); c.quadraticCurveTo(10.5, 17, 10.5, 15.5); c.lineTo(10.5, 8); c.stroke(); break
+        case "heart": c.beginPath(); c.moveTo(12, 20); c.bezierCurveTo(4, 14.5, 3, 11, 3, 8.5); c.bezierCurveTo(3, 5.5, 5.5, 4, 7.5, 4); c.bezierCurveTo(9.5, 4, 11, 5, 12, 7); c.bezierCurveTo(13, 5, 14.5, 4, 16.5, 4); c.bezierCurveTo(18.5, 4, 21, 5.5, 21, 8.5); c.bezierCurveTo(21, 11, 20, 14.5, 12, 20); c.closePath(); c.stroke(); break
+        case "volumeoff": poly(4, 9, 8, 9, 13, 5, 13, 19, 8, 15, 4, 15); line(16, 9.5, 21, 14.5); line(21, 9.5, 16, 14.5); break
+        case "volumelow": poly(4, 9, 8, 9, 13, 5, 13, 19, 8, 15, 4, 15); c.beginPath(); c.arc(13, 12, 3.2, -0.9, 0.9); c.stroke(); break
+        case "volumehigh": poly(3, 9, 7, 9, 12, 5, 12, 19, 7, 15, 3, 15); c.beginPath(); c.arc(12, 12, 4, -0.9, 0.9); c.stroke(); c.beginPath(); c.arc(12, 12, 8, -0.9, 0.9); c.stroke(); break
+        case "ethernet": box(5, 9, 14, 11, 2); line(9, 9, 9, 6, 15, 6, 15, 9); line(9, 13.5, 9, 16); line(12, 13.5, 12, 16); line(15, 13.5, 15, 16); break
+        case "wifioff": for (var w = 4; w <= 12; w += 4) { c.beginPath(); c.arc(12, 18, w, Math.PI * 1.25, Math.PI * 1.75); c.stroke() } dot(12, 18, 1.4); line(4, 4, 20, 20); break
+        case "warning": poly(12, 3.5, 21, 19.5, 3, 19.5); line(12, 9.5, 12, 14); dot(12, 16.8, 1.1); break
+        case "error": ring(12, 12, 8.5); line(9, 9, 15, 15); line(15, 9, 9, 15); break
+        case "okcircle": ring(12, 12, 8.5); line(8, 12.5, 11, 15.5, 16.5, 9.5); break
+        case "selectall": c.setLineDash([2.5, 2.5]); box(4, 4, 16, 16, 2); c.setLineDash([]); line(8.5, 12, 11, 14.5, 15.5, 9.5); break
+        case "first": line(6, 5, 6, 19); line(17, 5, 10, 12, 17, 19); break
+        case "last": line(18, 5, 18, 19); line(7, 5, 14, 12, 7, 19); break
+        case "repeat": c.beginPath(); c.moveTo(4, 11); c.lineTo(4, 10); c.quadraticCurveTo(4, 7, 7, 7); c.lineTo(19, 7); c.stroke(); line(16, 4, 19, 7, 16, 10)
+            c.beginPath(); c.moveTo(20, 13); c.lineTo(20, 14); c.quadraticCurveTo(20, 17, 17, 17); c.lineTo(5, 17); c.stroke(); line(8, 14, 5, 17, 8, 20); break
+        case "shuffle": line(4, 7, 8, 7, 16, 17, 20, 17); line(4, 17, 8, 17, 16, 7, 20, 7); line(17.5, 4.5, 20, 7, 17.5, 9.5); line(17.5, 14.5, 20, 17, 17.5, 19.5); break
+        case "sidebar": box(3, 5, 18, 14, 2.5); line(9, 5, 9, 19); break
+        case "window": box(3, 5, 18, 14, 2.5); line(3, 9, 21, 9); break
+        case "laptop": box(5, 5, 14, 10, 1.5); line(2.5, 18.5, 21.5, 18.5); line(4, 15, 2.5, 18.5); line(20, 15, 21.5, 18.5); break
+        case "smartphone": box(7, 3, 10, 18, 2.5); line(10.5, 18, 13.5, 18); break
+        case "drive": box(3, 7, 18, 10, 2.5); dot(17, 12, 1.1); line(6.5, 12, 12, 12); break
+        case "usb": box(7, 9, 10, 12, 2); box(9, 3.5, 6, 5.5, 1); break
+        case "sdcard": poly(6, 3, 14, 3, 18, 7, 18, 21, 6, 21); line(9, 3, 9, 6.5); line(12, 3, 12, 6.5); break
+        case "server": box(4, 4, 16, 7, 2); box(4, 13, 16, 7, 2); dot(16.5, 7.5, 1); dot(16.5, 16.5, 1); break
+        case "scanner": box(3, 10, 18, 9, 2.5); line(6, 10, 18, 4.5); line(6.5, 14.5, 12, 14.5); break
+        case "webcam": ring(12, 10, 6.5); ring(12, 10, 2.2); line(8, 21, 16, 21); line(12, 16.5, 12, 21); break
         default: ring(12, 12, 7)
         }
     }
