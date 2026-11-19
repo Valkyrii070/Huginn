@@ -11,6 +11,9 @@ GlassWindow {
     bare: visibility === Window.FullScreen && !hover.containsMouse
     function play(i) { if (i < 0 || i >= Backend.items.length) return; current = i; showList = false; if (Backend.items[i].url) { player.source = Backend.items[i].url; player.play() } }
     function full() { win.visibility === Window.FullScreen ? win.showNormal() : win.showFullScreen() }
+    function playPause() { if (player.playing) player.pause(); else player.play() }
+    function skip(ms) { player.position = Math.max(0, Math.min(player.duration, player.position + Number(ms))) }
+    function toggleList() { showList = !showList }
     // Playback: the real engine, or (with sample content) a stand-in that only holds numbers for the preview.
     QtObject { id: stub; property bool playing: true; property real position: 83000; property real duration: 228000; property url source; function play() {} function pause() {} }
     QtObject { id: stubAudio; property real volume: 0.7 }

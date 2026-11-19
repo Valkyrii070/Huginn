@@ -24,6 +24,7 @@ from pathlib import Path
 from gi.repository import Gio, GLib
 from PySide6.QtCore import QEvent, QKeyCombination, QMetaObject, QObject, Q_ARG, Qt, Slot
 from PySide6.QtGui import QGuiApplication, QKeyEvent, QKeySequence, QWindow
+from PySide6.QtQml import QJSValue
 
 XML = """<node><interface name="org.huginn.App">
   <method name="Menus"><arg type="s" name="json" direction="out"/></method>
@@ -115,6 +116,23 @@ APP_MENUS = {
     "camera": [("Camera", [item("Take", "short:Space", "Space")])],
     "machines": [("Machine", [item("New machine", "short:Ctrl+N", "Ctrl+N")])],
     "recorder": [("Recording", [item("Record or stop", "short:Space", "Space")])],
+    "music": [("Controls", [item("Play or pause", "qml:playPause", "Ctrl+P"), item("Next", "qml:nextSong", "Ctrl+Right"), item("Previous", "qml:previousSong", "Ctrl+Left"), SEP,
+                            item("Louder", "qml:louder", "Ctrl+Up"), item("Quieter", "qml:quieter", "Ctrl+Down")]),
+              ("View", [item("Now Playing", "qml:setView:playing", "Ctrl+1"), item("Library", "qml:setView:library", "Ctrl+2")])],
+    "video": [("Controls", [item("Play or pause", "qml:playPause", "Ctrl+P"), item("Forward 10 seconds", "qml:skip:10000", "Ctrl+Right"),
+                            item("Back 10 seconds", "qml:skip:-10000", "Ctrl+Left")]),
+              ("View", [item("Videos", "qml:toggleList", "Ctrl+L")])],
+    "photos": [("Picture", [item("Next", "qml:nextPicture", "Ctrl+Right"), item("Previous", "qml:previousPicture", "Ctrl+Left"), SEP,
+                            item("Edit", "qml:edit", "Ctrl+E"), item("Rotate", "qml:rotate", "Ctrl+R"), item("Details", "qml:details", "Ctrl+I"), SEP,
+                            item("Move to Trash", "qml:trashPicture", "Ctrl+Delete")]),
+               ("View", [item("All Pictures", "qml:allPictures", "Ctrl+Up")])],
+    "weather": [("Weather", [item("Add a place…", "qml:addPlace", "Ctrl+N"), item("Refresh", "qml:refresh", "Ctrl+R"), item("°C or °F", "qml:flipUnit", "Ctrl+U")])],
+    "feeds": [("Feeds", [item("Follow…", "qml:follow", "Ctrl+N"), item("Your sources", "qml:sources", "Ctrl+Shift+S"), SEP,
+                         item("Check for new stories", "qml:refresh", "Ctrl+R"), item("Mark all as read", "qml:allRead", "Ctrl+Shift+A")])],
+    "messages": [("Chat", [item("New chat…", "qml:newChat", "Ctrl+N"), item("Account…", "qml:account", "Ctrl+,")])],
+    "games": [("Game", [item("Play", "qml:playGame", "Ctrl+Return"), item("Add a game…", "qml:openAdd", "Ctrl+N"), item("Look again", "qml:refresh", "Ctrl+R")])],
+    "clock": [("View", [item("World Clock", "qml:setPage:World Clock", "Ctrl+1"), item("Stopwatch", "qml:setPage:Stopwatch", "Ctrl+2"),
+                        item("Timer", "qml:setPage:Timer", "Ctrl+3")])],
 }
 NAMES = {"files": "Files"}
 # Apps that are about typing: they always have the Edit menu. Every other app has it only while you're typing in one
@@ -166,11 +184,36 @@ class AppMenu(QObject):
                 keys[seq.toString(QKeySequence.SequenceFormat.PortableText)] = act
         return keys
 
+    def _close_sheet(self) -> bool:
+        """Escape closes the sheet that's open over the window (a question, a list to pick from), in every app.
+        Not a sheet that is the app's own start (Tempo's songs) or that guards something (unlocking)."""
+        root = self._root()
+        if root is None or self._key in ("tempo", "installer", "welcome"):
+            return False
+        v = root.property("sheet")
+        if hasattr(v, "toVariant"):
+            if v.isNull() or v.isUndefined():
+                return False
+            kind = (v.toVariant() or {}).get("kind", "") if isinstance(v.toVariant(), dict) else str(v.toVariant() or "")
+            empty = QJSValue(QJSValue.SpecialValue.NullValue)
+        elif isinstance(v, str) and v:
+            kind, empty = v, ""
+        elif isinstance(v, dict) and v:
+            kind, empty = v.get("kind", ""), QJSValue(QJSValue.SpecialValue.NullValue)
+        else:
+            return False
+        if kind in ("unlock", "gate", "setup", "master", "songs"):
+            return False
+        root.setProperty("sheet", empty)
+        return True
+
     def eventFilter(self, obj, event) -> bool:
         if event.type() != QEvent.Type.KeyPress or not isinstance(obj, QWindow) or event.isAutoRepeat():
             return False
         mods = event.modifiers() & self.MODS
         key = event.key()
+        if key == Qt.Key.Key_Escape and not mods:
+            return self._close_sheet()
         if not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)) and not (Qt.Key.Key_F1 <= key <= Qt.Key.Key_F35):
             return False
         if self._bound is None:
@@ -182,6 +225,8 @@ class AppMenu(QObject):
         except ValueError:
             return False
         act = self._bound.get(text)
+        if not act and text == "Ctrl+F" and self._search_field() is not None:
+            act = "find:"                                    # a search box that shows only now and then (a library view)
         if not act:
             return False
         self.trigger(act)
@@ -262,6 +307,13 @@ class AppMenu(QObject):
                 groups.append({"name": name, "items": rows})
         if not any(g["name"] == "Edit" for g in groups) and (self._key in TEXT_APPS or self._typing()):
             groups.insert(min(1, len(groups)), {"name": "Edit", "items": [dict(i, enabled=True) if not i.get("sep") else i for i in EDIT]})
+        # Find… for every app with a search box, which Ctrl+F then reaches (unless the app has its own Find)
+        if not any(it.get("label", "").startswith("Find") for g in groups for it in g["items"]) and self._search_field() is not None:
+            edit = next((g for g in groups if g["name"] == "Edit"), None)
+            if edit is None:
+                edit = {"name": "Edit", "items": []}
+                groups.insert(min(1, len(groups)), edit)
+            edit["items"] = edit["items"] + ([SEP] if edit["items"] else []) + [item("Find…", "find:", "Ctrl+F", enabled=True)]
         if not any(g["name"] == "View" for g in groups):
             groups.append({"name": "View", "items": [item("Full screen", "win:fullscreen", "F11", enabled=True)]})
         else:
@@ -272,6 +324,16 @@ class AppMenu(QObject):
                 "top": [item(f"About {self._title}", "app:about", enabled=True), item(f"{self._title} Settings…", "app:settings", "Ctrl+,", enabled=self._has_qml("openSettings"))],
                 "bottom": [item("Minimise", "win:minimise", enabled=True), item("Close window", "win:close", "Ctrl+W", enabled=True),
                            item(f"Quit {self._title}", "app:quit", "Ctrl+Q", enabled=True)]}
+
+    def _search_field(self):
+        """The window's search box (an IslandField that's showing), if it has one."""
+        root = self._root()
+        if root is None:
+            return None
+        for obj in root.findChildren(QObject):
+            if obj.metaObject().className().startswith("IslandField") and obj.property("visible") and obj.property("enabled") is not False:
+                return obj
+        return None
 
     def _typing(self) -> bool:
         """Is a text field what had the keyboard in this app (its window keeps that while the bar's menu is open)?"""
@@ -327,6 +389,10 @@ class AppMenu(QObject):
             focus = getattr(win, "activeFocusItem", lambda: None)() if win is not None else None
             if focus is not None:
                 QMetaObject.invokeMethod(focus, rest)
+        elif kind == "find":
+            field = self._search_field()
+            if field is not None:
+                QMetaObject.invokeMethod(field, "focusInput")
         elif kind == "backend" and self._has_backend(rest):
             getattr(self._backend, rest)()
         elif kind == "qml":

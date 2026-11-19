@@ -13,6 +13,13 @@ GlassWindow {
     readonly property var song: current >= 0 && current < shown.length ? shown[current] : null
     readonly property color pick: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.18)
     function play(i) { if (i < 0 || i >= shown.length) return; current = i; if (shown[i].url) { player.source = shown[i].url; player.play() } }
+    // the top bar's Controls menu, and its keys
+    function playPause() { if (current < 0) play(0); else if (player.playing) player.pause(); else player.play() }
+    function nextSong() { play(current + 1) }
+    function previousSong() { play(Math.max(0, current - 1)) }
+    function louder() { out.volume = Math.min(1, out.volume + 0.1) }
+    function quieter() { out.volume = Math.max(0, out.volume - 0.1) }
+    function setView(v) { view = v === "library" ? "library" : "playing" }
     // Playback: the real engine, or (with sample content) a stand-in that only holds numbers for the preview.
     QtObject { id: stub; property bool playing: true; property real position: 83000; property real duration: 228000; property url source; function play() {} function pause() {} }
     QtObject { id: stubAudio; property real volume: 0.7 }

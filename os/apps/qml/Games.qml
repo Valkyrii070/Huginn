@@ -26,6 +26,8 @@ GlassWindow {
     function initials(name) { var w = name.split(/\s+/).filter(function (x) { return /[A-Za-z0-9]/.test(x) }); return (w.length > 1 ? w[0][0] + w[1][0] : name.slice(0, 2)).toUpperCase() }
     function added(path) { Backend.addGame(path); profile = true; sheet = "" }
     function openAdd() { sheet = "add"; Backend.browse(Backend.folder) }
+    function playGame() { if (cur.id && !cur.running) Backend.play(cur.id) }
+    function refresh() { Backend.refresh() }
     function lineUp() {
         var g = Backend.games, now = []
         for (var i = 0; i < g.length; i++) now.push(g[i].id)

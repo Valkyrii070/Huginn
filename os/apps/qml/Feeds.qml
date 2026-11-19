@@ -17,6 +17,10 @@ GlassWindow {
     readonly property string viewTitle: Backend.view === "front" ? "Today" : Backend.view === "starred" ? "Starred" : Backend.view === "all" ? "Everything"
                                        : ((Backend.sources.filter(function (s) { return s.id === Backend.view })[0] || {}).title || "")
     property var sheet: null                   // { kind: "follow" | "sources" | "import", why }
+    function follow() { sheet = { kind: "follow", why: "" } }
+    function sources() { sheet = { kind: "sources" } }
+    function refresh() { Backend.refresh() }
+    function allRead() { Backend.allRead() }
     function hue(s) { var h = 7; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 3600; return h / 3600 }
     function siteColour(s, light) { return Qt.hsla(hue(s || "?"), 0.55, light ? 0.52 : 0.40, 1) }
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong); if (!wrong && win.sheet && win.sheet.kind === "follow") win.sheet = null } }

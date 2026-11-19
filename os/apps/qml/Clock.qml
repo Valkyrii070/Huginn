@@ -5,6 +5,7 @@ GlassWindow {
     id: win
     title: "Clock"; width: 820; height: 600; glow: "bottom"; padTop: 60; padBottom: 66
     property string page: startPage || "World Clock"
+    function setPage(p) { page = p }
     property real hAngle: 0
     property real mAngle: 0
     property real sAngle: 0

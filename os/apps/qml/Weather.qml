@@ -8,6 +8,9 @@ GlassWindow {
     readonly property var now: Backend.now
     readonly property bool has: now.temp !== undefined
     Connections { target: Backend; function onFailed(msg) { toast.say(msg, true) } }
+    function addPlace() { adding = true; finder.text = ""; finder.focusIn() }
+    function refresh() { Backend.refresh() }
+    function flipUnit() { Backend.flipUnit() }
 
     islands: [
         Island { anchors.horizontalCenter: parent.horizontalCenter; y: 12

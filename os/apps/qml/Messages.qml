@@ -10,6 +10,8 @@ GlassWindow {
     property var sheet: null
     property string why: ""
     property bool otherServer: false
+    function newChat() { sheet = { kind: "new" } }
+    function account() { sheet = { kind: "account" } }
     function hue(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h / 360 }
     function signIn() { why = Backend.signIn(addr.text, pass.text, master.text, otherServer ? server.text : ""); if (why === "") { pass.text = ""; master.text = "" } }
     Connections { target: Backend

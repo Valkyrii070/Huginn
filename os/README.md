@@ -1514,6 +1514,47 @@ when you ask.
   Hugging Face (a download cut short, then resumed). The real downloads and the Vulkan backend on the 9070 XT are
   for the PC.
 
+## System-wide pass and an app round (2026-11-19)
+
+Measured first (every app started with no screen, its time to first picture, memory and messages; the session left
+alone, each process's CPU), then fixed what the numbers showed:
+
+- **The theme** is now a `QQmlPropertyMap` made once (`shell/huginn_shell.py`, `Theme`). QML reads `Theme.t.accent`
+  straight from it; when dark mode, the realm or an accessibility setting changes, only the values that changed are
+  set again. Before, `Theme.t` was a map built afresh in Python on every read: Tempo built it over 5,000 times while
+  opening, and any setting at all (the dock's size, say) rebuilt every binding in every open app. Apps start 25–45%
+  faster (warm, no screen: Files 0.72 → 0.50 s, Writer 0.87 → 0.57 s, Easel 1.54 → 1.04 s, Tempo 2.75 → 1.03 s).
+- **A quiet desktop.** A part file left behind in Downloads kept the live island's progress and the Downloads stack
+  animating for ever, so the shell used a quarter of a core and the compositor half of one, doing nothing. Only a
+  download that is still growing shows as one now; one that stopped says "didn't finish" and stays still. Idle, in
+  the test window: shell 25% → 0.7%, compositor 50% → 10%.
+- **The compositor rests** (`compositor/src/udev.rs`): a screen with nothing new for half a second looks again every
+  100 ms instead of at every refresh (three screens at 144 Hz were over 400 empty looks a second); any client
+  drawing or any input wakes it at once.
+- **Lazy imports**: Tempo imports scipy in the background once its window is up (a second at start), Messages imports
+  matrix-nio when it first talks to a server (half a second).
+- **Bugs found on the way**: Tempo's loop recording with takes ended in a NameError; a slot defined twice; Money gave
+  the same warning twice; demo data that used personal names and places (now Astrid's, in
+  Reykjavík); folders shown as raw paths ("Pictures › Screenshots" now).
+
+The app round, for every app at once:
+
+- **Every key a menu shows works.** The top bar's menus showed Ctrl+F, Ctrl+N, Ctrl+W, Ctrl+Q, F1… but most apps
+  had no shortcut behind them. Each app's menu now handles its own keys (after the app's own shortcuts, and only
+  keys with Ctrl or Alt, or the function keys, so nothing typed is taken; Terminal keeps Ctrl+W and friends).
+- **Menu entries that pointed at nothing now do something**: Files (new folder and tab, open, trash, find, icons or
+  list, hidden files, back, forward, up, the places), Notes (new note, find, heading, checklist, list), Calendar (new
+  event, import, month or week), Writer, Sheets and Slides (Open… and export; new, duplicate and delete slide),
+  Terminal. New menus: Music and Video (play, next, louder…), Photos (next, edit, rotate, details, trash), Weather,
+  Feeds, Messages, Games and Clock.
+- **Find… and Ctrl+F in every app with a search box**, and **Escape closes the open sheet** in every app.
+- **Open…** (`apps/huginn_picker.py`): any app can ask for Huginn's own Open window through the desktop portal;
+  Writer, Sheets, Slides and Calendar's Import use it.
+- Writer's formatting island fits a narrow window (the colours go first, then the sizes).
+- Checked: the numbers before and after; each new key and menu in the nested session; `scripts/ci-smoke.py` 54/54.
+  The compositor's resting is for real screens (the window backend can't show it): try the PC, and if a screen
+  ever seems slow to wake, say so.
+
 ## Huginn, the browser
 
 Inside the Huginn repository (this kit is its `os/` folder) the image ships the repository's own browser. A kit used

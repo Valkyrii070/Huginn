@@ -30,6 +30,14 @@ GlassWindow {
     readonly property var months: { var seen = [], out = []; Backend.items.forEach(function (p) { if (seen.indexOf(p.day) < 0) { seen.push(p.day); out.push(p.day) } }); return out }
     onViewingChanged: zoom = 1
     Connections { target: Backend; function onFailed(msg) { win.notice = msg; hide.restart() } }
+    // the top bar's Picture menu
+    function nextPicture() { if (viewing >= 0 && viewing < shown.length - 1) viewing++ }
+    function previousPicture() { if (viewing > 0) viewing-- }
+    function allPictures() { viewing = -1 }
+    function rotate() { if (pic) Backend.rotate(pic.path, 90) }
+    function edit() { if (pic && Backend.canEdit) Backend.beginEdit(pic.path) }
+    function trashPicture() { if (pic) asking = pic }
+    function details() { if (pic) showInfo = !showInfo }
     Timer { id: hide; interval: 5000; onTriggered: win.notice = "" }
     islands: [
         Island {   // what you can do with the picture that is open
