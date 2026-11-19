@@ -7,6 +7,10 @@ GlassWindow {
     title: "Terminal"; glow: "bottom"; width: 900; height: 580; padTop: 58; padBottom: 60
     baseColor: Theme.t.dark ? Qt.rgba(0.03 + tintColor.r * 0.04, 0.035 + tintColor.g * 0.04, 0.035 + tintColor.b * 0.04, 1) : "#FBFCFA"
     Connections { target: Backend; function onClosed() { win.close() } function onChanged() { stick.restart() } }
+    function newTab() { Backend.newTab(); keys.forceActiveFocus() }
+    function closeTab() { Backend.closeTab(Backend.current) }
+    function copy() { Backend.copyAll() }
+    function paste() { Backend.paste(); keys.forceActiveFocus() }
     Timer { id: stick; interval: 1; onTriggered: if (screen.atEnd) screen.positionViewAtEnd() }
     islands: [
         Island {

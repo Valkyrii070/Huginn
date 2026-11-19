@@ -38,7 +38,7 @@ Item {
         }
         Rectangle {
             id: sweep
-            visible: art.filling < 0; width: page.width * 0.5; height: page.height * 1.6; rotation: 20; y: -page.height * 0.3
+            visible: art.filling < 0 && !(art.file && art.file.stalled); width: page.width * 0.5; height: page.height * 1.6; rotation: 20; y: -page.height * 0.3
             gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: "transparent" } GradientStop { position: 0.5; color: Qt.alpha(Theme.t.glowA, 0.55) } GradientStop { position: 1; color: "transparent" } }
             NumberAnimation on x { from: -page.width * 0.6; to: page.width * 1.1; duration: 1300; loops: Animation.Infinite; running: sweep.visible }
         }

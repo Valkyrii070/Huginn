@@ -54,6 +54,20 @@ def human_size(n: float) -> str:
     return ""
 
 
+def said_place(path) -> str:
+    """A folder as people say it: "your Pictures folder", "Pictures › Screenshots", not /home/name/Pictures/Screenshots."""
+    path, home = Path(path), Path.home()
+    try:
+        rel = path.relative_to(home)
+    except ValueError:
+        return " › ".join(path.parts[1:]) or "/"
+    if not rel.parts:
+        return "your Home folder"
+    if len(rel.parts) == 1:
+        return f"your {rel.parts[0]} folder"
+    return " › ".join(rel.parts)
+
+
 def file_kind(path: Path) -> str:
     if path.is_dir():
         return "folder"
@@ -2952,6 +2966,8 @@ class Photos(QObject):
 
     items = Property("QVariantList", lambda self: self._items, notify=changed)
     folder = Property(str, lambda self: str(self._folder), constant=True)
+    # the folder as people say it: "your Pictures folder", not a path
+    folderName = Property(str, lambda self: said_place(self._folder), constant=True)
     stamp = Property(int, lambda self: self._stamp, notify=changed)      # bumps when a file changes, to refresh pictures
     first = Property(int, lambda self: next((i for i, it in enumerate(self._items) if it["path"] == self._first), -1), constant=True)
 
@@ -3971,6 +3987,8 @@ class Capture(QObject):
         pics = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or str(Path.home() / "Pictures")
         return str(Path(pics) / "Screenshots")
 
+    folderName = Property(str, lambda self: said_place(self.folder), constant=True)
+
     @Slot(result=str)
     def nextPath(self) -> str:
         folder = Path(self.folder)
@@ -4495,6 +4513,7 @@ class Library(QObject):
 
     items = Property("QVariantList", lambda self: self._items, notify=changed)
     folder = Property(str, lambda self: str(self._folder), constant=True)
+    folderName = Property(str, lambda self: said_place(self._folder), constant=True)
 
     @Property("QVariantList", notify=changed)
     def albums(self):
@@ -5308,6 +5327,9 @@ def main() -> int:
 
     engine = QQmlApplicationEngine()
     ctx = engine.rootContext()
+    from huginn_picker import Picker
+    picker = Picker(engine, args.app)                    # Open…: the desktop's own Open window, through the portal
+    ctx.setContextProperty("Picker", picker)
     ctx.setContextProperty("Theme", theme)
     ctx.setContextProperty("Settings", settings)
     ctx.setContextProperty("Backend", backend)

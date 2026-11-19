@@ -9,6 +9,9 @@ GlassWindow {
     property string exported: ""
     function refresh() { st = Backend.state(editor.selectionStart) }
     function apply(what) { Backend.style(editor.selectionStart, editor.selectionEnd, what); refresh(); editor.forceActiveFocus() }
+    // the top bar's File menu (and Ctrl+O, Ctrl+Shift+E)
+    function openFile() { Picker.open("Open a document", [["Documents", "*.odt *.docx *.md *.txt *.rtf *.html"]], function (paths) { if (paths.length) Backend.open(paths[0]) }) }
+    function exportPdf() { if (Backend.current === "") return; var p = Backend.export("pdf"); if (p) { win.exported = p; win.notice = ""; hide.restart() } }
     // Huginn AI (Settings › AI): on what's selected, or on the whole document when nothing is
     readonly property var aiChoices: [["rewrite:clearer", "Make it clearer", ""], ["rewrite:shorter", "Make it shorter", ""], ["rewrite:friendlier", "Make it friendlier", ""],
                                       ["rewrite:formal", "Make it more formal", ""], ["rewrite:simpler", "Make it simpler", ""], ["", "", ""],
@@ -55,26 +58,28 @@ GlassWindow {
         Rail { id: docRail; x: 12; y: 64; width: 232; maxHeight: win.height - 64 - 14
             DocList { newLabel: "New Document"; icon: "doc"; empty: "Documents you write appear here. Word files in your Documents folder do too." } },
         Island {   // formatting: the main island
-            id: bar; visible: Backend.current !== ""; x: 256 + (win.width - 256 - width) / 2; anchors { bottom: parent.bottom; bottomMargin: 14 }
+            id: bar; visible: Backend.current !== ""; x: 256 + Math.max(0, (win.width - 256 - width) / 2); anchors { bottom: parent.bottom; bottomMargin: 14 }
+            // a narrow window keeps the island inside it: the colours go first, then the sizes, then Title and Subheading
+            readonly property real room: win.width - 256 - 24
             Repeater { model: [["title", "Title", 52], ["heading", "Heading", 70], ["subheading", "Subheading", 92], ["body", "Body", 52]]
-                Tool { required property var modelData; span: modelData[2]; text: modelData[1]; on: win.st.style === modelData[0]; onClicked: win.apply(modelData[0]) } }
+                Tool { required property var modelData; visible: bar.room >= 660 || (modelData[0] !== "title" && modelData[0] !== "subheading"); span: modelData[2]; text: modelData[1]; on: win.st.style === modelData[0]; onClicked: win.apply(modelData[0]) } }
             Gap {}
             Tool { text: "B"; tip: "Bold"; on: !!win.st.bold; onClicked: win.apply("bold") }
             Tool { text: "I"; tip: "Italic"; on: !!win.st.italic; onClicked: win.apply("italic") }
             Tool { text: "U"; tip: "Underline"; on: !!win.st.underline; onClicked: win.apply("underline") }
-            Gap {}
-            Tool { text: "A−"; tip: "Smaller"; span: 34; onClicked: win.apply("smaller") }
-            Label { width: 26; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter; text: win.st.size || 11; secondary: true; font.pixelSize: 12 }
-            Tool { text: "A+"; tip: "Bigger"; span: 34; onClicked: win.apply("bigger") }
+            Gap { visible: bar.room >= 800 }
+            Tool { visible: bar.room >= 800; text: "A−"; tip: "Smaller"; span: 34; onClicked: win.apply("smaller") }
+            Label { visible: bar.room >= 800; width: 26; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter; text: win.st.size || 11; secondary: true; font.pixelSize: 12 }
+            Tool { visible: bar.room >= 800; text: "A+"; tip: "Bigger"; span: 34; onClicked: win.apply("bigger") }
             Gap {}
             Repeater { model: [["left", "alignleft", "Align left"], ["center", "aligncenter", "Centre"], ["right", "alignright", "Align right"], ["justify", "alignjustify", "Justify"]]
                 Tool { required property var modelData; icon: modelData[1]; tip: modelData[2]; on: win.st.align === modelData[0]; onClicked: win.apply(modelData[0]) } }
             Gap {}
             Tool { icon: "list"; tip: "Bulleted list"; on: win.st.list === "bullet"; onClicked: win.apply("bullet") }
             Tool { icon: "numbers"; tip: "Numbered list"; on: win.st.list === "number"; onClicked: win.apply("number") }
-            Gap {}
+            Gap { visible: bar.room >= 930 }
             Repeater { model: ["#15181C", "#D93A3F", "#C46A00", "#0A8071", "#2361AE", "#563AD1"]
-                Rectangle { required property string modelData; width: 20; height: 20; radius: 10; color: modelData; border.width: 1; border.color: Theme.t.islandLine; anchors.verticalCenter: parent.verticalCenter
+                Rectangle { required property string modelData; visible: bar.room >= 930; width: 20; height: 20; radius: 10; color: modelData; border.width: 1; border.color: Theme.t.islandLine; anchors.verticalCenter: parent.verticalCenter
                     MouseArea { anchors.fill: parent; onClicked: win.apply(parent.modelData) } } }
             Gap { visible: aiPanel.on("writer") }
             Tool { visible: aiPanel.on("writer"); icon: "sparkle"; tip: aiMenu.visible || aiPanel.visible ? "" : "Huginn AI"; on: aiMenu.visible || aiPanel.visible; onClicked: aiMenu.visible = !aiMenu.visible }

@@ -125,6 +125,26 @@ GlassWindow {
         dragger.Drag.mimeData = { "text/uri-list": Backend.urls(sel).join("\r\n") + "\r\n" }
         tile.grabToImage(function (shot) { dragger.Drag.imageSource = shot.url; dragger.Drag.startDrag(Qt.CopyAction | Qt.MoveAction) })
     }
+    // the top bar's menu (File, Edit, View, Go): each entry, and its key, does what the window's own controls do
+    function newFolder() { run("folder") }
+    function newTab() { Backend.newTab("") }
+    function openSelected() { openSel() }
+    function openInTab() { if (sel.length === 1) Backend.newTab(sel[0]) }
+    function trashSelected() { bin() }
+    function find() { search.focusInput() }
+    function setGrid(on) { if (Backend.grid !== (String(on) === "true")) Backend.toggleGrid() }
+    function toggleHidden() { Backend.toggleHidden() }
+    function goBack() { if (Backend.canBack) Backend.back() }
+    function goForward() { if (Backend.canForward) Backend.forward() }
+    function goUp() { if (Backend.canUp) Backend.up() }
+    function goPlace(name) {
+        var want = String(name).toLowerCase()
+        for (var i = 0; i < Backend.places.length; i++) {
+            var pl = Backend.places[i]
+            if (pl.name.toLowerCase() === want || pl.path.toLowerCase().split("/").pop() === want) { Backend.open(pl.path); return }
+        }
+        if (want === "home" && Backend.places.length) Backend.open(Backend.places[0].path)
+    }
     function run(act) {
         menu = null
         if (act === "open") openSel()

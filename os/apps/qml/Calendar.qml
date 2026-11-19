@@ -6,6 +6,10 @@ GlassWindow {
     title: "Calendar"; glow: "bottom"; padTop: 60; padBottom: 62
     readonly property int side: 286
     property string view: startPage === "week" ? "week" : "month"
+    // the top bar's menu (and Ctrl+N)
+    function newEvent() { what.focusIn() }
+    function importFile() { Picker.open("Import events", [["Calendar files", "*.ics *.ical *.ifb *.vcs"]], function (paths) { if (paths.length) Backend.importFile(paths[0]) }) }
+    function setView(v) { view = v === "week" ? "week" : "month" }
     property string repeat: ""
     readonly property color wash: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.2)
     islands: [

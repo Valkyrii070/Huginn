@@ -164,6 +164,7 @@ class Stacks(QObject):
                           "size": ("" if kind == "folder" else human_size(st.st_size)) + (f" of {human_size(total)}" if total else ""),
                           "when": human_when(st.st_mtime, now), "time": st.st_mtime, "from": origin_of(Path(e.path)) if not partial else "",
                           "kind": kind, "mime": "inode/directory" if kind == "folder" else (mimetypes.guess_type(name)[0] or ""), "badge": KIND_APP.get(kind, "files"), "badgeUrl": self._icon(KIND_APP.get(kind, "files")), "partial": partial,
+                          "stalled": partial and now - st.st_mtime > 120,
                           "progress": min(1.0, st.st_size / total) if total else (-1.0 if partial else 1.0),
                           "thumb": QUrl.fromLocalFile(e.path).toString() if kind == "image" and not partial and st.st_size < 40_000_000 else ""})
         sort = self._cfg.get("sort", "date")

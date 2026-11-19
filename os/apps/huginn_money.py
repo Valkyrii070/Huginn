@@ -427,14 +427,16 @@ class Money(QObject):
             before = -sum(t["amount"] for t in self._txns if t["date"][:7] == last and int(t["date"][8:10]) <= day and t["amount"] < 0 and t.get("category") == cat)
             if before > 2000 and now > before * 1.25 and now - before > 1500:
                 moves.append((now - before, cat, now, before))
+        noted = None
         if moves:
             gap, cat, now, before = max(moves)
+            noted = cat
             notes.append({"kind": "watch", "title": f"More on {cat.lower()}", "text": f"{self.fmt(now)} so far this month, against {self.fmt(before)} by this day last month."})
         for c in self._get_categories():
             if c["over"]:
-                notes.append({"kind": "watch", "title": f"{c['name']} is over budget", "text": f"{c['spent']} spent of {c['budget']}."})
-            elif c["pace"]:
-                notes.append({"kind": "watch", "title": f"{c['name']} is running fast", "text": f"{c['spent']} of {c['budget']} with the month not over."})
+                notes.append({"kind": "watch", "title": f"Over budget: {c['name'].lower()}", "text": f"{c['spent']} spent of {c['budget']}."})
+            elif c["pace"] and c["name"] != noted:          # (one note a category: "more on" already says it)
+                notes.append({"kind": "watch", "title": f"Going fast: {c['name'].lower()}", "text": f"{c['spent']} of {c['budget']} with the month not over."})
         subs = recurring(self._txns, self._today)
         if subs:
             total = sum(s["amount"] for s in subs)

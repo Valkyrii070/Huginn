@@ -26,7 +26,7 @@ GlassWindow {
             SideTitle { text: "YOUR VIDEOS" }
             Repeater { model: Backend.items
                 SideItem { required property var modelData; required property int index; icon: "video"; text: modelData.title; trailing: modelData.length; selected: win.current === index; onClicked: win.play(index) } }
-            Label { visible: Backend.items.length === 0; padding: 10; width: parent.width; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 12; text: "Videos in " + Backend.folder + " appear here." } },
+            Label { visible: Backend.items.length === 0; padding: 10; width: parent.width; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 12; text: "Videos in " + Backend.folderName + " appear here." } },
         Island {   // the transport: the one wide island
             height: 58; radius: 20; pad: 12; anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 14 }
             PlayerBar { width: Math.min(900, win.width - 64); anchors.verticalCenter: parent.verticalCenter; player: win.player; audio: win.out

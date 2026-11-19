@@ -96,7 +96,7 @@ GlassWindow {
             Rectangle { x: 128; y: 54; width: 122; height: 110; radius: 12; color: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.12); border.width: 1; border.color: Theme.t.islandLine; Glyph { anchors.centerIn: parent; name: "image"; size: 30; ink: Theme.t.text_secondary } }
             Rectangle { x: 0; y: 108; width: 56; height: 56; radius: 10; color: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.22) } Rectangle { x: 64; y: 108; width: 56; height: 56; radius: 10; color: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.4) } }
         Label { text: "No pictures yet"; font.pixelSize: 17; font.weight: Font.DemiBold; anchors.horizontalCenter: parent.horizontalCenter }
-        Label { text: "Pictures you put in " + Backend.folder + " appear here."; secondary: true; anchors.horizontalCenter: parent.horizontalCenter } }
+        Label { text: "Pictures you put in " + Backend.folderName + " appear here."; secondary: true; anchors.horizontalCenter: parent.horizontalCenter } }
     Flickable { visible: (!win.pic || viewer.p < 1) && !win.choosing && Backend.items.length > 0; x: 0; y: 62; width: parent.width - (win.railShown ? 200 : 14); height: parent.height - 64; contentHeight: wall.height + 90; clip: true
         Flow { id: wall; x: 14; y: 2; width: parent.width - 14; spacing: 6
             readonly property real cell: (width - 6 * (Math.max(2, Math.floor(width / 190)) - 1)) / Math.max(2, Math.floor(width / 190))

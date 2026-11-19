@@ -9,7 +9,7 @@ GlassWindow {
     function nameOf(list, code) { for (var i = 0; i < list.length; i++) if (list[i].code === code) return list[i].name; return "" }
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong) } }
     Timer { id: soon; interval: 650; onTriggered: Backend.translate(src.many) }
-    Component.onCompleted: src.focusIn()
+    Component.onCompleted: { if (typeof demo !== "undefined" && demo) src.many = "Good morning. The coffee is ready, and the snow has settled over the fjord."; src.focusIn() }
     Row { visible: Backend.hasPacks && !Backend.keepHistory; anchors { right: parent.right; rightMargin: 24; bottom: parent.bottom; bottomMargin: 26 } z: 2
         Btn { height: 22; visible: Backend.result === ""; text: "Keep Earlier Translations"; onClicked: Backend.setKeepHistory(true) } }
 

@@ -13,6 +13,7 @@ GlassWindow {
     readonly property int rh: 28
     function show() { entry.text = Backend.raw(row, col); entry.selectAll(); entry.forceActiveFocus(); table.positionViewAtCell(Qt.point(col, row), TableView.Contain) }
     function commit() { Backend.put(row, col, entry.text) }
+    function openFile() { Picker.open("Open a spreadsheet", [["Spreadsheets", "*.ods *.xlsx *.xls *.csv"]], function (paths) { if (paths.length) Backend.open(paths[0]) }) }
     function go(r, c) { commit(); row = Math.max(0, Math.min(199, r)); col = Math.max(0, Math.min(25, c)); show() }
     Connections { target: Backend
         function onFailed(msg) { win.notice = msg; hide.restart() }

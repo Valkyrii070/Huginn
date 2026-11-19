@@ -89,17 +89,17 @@ Glass {
                         visible: row.modelData.partial; width: parent.width; height: 4; radius: 2; color: Theme.t.line; clip: true
                         Rectangle { visible: row.modelData.progress >= 0; width: parent.width * Math.max(0.02, row.modelData.progress); height: parent.height; radius: 2; color: Theme.t.accent }
                         Rectangle {
-                            id: wave; visible: row.modelData.progress < 0; width: parent.width * 0.35; height: parent.height; radius: 2
+                            id: wave; visible: row.modelData.progress < 0 && !row.modelData.stalled; width: parent.width * 0.35; height: parent.height; radius: 2
                             gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: "transparent" } GradientStop { position: 0.5; color: Theme.t.accent } GradientStop { position: 1; color: "transparent" } }
                             NumberAnimation on x { from: -wave.width; to: list.width; duration: 1200; loops: Animation.Infinite; running: wave.visible }
                         }
                     }
                     Label {
                         width: parent.width; elide: Text.ElideRight; secondary: true; font.pixelSize: 12
-                        text: row.modelData.partial ? row.modelData.size + " so far" : row.modelData.size + (row.modelData.from ? " · from " + row.modelData.from : "")
+                        text: row.modelData.partial ? row.modelData.size + (row.modelData.stalled ? " · stopped " + row.modelData.when : " so far") : row.modelData.size + (row.modelData.from ? " · from " + row.modelData.from : "")
                     }
                 }
-                Label { id: when; anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter } text: row.modelData.partial ? "arriving" : row.modelData.when; secondary: true; font.pixelSize: 12 }
+                Label { id: when; anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter } text: row.modelData.partial ? (row.modelData.stalled ? "didn't finish" : "arriving") : row.modelData.when; secondary: true; font.pixelSize: 12 }
                 MouseArea {
                     id: rowHit; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.LeftButton | Qt.RightButton
                     enabled: isle.renaming !== row.modelData.path

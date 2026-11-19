@@ -494,7 +494,14 @@ class Live(QObject):
     # ------------------------------------------------------------------------------------------------ downloads, calendar, phone
     def _read_downloads(self) -> None:
         folder = Path.home() / "Downloads"
-        parts = [f for pattern in DOWNLOAD_PARTS for f in folder.glob(pattern)] if folder.is_dir() else []
+        now = time.time()
+
+        def growing(f: Path) -> bool:                    # a part file left behind by a download that stopped isn't one
+            try:
+                return now - f.stat().st_mtime < 120
+            except OSError:
+                return False
+        parts = [f for pattern in DOWNLOAD_PARTS for f in folder.glob(pattern) if growing(f)] if folder.is_dir() else []
         if not parts:
             self._downloads_since = 0.0
             if self._items.pop("downloads", None) is not None:

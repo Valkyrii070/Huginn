@@ -42,7 +42,7 @@ GlassWindow {
     Column { visible: Backend.items.length === 0; anchors.centerIn: parent; spacing: 8
         Glyph { name: "music"; size: 44; ink: Theme.t.text_secondary; anchors.horizontalCenter: parent.horizontalCenter }
         Label { text: "No music yet"; font.pixelSize: 17; font.weight: Font.DemiBold; anchors.horizontalCenter: parent.horizontalCenter }
-        Label { text: "Songs you put in " + Backend.folder + " appear here."; secondary: true; anchors.horizontalCenter: parent.horizontalCenter } }
+        Label { text: "Songs you put in " + Backend.folderName + " appear here."; secondary: true; anchors.horizontalCenter: parent.horizontalCenter } }
 
     // ---------------- Now Playing
     Column { visible: win.view === "playing" && Backend.items.length > 0; anchors.horizontalCenter: parent.horizontalCenter; y: Math.max(70, (win.height - 90 - height) / 2); spacing: 6

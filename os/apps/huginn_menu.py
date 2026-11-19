@@ -18,10 +18,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import weakref
 from pathlib import Path
 
 from gi.repository import Gio, GLib
-from PySide6.QtCore import QMetaObject, QObject, Q_ARG, Slot
+from PySide6.QtCore import QEvent, QKeyCombination, QMetaObject, QObject, Q_ARG, Qt, Slot
 from PySide6.QtGui import QGuiApplication, QKeyEvent, QKeySequence, QWindow
 
 XML = """<node><interface name="org.huginn.App">
@@ -124,7 +125,8 @@ TEXT_APPS = {"writer", "sheets", "slides", "notes", "mail", "code", "documents",
 class AppMenu(QObject):
     def __init__(self, key: str, title: str, engine, backend):
         super().__init__()
-        self._key, self._title, self._engine, self._backend = key, title, engine, backend
+        self._key, self._title, self._backend = key, title, backend
+        self._engine_ref = weakref.ref(engine) if engine is not None else (lambda: None)    # (weak: torn down first at quit)
         self._bus = None
         self._ids = []
         try:
@@ -135,6 +137,55 @@ class AppMenu(QObject):
         except GLib.Error as err:
             print("menu: no session bus:", err.message, file=sys.stderr)
             self._bus = None
+        self._bound = None                                    # the menus' own keys, worked out at the first key press
+        QGuiApplication.instance().installEventFilter(self)
+
+    # ------------------------------------------------------------------ the keys the menus show, working
+    # A menu entry that shows a key (Ctrl+F for Find, Ctrl+W, Ctrl+Q, F1, F11…) works by that key too, even where the
+    # app has no Shortcut of its own for it. The app's own Shortcuts still come first (Qt tries them before a key
+    # reaches a window), and only keys with Ctrl or Alt, or the function keys, are taken: never what's typed.
+    MODS = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier
+
+    def _menu_keys(self) -> dict:
+        keys = {}
+        try:
+            m = self.menus()
+        except Exception:                                    # noqa: BLE001 (the window isn't there yet)
+            return {}
+        rows = [it for g in m["groups"] for it in g["items"]] + m["top"] + m["bottom"]
+        for it in rows:
+            key, act = it.get("keys", ""), it.get("id", "")
+            if not key or not act or act.split(":")[0] in ("short", "edit", "recent") or not it.get("enabled", True):
+                continue
+            if "Super" in key or not ("Ctrl" in key or "Alt" in key or (key.startswith("F") and key[1:].isdigit())):
+                continue
+            if self._key == "terminal" and "Shift" not in key and not key.startswith("F"):
+                continue                                     # Ctrl+W, Ctrl+Q… belong to the program in the terminal
+            seq = QKeySequence(key.replace("Enter", "Return"))
+            if seq.count():
+                keys[seq.toString(QKeySequence.SequenceFormat.PortableText)] = act
+        return keys
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress or not isinstance(obj, QWindow) or event.isAutoRepeat():
+            return False
+        mods = event.modifiers() & self.MODS
+        key = event.key()
+        if not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)) and not (Qt.Key.Key_F1 <= key <= Qt.Key.Key_F35):
+            return False
+        if self._bound is None:
+            if self._root() is None:
+                return False
+            self._bound = self._menu_keys()
+        try:
+            text = QKeySequence(QKeyCombination(mods, Qt.Key(key))).toString(QKeySequence.SequenceFormat.PortableText)
+        except ValueError:
+            return False
+        act = self._bound.get(text)
+        if not act:
+            return False
+        self.trigger(act)
+        return True
 
     @Slot(str)
     def snap(self, layout: str) -> None:
@@ -145,7 +196,8 @@ class AppMenu(QObject):
 
     # ------------------------------------------------------------------ what the bar asks
     def _root(self):
-        roots = self._engine.rootObjects() if self._engine else []
+        engine = self._engine_ref()
+        roots = engine.rootObjects() if engine is not None else []
         return roots[0] if roots else None
 
     def _window(self) -> QWindow | None:

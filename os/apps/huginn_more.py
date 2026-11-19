@@ -120,7 +120,7 @@ class Vault(QObject):
             now = time.time()
             self._demo_rows = [{"id": f"d{i}", "title": t, "username": u, "password": p, "url": s, "note": n, "updated": now - d * 86400}
                                for i, (t, u, p, s, n, d) in enumerate([
-                                   ("Nordlys Bank", "val.example", "plum-lantern-otter-quartz", "https://nordlysbank.example", "Card reader lives in the desk drawer.", 12),
+                                   ("Nordlys Bank", "astrid.berg", "plum-lantern-otter-quartz", "https://nordlysbank.example", "Card reader lives in the desk drawer.", 12),
                                    ("Mail", "astrid@example.com", "kT7#mQ2$xP9vLw4z", "https://mail.example", "", 40), ("Trainline", "astrid@example.com", "summer2019", "https://trains.example", "", 900),
                                    ("Photo prints", "astrid@example.com", "summer2019", "https://prints.example", "", 700), ("Wi-Fi at home", "", "copper-thistle-banjo-88", "", "Router admin is on 192.168.1.1", 200),
                                    ("Library card", "20418837", "4417", "https://library.example", "", 30), ("Streaming", "astrid@example.com", "Vx3!pRz8#nQw2Ld", "https://stream.example", "", 3)])]

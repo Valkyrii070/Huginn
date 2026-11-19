@@ -698,7 +698,7 @@ def oauth_ready(provider: str) -> bool:
 # ------------------------------------------------------------------------------------------- Settings' page
 DEMO = [{"id": "d1", "provider": "google", "email": "astrid@example.com", "name": "Astrid", "services": {"mail": True, "calendar": True, "contacts": True}},
         {"id": "d2", "provider": "nextcloud", "email": "astrid@cloud.raven.home", "server": "https://cloud.raven.home", "name": "", "services": {"calendar": True, "contacts": False, "files": True}},
-        {"id": "d3", "provider": "icloud", "email": "val@icloud.com", "name": "", "services": {"mail": False, "calendar": True, "contacts": True}}]
+        {"id": "d3", "provider": "icloud", "email": "astrid@icloud.com", "name": "", "services": {"mail": False, "calendar": True, "contacts": True}}]
 DEMO_STATUS = {"d1": {"when": time.time() - 420, "error": "", "events": 214, "contacts": 388}, "d2": {"when": time.time() - 900, "error": "", "events": 41, "files": "mounted"},
                "d3": {"when": time.time() - 3600 * 5, "error": "The account didn't accept the sign-in. Sign in again from Settings.", "events": 0}}
 

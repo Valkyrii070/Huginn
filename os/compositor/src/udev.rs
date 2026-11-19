@@ -149,6 +149,8 @@ struct UdevOutputId {
 
 pub struct UdevData {
     pub session: LibSeatSession,
+    /// Something happened (a client drew, the mouse moved, a key): screens resting between frames look again now.
+    wake_wanted: bool,
     dh: DisplayHandle,
     dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
     syncobj_state: Option<DrmSyncobjState>,
@@ -228,6 +230,7 @@ impl Backend for UdevData {
     }
 
     fn early_import(&mut self, surface: &wl_surface::WlSurface) {
+        self.wake_wanted = true;
         if let Err(err) = self.gpus.early_import(self.primary_gpu, surface) {
             warn!("Early buffer import failed: {}", err);
         }
@@ -470,6 +473,7 @@ pub fn run_udev() {
         gpus,
         backends: HashMap::new(),
         pointer_image: crate::cursor::Cursor::load(),
+        wake_wanted: false,
         pointer_images: Vec::new(),
         pointer_element: PointerElement::default(),
         #[cfg(feature = "debug")]
@@ -525,6 +529,7 @@ pub fn run_udev() {
                 data.backend_data.pointers.retain(|item| item != device);
             }
 
+            data.backend_data.wake_wanted = true;
             data.process_input_event(&dh, event)
         })
         .unwrap();
@@ -744,9 +749,38 @@ pub fn run_udev() {
         if result.is_err() {
             state.running.store(false, Ordering::SeqCst);
         } else {
+            if state.backend_data.wake_wanted {
+                state.backend_data.wake_wanted = false;
+                state.wake_resting();
+            }
             state.space.refresh();
             state.popups.cleanup();
             display_handle.flush_clients().unwrap();
+        }
+    }
+}
+
+/// A screen with nothing new to draw for this many refreshes in a row rests (about half a second at 144 Hz).
+const RESTING_AFTER: u32 = 72;
+/// How often a resting screen looks for something new by itself (a commit or input wakes it at once).
+const RESTING_POLL: Duration = Duration::from_millis(100);
+
+impl HuginnState<UdevData> {
+    /// Something happened: screens that were resting draw at once, and every screen counts its quiet frames afresh.
+    fn wake_resting(&mut self) {
+        let mut woken = Vec::new();
+        for (node, device) in self.backend_data.backends.iter_mut() {
+            for (crtc, surface) in device.surfaces.iter_mut() {
+                surface.idle_frames = 0;
+                if let Some(token) = surface.parked.take() {
+                    self.handle.remove(token);
+                    woken.push((*node, *crtc));
+                }
+            }
+        }
+        let now = self.clock.now();
+        for (node, crtc) in woken {
+            self.render(node, Some(crtc), now);
         }
     }
 }
@@ -856,6 +890,11 @@ struct SurfaceData {
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     last_presentation_time: Option<Time<Monotonic>>,
     vblank_throttle_timer: Option<RegistrationToken>,
+    /// How many times in a row there was nothing new to draw; past RESTING_AFTER the screen rests (see `parked`).
+    idle_frames: u32,
+    /// Resting: nothing changed for a while, so it looks again only every RESTING_POLL instead of every refresh,
+    /// and anything happening (a commit, input) wakes it at once (`wake_resting`).
+    parked: Option<RegistrationToken>,
     /// FreeSync / adaptive sync is on for this screen now
     vrr_on: bool,
     /// Switched off (the screen-off timer): nothing is drawn until it's on again.
@@ -1296,6 +1335,8 @@ impl HuginnState<UdevData> {
                 dmabuf_feedback,
                 last_presentation_time: None,
                 vblank_throttle_timer: None,
+                idle_frames: 0,
+                parked: None,
                 vrr_on: false,
                 blanked: false,
             };
@@ -1795,20 +1836,48 @@ impl HuginnState<UdevData> {
             // did not cause any damage on the output. In this case we just re-schedule a repaint
             // after approx. one frame to re-test for damage.
             let next_frame_target = frame_target + Duration::from_millis(1_000_000 / output_refresh as u64);
-            let reschedule_timeout =
+            let mut reschedule_timeout =
                 Duration::from(next_frame_target).saturating_sub(self.clock.now().into());
+            // Nothing new for a while: rest, looking again only now and then (a commit or input wakes it at once).
+            let resting = match self.backend_data.backends.get_mut(&node).and_then(|d| d.surfaces.get_mut(&crtc)) {
+                Some(surface) => {
+                    if let Some(token) = surface.parked.take() {       // drawn some other way meanwhile: one timer only
+                        self.handle.remove(token);
+                    }
+                    surface.idle_frames = surface.idle_frames.saturating_add(1);
+                    surface.idle_frames > RESTING_AFTER
+                }
+                None => false,
+            };
+            if resting {
+                reschedule_timeout = RESTING_POLL;
+            }
             trace!(
                 "reschedule repaint timer with delay {:?} on {:?}",
                 reschedule_timeout, crtc,
             );
             let timer = Timer::from_duration(reschedule_timeout);
-            self.handle
+            let token = self
+                .handle
                 .insert_source(timer, move |_, _, data| {
-                    data.render(node, Some(crtc), next_frame_target);
+                    if let Some(surface) = data.backend_data.backends.get_mut(&node).and_then(|d| d.surfaces.get_mut(&crtc)) {
+                        surface.parked = None;
+                    }
+                    let target = if resting { data.clock.now() } else { next_frame_target };
+                    data.render(node, Some(crtc), target);
                     TimeoutAction::Drop
                 })
                 .expect("failed to schedule frame timer");
+            if resting && let Some(surface) = self.backend_data.backends.get_mut(&node).and_then(|d| d.surfaces.get_mut(&crtc)) {
+                surface.parked = Some(token);
+            }
         } else {
+            if let Some(surface) = self.backend_data.backends.get_mut(&node).and_then(|d| d.surfaces.get_mut(&crtc)) {
+                surface.idle_frames = 0;
+                if let Some(token) = surface.parked.take() {
+                    self.handle.remove(token);
+                }
+            }
             let elapsed = start.elapsed();
             tracing::trace!(?elapsed, "rendered surface");
         }

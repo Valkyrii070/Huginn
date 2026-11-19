@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Property, QFileSystemWatcher, QObject, QProcess, QSettings, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QFont, QGuiApplication, QIcon
-from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQml import QQmlApplicationEngine, QQmlPropertyMap
 from PySide6.QtQuick import QQuickImageProvider, QQuickWindow  # noqa: F401  (QQuickWindow: the root window type, for grabWindow)
 
 HERE = Path(__file__).resolve().parent
@@ -68,13 +68,37 @@ def qml_colour(value: str) -> str:
 
 
 class Theme(QObject):
-    """The active theme as one flat map (`Theme.t.accent`, `Theme.t.radiusCard`, ...)."""
+    """The active theme as one flat map (`Theme.t.accent`, `Theme.t.radiusCard`, ...).
+
+    `t` is a QQmlPropertyMap made once: QML reads `Theme.t.accent` straight from it, without coming back to Python,
+    and when the theme changes (dark mode, the realm, the accessibility settings) only the values that changed are
+    set again, so only what uses them is redrawn. (It used to be a map built afresh on every read: an app's thousands
+    of bindings each built it at start, and any setting at all, the dock's size say, rebuilt every binding in every
+    app.)"""
     changed = Signal()
 
     def __init__(self, tokens: dict, settings: "Settings", app: str = ""):
         super().__init__()
         self._tokens, self._settings, self._app = tokens, settings, app
-        settings.changed.connect(self.changed)
+        self._values = {}
+        self._map = QQmlPropertyMap(self)
+        self._refresh(first=True)
+        settings.changed.connect(self._refresh)
+
+    def _refresh(self, first: bool = False) -> None:
+        new = self._build()
+        if new == self._values:
+            return
+        for key, value in new.items():
+            if key not in self._values or self._values[key] != value:
+                self._map.insert(key, value)
+        for key in set(self._values) - set(new):
+            self._map.clear(key)
+        self._values = new
+        if not first:
+            self.changed.emit()
+
+    values = property(lambda self: dict(self._values))
 
     _dark = property(lambda self: self._settings.dark)
     _realm = property(lambda self: self._settings.realm)
@@ -140,7 +164,7 @@ class Theme(QObject):
             t["hoverMs"], t["pressScale"], t["openMs"], t["closeMs"], t["moveMs"] = 0, 1.0, 0, 0, 0
         return t
 
-    t = Property("QVariantMap", lambda self: self._build(), notify=changed)
+    t = Property(QObject, lambda self: self._map, constant=True)
 
     @Slot(bool)
     def setDark(self, dark: bool) -> None:

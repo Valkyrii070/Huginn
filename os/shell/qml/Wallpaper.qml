@@ -40,7 +40,7 @@ Item {
         id: sky
         visible: !paper.live
         anchors.fill: parent
-        property var key: Theme.t
+        property string key: [Theme.t.dark, Theme.t.realm, Theme.t.glowA, Theme.t.tintA, Theme.t.tintB].join()   // what it's painted from
         onKeyChanged: requestPaint()
         onPaint: {
             var c = getContext("2d"), w = width, h = height

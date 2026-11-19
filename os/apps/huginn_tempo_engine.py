@@ -43,7 +43,20 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import lfilter
+
+
+def lfilter(*args, **kwargs):
+    """scipy's lfilter, imported when first needed (scipy.signal takes about a second to import). Tempo warms it up
+    in the background once its window is showing, so the first note doesn't wait."""
+    global lfilter
+    from scipy.signal import lfilter as real
+    lfilter = real
+    return real(*args, **kwargs)
+
+
+def warm_up() -> None:
+    import threading
+    threading.Thread(target=lambda: __import__("scipy.signal"), daemon=True, name="tempo-warm-up").start()
 
 try:
     import huginn_tempo_lv2 as lv2

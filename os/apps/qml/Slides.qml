@@ -19,6 +19,10 @@ GlassWindow {
     onClosing: Backend.save()
     function present(from) { showing = from; presenting = true; showFullScreen(); stage.forceActiveFocus() }
     function stop() { presenting = false; showNormal() }
+    function openFile() { Picker.open("Open a presentation", [["Presentations", "*.odp *.pptx"]], function (paths) { if (paths.length) Backend.open(paths[0]) }) }
+    function newSlide() { if (Backend.current !== "") Backend.add("content") }
+    function duplicateSlide() { if (Backend.current !== "") Backend.duplicate() }
+    function deleteSlide() { if (Backend.current !== "" && Backend.count > 1) Backend.remove() }
     // PDF export: draw each slide off-screen at full HD, then bind the pictures into one file.
     function exportPdf() { shots = []; folder = Backend.scratch(); step(0) }
     property string folder: ""

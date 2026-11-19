@@ -941,6 +941,14 @@ class Slides(FileList):
         self.touch()
 
     @Slot()
+    def duplicate(self) -> None:
+        if self._path is None or not self._deck["slides"]:
+            return
+        self._deck["slides"].insert(self._index + 1, json.loads(json.dumps(self._deck["slides"][self._index])))
+        self._index += 1
+        self.touch()
+
+    @Slot()
     def remove(self) -> None:
         if len(self._deck["slides"]) > 1:
             del self._deck["slides"][self._index]

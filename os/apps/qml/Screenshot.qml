@@ -50,7 +50,7 @@ GlassWindow {
         Row { spacing: 10; anchors.horizontalCenter: parent.horizontalCenter
             Label { text: "Wait first:"; secondary: true; anchors.verticalCenter: parent.verticalCenter }
             Repeater { model: [[0, "No"], [3, "3 seconds"], [10, "10 seconds"]]; Btn { required property var modelData; pill: true; primary: win.delay === modelData[0]; text: modelData[1]; onClicked: win.delay = modelData[0] } } }
-        Label { anchors.horizontalCenter: parent.horizontalCenter; text: win.notice || (Backend.busy ? "Taking the screenshot…" : "Screenshots are saved in " + Backend.folder); color: win.notice ? Theme.t.danger : Theme.t.text_secondary; font.pixelSize: 12 }
+        Label { anchors.horizontalCenter: parent.horizontalCenter; text: win.notice || (Backend.busy ? "Taking the screenshot…" : "Screenshots are saved in " + Backend.folderName); color: win.notice ? Theme.t.danger : Theme.t.text_secondary; font.pixelSize: 12 }
         Rectangle { anchors.horizontalCenter: parent.horizontalCenter; width: 516; height: 58; radius: 16; color: Backend.recording === "on" ? Qt.rgba(0.9, 0.28, 0.3, 0.16) : Theme.t.group; border.width: 1; border.color: Backend.recording === "on" ? "#E5484D" : Theme.t.islandLine
             Rectangle { x: 18; anchors.verticalCenter: parent.verticalCenter; width: 14; height: 14; radius: Backend.recording === "on" ? 3 : 7; color: "#E5484D"
                 SequentialAnimation on opacity { running: Backend.recording === "on"; loops: Animation.Infinite; NumberAnimation { to: 0.3; duration: 700 } NumberAnimation { to: 1; duration: 700 } } }

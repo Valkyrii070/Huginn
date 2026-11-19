@@ -20,6 +20,10 @@ GlassWindow {
         if (!same) editor.insert(at, kind === "heading" ? "# " : kind === "check" ? "- [ ] " : "- ")
         editor.forceActiveFocus()
     }
+    // the top bar's menu, and its keys (Ctrl+N, Ctrl+F)
+    function newNote() { Backend.create(); editor.forceActiveFocus() }
+    function find() { noteSearch.focusInput() }
+    function apply(what) { if (Backend.current !== "") setMark({ h1: "heading", check: "check", bullets: "list" }[what] || what) }
     function tick(pos) {                                  // tick or untick the line at pos; false if it has no box
         var L = lineAt(pos), m = /^(\s*)- \[([ xX])\] /.exec(L.s); if (!m) return false
         var at = L.a + m[1].length + 3, keep = editor.cursorPosition
@@ -40,7 +44,7 @@ GlassWindow {
         Toast { id: noteToast; anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 18 } },
         Island {
             anchors { right: parent.right; rightMargin: 12 } y: 12
-            IslandField { text: win.filter; onTextChanged: win.filter = text; placeholder: "Search notes" }
+            IslandField { id: noteSearch; text: win.filter; onTextChanged: win.filter = text; placeholder: "Search notes" }
             Seg { icon: "bell"; tip: "Remind me about this line"; visible: Backend.current !== ""; onClicked: noteToast.say(Backend.remind(win.here), false) }
             Seg { icon: "mail"; tip: "Send by Mail"; visible: Backend.current !== ""; onClicked: Backend.sendByMail() }
             Seg { icon: "trash"; tip: "Move note to Trash"; visible: Backend.current !== ""; onClicked: win.asking = Backend.current }

@@ -281,6 +281,7 @@ class Tempo(QObject):
         self._sel_track, self._sel_region = "", ""
         self._held = {}
         self._player = Player(self)
+        QTimer.singleShot(2500, se.warm_up)                    # scipy, in the background, once the window is up
         self._save_timer = QTimer(self, singleShot=True, interval=700)
         self._save_timer.timeout.connect(self._write)
         self._clock = QTimer(self, interval=33)
@@ -1261,7 +1262,7 @@ class Tempo(QObject):
             takes.append({"name": f"Take {n + 1}", "file": f"audio/{fname}" if self._folder else str(folder / fname)})
         self._before()
         self._p["regions"].append({"id": self._id("r"), "track": rec["track"], "start": c0, "length": length, "kind": "audio", "name": "Takes",
-                                   "file": takes[-1]["file"], "offset": 0.0, "gain": 0.0, "srcTempo": tempo, "takes": takes, "take": len(takes) - 1})
+                                   "file": takes[-1]["file"], "offset": 0.0, "gain": 0.0, "srcTempo": tm.tempo_at(c0), "takes": takes, "take": len(takes) - 1})
         self._keep()
         self.said.emit(f"{len(takes)} takes. Pick the best, or comp the best parts of each.", False)
         return True
@@ -1849,14 +1850,6 @@ class Tempo(QObject):
         r, notes = self._notes(rid)
         if notes is not None and 0 <= i < len(notes):
             notes[i]["d"] = round(max(1 / 32, float(d)), 4)
-            self._keep()
-
-    @Slot(str, int, int)
-    def setVelocity(self, rid: str, i: int, vel: int) -> None:
-        self._before(("note", rid, i, "vel"))
-        r, notes = self._notes(rid)
-        if notes is not None and 0 <= i < len(notes):
-            notes[i]["v"] = max(1, min(127, int(vel)))
             self._keep()
 
     @Slot(str, int)

@@ -592,10 +592,10 @@ class Maps(Worker):
         self._miles, self._view = bool(saved.get("miles")), saved.get("view") if isinstance(saved.get("view"), list) and len(saved.get("view")) == 3 else [51.5, -0.12, 4.5]
         self._start = str(target or "")
         if demo:
-            self._saved = [{"name": "Home", "detail": "Holton, Michigan", "lat": 43.41, "lon": -86.08}, {"name": "Lakeside Vets", "detail": "Muskegon", "lat": 43.23, "lon": -86.25}]
+            self._saved = [{"name": "Home", "detail": "Reykjavík", "lat": 64.146, "lon": -21.942}, {"name": "Lakeside Vets", "detail": "Hafnarfjörður", "lat": 64.067, "lon": -21.957}]
             self._from, self._to = self._saved[0], self._saved[1]
-            self._route = {"distance": "31.4 km", "time": "28 min", "line": [], "steps": [{"text": "Set off along Holton Road", "far": "9.2 km"}, {"text": "Turn right onto M-120", "far": "14 km"},
-                                                                                      {"text": "At the roundabout, take exit 2 onto Whitehall Road", "far": "7.6 km"}, {"text": "You're there", "far": ""}]}
+            self._route = {"distance": "11.8 km", "time": "16 min", "line": [], "steps": [{"text": "Set off along Hringbraut", "far": "2.1 km"}, {"text": "Turn left onto Kringlumýrarbraut", "far": "4.3 km"},
+                                                                                      {"text": "At the roundabout, take exit 2 onto Reykjavíkurvegur", "far": "5.4 km"}, {"text": "You're there", "far": ""}]}
 
     tileHost = Property(str, lambda self: self._servers["tiles"], constant=True)
     results = Property("QVariantList", lambda self: self._results, notify=changed)

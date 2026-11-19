@@ -28,12 +28,23 @@ HOME = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "
 DRAWER = "matrix"
 FILE_LIMIT = 100 * 1024 * 1024
 
-try:
-    import nio
-    from nio.crypto import ENCRYPTION_ENABLED
-    HAVE_NIO = True
-except ImportError:
-    nio, ENCRYPTION_ENABLED, HAVE_NIO = None, False, False
+import importlib.util
+
+HAVE_NIO = importlib.util.find_spec("nio") is not None
+ENCRYPTION_ENABLED = HAVE_NIO and importlib.util.find_spec("olm") is not None     # how nio.crypto itself decides
+
+
+class _LateNio:
+    """matrix-nio, imported the first time Messages talks to a server: it takes over half a second, which Messages
+    opened with no account (or before the first sync) shouldn't wait for."""
+    def __getattr__(self, name):
+        global nio
+        import nio as real
+        nio = real
+        return getattr(real, name)
+
+
+nio = _LateNio() if HAVE_NIO else None
 
 
 def server_of(user: str) -> str:
