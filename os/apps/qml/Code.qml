@@ -63,6 +63,34 @@ GlassWindow {
     }
     function view() { return docs.itemAt(Backend.current) }
     function ask(kind, extra) { var s = extra || {}; s.kind = kind; sheet = s }
+    // Huginn AI (Settings › AI): explain, fix, change or write code, on what's selected or else the whole file
+    readonly property bool aiOn: aiPanel.on("code")
+    function aiCode(mode, asked) {
+        var v = view()
+        if (!v || !win.tab) { toast.say("Open a file first.", false); return }
+        var r = v.selRange(), all = r[0] === r[1], text = v.allText()
+        var a = all ? 0 : r[0], b = all ? text.length : r[1]
+        if (mode === "write") { a = r[0]; b = r[1] }
+        var orig = text.slice(a, b), tabNo = Backend.current, lang = win.tab.lang || ""
+        if (mode !== "write" && orig.trim() === "") { toast.say("There's no code here yet.", false); return }
+        function lineOf(pos) { return text.slice(0, pos).split("\n").length - 1 }
+        var problem = ""
+        if (mode === "fix") {
+            var l0 = lineOf(a), l1 = lineOf(b)
+            problem = Backend.problems.filter(function (p) { return p.tab === tabNo && (all || (p.line >= l0 && p.line <= l1)) }).slice(0, 6)
+                      .map(function (p) { return "line " + (p.line - (all ? 0 : l0) + 1) + ": " + p.message }).join("; ")
+        }
+        function put(t) {
+            var now = win.view()
+            if (Backend.current !== tabNo || !now || now.allText().slice(a, b) !== orig) { aiPanel.copyIt(); toast.say("The file changed meanwhile, so the code is copied: paste it where you want it.", false); return }
+            now.replaceRange(a, b, t); now.selectRange(a, a + t.length); now.focusEditor()
+        }
+        var task = { explain: "explain-code", fix: "fix-code", edit: "edit-code", write: "write-code" }[mode]
+        var job = { task: task, text: mode === "write" ? asked : orig, extra: { lang: lang, problem: problem, ask: asked || "" }, mono: mode !== "explain",
+                    heading: { explain: "What it does", fix: "Fixed", edit: "Changed", write: "Written" }[mode] }
+        if (mode !== "explain") { job.accept = mode === "write" ? (all ? "Insert" : "Replace the Selection") : all ? "Replace the File" : "Replace"; job.onAccept = put }
+        aiPanel.run(job)
+    }
     // New File: in an open folder, a name (its ending picks the language); with no folder, which language
     function newFile() { if (Backend.root) ask("new", { folder: Backend.root, dir: false }); else ask("langs", { mode: "new" }) }
     function closeTab(i) { if (Backend.close(i, false) === "dirty") ask("dirty", { tab: i, name: Backend.tabs[i].name }) }
@@ -139,6 +167,10 @@ GlassWindow {
         { name: "Smaller Text", key: "Ctrl+-", run: function () { Backend.setSize(Backend.size - 1) } },
         { name: "New File", key: "Ctrl+N", run: function () { win.newFile() } },
         { name: "New File in a Language…", key: "", run: function () { win.ask("langs", { mode: "new" }) } },
+        { name: "AI: Explain This Code", key: "", ai: true, run: function () { win.aiCode("explain", "") } },
+        { name: "AI: Fix This Code", key: "", ai: true, run: function () { win.aiCode("fix", "") } },
+        { name: "AI: Change This Code…", key: "", ai: true, run: function () { win.ask("aiask", { mode: "edit" }) } },
+        { name: "AI: Write Code…", key: "", ai: true, run: function () { win.ask("aiask", { mode: "write" }) } },
         { name: "Languages: Add Support…", key: "", run: function () { win.ask("langs", { mode: "manage" }) } },
         { name: "New Folder", key: "", run: function () { win.ask("new", { folder: Backend.root, dir: true }) } },
         { name: "Open Folder…", key: "Ctrl+O", run: function () { win.browseAt = Backend.root || Backend.home; win.ask("open") } },
@@ -208,7 +240,7 @@ GlassWindow {
         var out = [], q = text.toLowerCase(), i
         if (text.charAt(0) === ">") {
             q = q.substring(1).trim()
-            for (i = 0; i < commands.length; i++) if (commands[i].name.toLowerCase().indexOf(q) >= 0) out.push({ label: commands[i].name, detail: commands[i].key, act: "cmd", n: i })
+            for (i = 0; i < commands.length; i++) if (commands[i].name.toLowerCase().indexOf(q) >= 0 && (!commands[i].ai || win.aiOn)) out.push({ label: commands[i].name, detail: commands[i].key, act: "cmd", n: i })
             return out
         }
         if (text.charAt(0) === ":") {
@@ -301,8 +333,8 @@ GlassWindow {
     Shortcut { sequence: "Ctrl+-"; onActivated: Backend.setSize(Backend.size - 1) }
     Shortcut { sequence: "Ctrl+Tab"; onActivated: if (Backend.tabs.length) Backend.select((Backend.current + 1) % Backend.tabs.length) }
     Shortcut { sequence: "Ctrl+Shift+Tab"; onActivated: if (Backend.tabs.length) Backend.select((Backend.current - 1 + Backend.tabs.length) % Backend.tabs.length) }
-    Shortcut { sequence: "Escape"; enabled: win.palOpen || win.finding || win.tip !== "" || win.comp.length > 0 || win.menuFor !== null || win.sheet !== null || win.sig !== null || win.fixMenu !== null
-        onActivated: { if (win.sheet) win.sheet = null; else if (win.palOpen || win.tip || win.comp.length || win.menuFor || win.sig || win.fixMenu) win.closeOverlays(); else { win.finding = false; var v = win.view(); if (v) v.focusEditor() } } }
+    Shortcut { sequence: "Escape"; enabled: aiPanel.visible || win.palOpen || win.finding || win.tip !== "" || win.comp.length > 0 || win.menuFor !== null || win.sheet !== null || win.sig !== null || win.fixMenu !== null
+        onActivated: { if (win.sheet) win.sheet = null; else if (aiPanel.visible) aiPanel.close(); else if (win.palOpen || win.tip || win.comp.length || win.menuFor || win.sig || win.fixMenu) win.closeOverlays(); else { win.finding = false; var v = win.view(); if (v) v.focusEditor() } } }
 
     islands: [
         // the open files, floating across the top
@@ -330,6 +362,7 @@ GlassWindow {
             Seg { icon: "split"; tip: "Two editors side by side (Ctrl+\\)"; on: win.split; onClicked: win.toggleSplit() }
             Seg { icon: "apps"; tip: "Terminal (Ctrl+`)"; on: win.term; onClicked: win.toggleTerm() } },
         Toast { id: toast; anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 56 } },
+        AiPanel { id: aiPanel; z: 27; width: Math.min(680, win.width - 80); x: (win.width - width) / 2; anchors { bottom: parent.bottom; bottomMargin: 48 } maxHeight: win.height * 0.6 },
 
         // the palette: files, commands (>), lines (:) and symbols (@)
         Item { anchors.fill: parent; z: 30; visible: win.palOpen
@@ -384,7 +417,7 @@ GlassWindow {
                 Label { x: 24; y: 20; width: parent.width - 48; elide: Text.ElideMiddle; font.pixelSize: 17; font.weight: Font.DemiBold
                     text: ({ "open": "Open a folder", "dirty": "Save changes to “" + (win.sheet ? win.sheet.name : "") + "”?", "clash": "This file changed on disk",
                              "new": win.sheet && win.sheet.dir ? "New folder" : "New file", "rename": "Rename “" + (win.sheet ? win.sheet.name : "") + "”",
-                             "trash": "Move “" + (win.sheet ? win.sheet.name : "") + "” to the Trash?", "renamesym": "Rename “" + (win.sheet ? win.sheet.name : "") + "” everywhere", "debugprog": "Which program should be debugged?", "run": "What Run does", "discard": "Throw away the changes to “" + (win.sheet ? win.sheet.rel : "") + "”?",
+                             "trash": "Move “" + (win.sheet ? win.sheet.name : "") + "” to the Trash?", "renamesym": "Rename “" + (win.sheet ? win.sheet.name : "") + "” everywhere", "debugprog": "Which program should be debugged?", "aiask": win.sheet && win.sheet.mode === "write" ? "What should it write?" : "How should it change?", "run": "What Run does", "discard": "Throw away the changes to “" + (win.sheet ? win.sheet.rel : "") + "”?",
                              "langs": win.sheet && win.sheet.mode === "new" ? "New file in…" : "Languages",
                              "diff": (win.sheet ? win.sheet.rel : "") + (win.sheet && win.sheet.staged ? "  ·  staged" : "") })[card.kind] || "" }
                 // Languages: pick one for a new file (it starts with a few lines of it), or add what one needs: its helper
@@ -407,9 +440,12 @@ GlassWindow {
                 Label { visible: ["dirty", "clash", "trash", "discard"].indexOf(card.kind) >= 0; x: 24; y: 52; width: parent.width - 48; wrapMode: Text.WordWrap; secondary: true
                     text: card.kind === "dirty" ? "If you don't save, your changes are lost." : card.kind === "clash" ? "Something else changed it since you opened it. Keep yours (overwrite) or take what's on disk?"
                         : card.kind === "trash" ? "You can put it back from the Trash in Files." : "This can't be undone: the file goes back to how it was at the last commit." }
-                TextBox { id: nameBox; objectName: "nameBox"; visible: ["new", "rename", "run", "renamesym", "debugprog"].indexOf(card.kind) >= 0; x: 24; y: 58; width: parent.width - 48; mono: card.kind === "run" || card.kind === "renamesym" || card.kind === "debugprog"
-                    placeholder: card.kind === "run" ? "for example: python3 -m aurora" : card.kind === "renamesym" ? "new name" : card.kind === "debugprog" ? "build/myprogram" : card.kind === "new" ? (win.sheet && win.sheet.dir ? "folder name" : "name.py, or folder/name.py") : ""
+                TextBox { id: nameBox; objectName: "nameBox"; visible: ["new", "rename", "run", "renamesym", "debugprog", "aiask"].indexOf(card.kind) >= 0; x: 24; y: 58; width: parent.width - 48; mono: card.kind === "run" || card.kind === "renamesym" || card.kind === "debugprog"
+                    placeholder: card.kind === "run" ? "for example: python3 -m aurora" : card.kind === "renamesym" ? "new name" : card.kind === "debugprog" ? "build/myprogram" : card.kind === "aiask" ? (win.sheet && win.sheet.mode === "write" ? "for example: a function that reads a CSV file into a list of dicts" : "for example: add error handling") : card.kind === "new" ? (win.sheet && win.sheet.dir ? "folder name" : "name.py, or folder/name.py") : ""
                     onAccepted: sheetOk.clicked() }
+                Label { visible: card.kind === "aiask"; x: 24; y: 100; width: parent.width - 48; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 11
+                    text: (win.sheet && win.sheet.mode === "write" ? "Written in " + (win.tab && win.tab.lang ? win.tab.lang : "this file's language") + ", at the cursor"
+                           : "On what's selected, or the whole file") + ". Huginn AI shows it first; nothing changes until you say so." }
                 Label { visible: card.kind === "run" || card.kind === "debugprog" || card.kind === "renamesym"; x: 24; y: 100; width: parent.width - 48; wrapMode: Text.WordWrap; secondary: true; font.pixelSize: 11
                     text: card.kind === "run" ? "Kept in the project as .huginn-run, so it travels with it." : card.kind === "debugprog" ? "The program you built, with debugging information (gcc -g, cargo build). Kept in the project as .huginn-debug."
                         : "Every place it's used changes, in every file (the language helper finds them). Open files change but aren't saved." }
@@ -449,7 +485,7 @@ GlassWindow {
                     Btn { visible: card.kind === "diff" && !win.sheet.staged && !!win.sheet.canStage; text: "Stage"; onClicked: { Backend.stage(win.sheet.rel); win.sheet = null } }
                     Btn { visible: card.kind === "clash"; text: "Take Theirs"; onClicked: { var t = win.sheet.tab; win.sheet = null; Backend.reload(t) } }
                     Btn { id: sheetOk; visible: card.kind !== "diff" && card.kind !== "langs"; primary: card.kind !== "trash" && card.kind !== "discard"; danger: card.kind === "trash" || card.kind === "discard"
-                        text: ({ "open": "Open This Folder", "dirty": "Save", "clash": "Keep Mine", "new": "Make", "rename": "Rename", "trash": "Move to Trash", "run": "Use It", "discard": "Throw Away", "renamesym": "Rename", "debugprog": "Debug" })[card.kind] || "OK"
+                        text: ({ "open": "Open This Folder", "dirty": "Save", "clash": "Keep Mine", "new": "Make", "rename": "Rename", "trash": "Move to Trash", "run": "Use It", "discard": "Throw Away", "renamesym": "Rename", "debugprog": "Debug", "aiask": "Ask" })[card.kind] || "OK"
                         onClicked: {
                             var s = win.sheet, why = ""
                             if (s.kind === "open") { win.sheet = null; Backend.openFolder(win.browseAt); return }
@@ -462,9 +498,10 @@ GlassWindow {
                             else if (s.kind === "run") { Backend.setRun(nameBox.text); win.sheet = null; return }
                             else if (s.kind === "renamesym") { win.sheet = null; Backend.renameSymbol(s.tab, s.line, s.col, nameBox.text); return }
                             else if (s.kind === "debugprog") { win.sheet = null; win.bottom = "debug"; win.term = true; Backend.startDebug(nameBox.text); return }
+                            else if (s.kind === "aiask") { var said = nameBox.text.trim(); if (!said) return; win.sheet = null; win.aiCode(s.mode, said); return }
                             if (why) toast.say(why, true); else win.sheet = null } } } } }
     ]
-    onSheetChanged: if (sheet && ["new", "rename", "run", "renamesym", "debugprog"].indexOf(sheet.kind) >= 0) {
+    onSheetChanged: if (sheet && ["new", "rename", "run", "renamesym", "debugprog", "aiask"].indexOf(sheet.kind) >= 0) {
         nameBox.text = sheet.kind === "rename" || sheet.kind === "renamesym" ? sheet.name : sheet.kind === "run" || sheet.kind === "debugprog" ? (sheet.now || "") : ""; nameBox.focusIn(); nameBox.input.selectAll() }
 
     // ================================================================ the side island
@@ -662,6 +699,7 @@ GlassWindow {
                 function cursor() { return edit.cursorPosition }
                 function lines() { return edit.lineCount }
                 function selected() { return edit.selectedText }
+                function selRange() { return [edit.selectionStart, edit.selectionEnd] }
                 function selectRange(a, b) { edit.select(a, b); scroll.follow(edit.positionToRectangle(a)) }
                 function replaceRange(a, b, text) { edit.remove(a, b); edit.insert(a, text) }
                 function lineCol() { var before = edit.getText(0, edit.cursorPosition); var nl = before.lastIndexOf("\n"); return [before.split("\n").length - 1, edit.cursorPosition - nl - 1] }

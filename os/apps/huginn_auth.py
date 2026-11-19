@@ -215,8 +215,8 @@ class Authenticator(huginn_more.Vault):
         if demo:
             for i, (iss, acc, sec, site) in enumerate([("Nordlys Bank", "val.example", "JBSWY3DPEHPK3PXP", "https://nordlysbank.example"),
                                                         ("GitHub", "valkyrii070", "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "https://github.com"),
-                                                        ("Mail", "val@example.com", "KRSXG5CTMVRXEZLUKN2XAZLSNFXGO", ""),
-                                                        ("Cloud storage", "val@example.com", "MFRGGZDFMZTWQ2LKNNWG23TPOBYXE", ""),
+                                                        ("Mail", "astrid@example.com", "KRSXG5CTMVRXEZLUKN2XAZLSNFXGO", ""),
+                                                        ("Cloud storage", "astrid@example.com", "MFRGGZDFMZTWQ2LKNNWG23TPOBYXE", ""),
                                                         ("Game store", "ravenkeeper", "ONSWG4TFOQYTEMZUGU3DOOBZ", ""), ("Work VPN", "astrid", "NBSWY3DPO5XXE3DE", "")]):
                 self._demo_codes[f"d{i}"] = dict(entry_from({"secret": sec, "issuer": iss, "account": acc, "site": site}), added=time.time() - i * 86400 * 9)
         self._clock = QTimer(self)

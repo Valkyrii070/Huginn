@@ -4,9 +4,11 @@ import QtQuick
 // finds arrives as islands. On the left, the top hit, big; on the right, in a fixed order so nothing jumps while
 // results come in: apps, files, Settings pages and Huginn's open tabs; along the bottom, the web, always last.
 // Before you type: pick up where you left off, the apps you use, and a few quick actions.
-// Everything is found on this computer; only "Search the web" sends what you typed anywhere.
+// Everything is found on this computer; only "Search the web" sends what you typed anywhere, and "Ask" when Huginn AI
+// is on (Settings › AI): to the account chosen there, or to nobody when it runs on this computer.
 //
-// Keys: Up/Down move through every result, Enter opens, Shift+Enter searches the web, Tab narrows it down
+// Keys: Up/Down move through every result, Enter opens, Shift+Enter searches the web, Ctrl+Enter asks Huginn AI
+// (and again, with the answer showing, asks a follow-up; Escape goes back to the results), Tab narrows it down
 // (All, Apps, Files, Settings, Huginn), the Menu key or Shift+F10 (or right-click) opens an app's island, Escape
 // clears and then closes.
 Item {
@@ -22,6 +24,36 @@ Item {
     readonly property bool still: Theme.t.openMs === 0
     readonly property real presence: bar.opacity
     visible: shown || bar.opacity > 0.01
+
+    // Huginn AI: what's typed, asked; the answer comes in as it's written, in an island under the bar
+    readonly property bool aiHave: typeof AI !== "undefined" && AI !== null
+    readonly property var aiState: aiHave ? AI.state : ({})
+    readonly property bool aiOn: aiHave && !!aiState.enabled && aiState.provider !== "" && (!aiState.where || aiState.where.search !== false)
+    readonly property string aiWho: !aiOn ? "" : aiState.provider === "local" ? "on this computer" + (aiState.model ? " by " + aiState.model : "")
+                                    : aiState.provider === "custom" ? "by " + (aiState.model || "your service")
+                                    : "by " + aiState.label + (aiState.model ? " · " + aiState.model : "")
+    readonly property var askItem: ({ text: text.trim() })
+    property int askJob: -1
+    property string askQ: ""
+    property string askAnswer: ""
+    property string askError: ""
+    property var history: []
+    readonly property bool answering: askQ !== "" && askQ === text.trim()
+    function ask(q) {
+        q = String(q || "").trim()
+        if (!q || !aiOn) return
+        if (askJob >= 0) AI.stop(askJob)
+        askQ = q; askAnswer = ""; askError = ""
+        askJob = AI.ask("ask", q, { history: history })
+    }
+    function leaveAnswer() { if (askJob >= 0) AI.stop(askJob); askJob = -1; askQ = "" }
+    Connections { target: root.aiHave ? AI : null
+        function onChunk(id, piece) { if (id === root.askJob) root.askAnswer += piece }
+        function onDone(id, why) {
+            if (id !== root.askJob) return
+            root.askJob = -1; root.askError = why
+            if (!why) root.history = root.history.concat([{ role: "user", content: root.askQ }, { role: "assistant", content: root.askAnswer }]).slice(-8)
+        } }
 
     function colourOf(a) { return a && a.colours && a.colours.length ? (Theme.t.dark ? a.colours[0] : a.colours[1]) : Theme.t.accent }
     function want(s) { return scope === "All" || scope === s }
@@ -69,12 +101,14 @@ Item {
         for (i = 0; i < files.length; i++) if (!(t && t.kind === "file" && t.data === files[i])) out.push({ kind: "file", data: files[i] })
         for (i = 0; i < pages.length; i++) if (!(t && t.kind === "setting" && t.data === pages[i])) out.push({ kind: "setting", data: pages[i] })
         for (i = 0; i < tabs.length; i++) if (!(t && t.kind === "tab" && t.data === tabs[i])) out.push({ kind: "tab", data: tabs[i] })
+        if (aiOn) out.push({ kind: "ask", data: askItem })
         out.push({ kind: "web", data: { text: text.trim() } })
-        return out
+        return answering ? [] : out
     }
     function isCurrent(kind, data) { var it = items[current]; return !!it && it.kind === kind && it.data === data }
     function activate(it) {
         if (!it) return
+        if (it.kind === "ask") { root.ask(it.data.text); return }          // the answer shows here: Search stays open
         if (it.kind === "app") Apps.launch(it.data.exec)
         else if (it.kind === "file") SearchData.openFile(it.data.path)
         else if (it.kind === "setting") SearchData.openSetting(it.data.id)
@@ -99,6 +133,7 @@ Item {
     onShownChanged: {
         if (shown) {
             scope = "All"; current = 0; island.visible = false
+            leaveAnswer(); history = []
             SearchData.opened()
             input.text = root.startText
             input.cursorPosition = input.text.length
@@ -106,7 +141,7 @@ Item {
             enter.restart()
             Qt.callLater(function () { input.forceActiveFocus() })
         } else {
-            enter.stop(); leave.restart()
+            enter.stop(); leave.restart(); leaveAnswer()
         }
     }
 
@@ -154,6 +189,7 @@ Item {
                 else if (e.key === Qt.Key_Up) { root.current = Math.max(0, root.current - 1); e.accepted = true }
                 else if (e.key === Qt.Key_Tab) { root.scope = root.scopes[(root.scopes.indexOf(root.scope) + 1) % root.scopes.length]; e.accepted = true }
                 else if (e.key === Qt.Key_Backtab) { root.scope = root.scopes[(root.scopes.indexOf(root.scope) + root.scopes.length - 1) % root.scopes.length]; e.accepted = true }
+                else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && (e.modifiers & Qt.ControlModifier)) { root.ask(root.text); e.accepted = true }
                 else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && (e.modifiers & Qt.ShiftModifier)) { if (root.typing) root.activate({ kind: "web", data: { text: root.text.trim() } }); e.accepted = true }
                 else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { root.activate(root.items[root.current]); e.accepted = true }
                 else if (e.key === Qt.Key_Menu || (e.key === Qt.Key_F10 && (e.modifiers & Qt.ShiftModifier))) {
@@ -161,7 +197,7 @@ Item {
                     if (it && it.kind === "app") root.islandFor(it.data, bar)
                     e.accepted = true
                 }
-                else if (e.key === Qt.Key_Escape) { if (input.text) input.text = ""; else root.done(); e.accepted = true }
+                else if (e.key === Qt.Key_Escape) { if (root.answering) root.leaveAnswer(); else if (input.text) input.text = ""; else root.done(); e.accepted = true }
             }
         }
         Rectangle {
@@ -312,7 +348,7 @@ Item {
 
     // ---------------------------------------------------------------- what it found
     Item {
-        visible: root.typing
+        visible: root.typing && !root.answering
         x: root.lx; y: root.top0; width: root.w; height: Math.max(topIsl.height, right.height)
         Isl {
             id: topIsl
@@ -409,14 +445,55 @@ Item {
             }
         }
     }
-    Isl {   // the web: always last, and only when you choose it
-        visible: root.typing
+    Isl {   // Huginn AI: ask it
+        id: askIsl
+        visible: root.typing && root.aiOn && !root.answering
         order: 5
         x: root.lx; y: root.top0 + Math.max(topIsl.visible ? topIsl.height : 0, right.height) + 10; width: root.w; height: 60
         ResultRow {
             x: 8; y: 6; width: parent.width - 16
+            kind: "ask"; item: root.askItem; glyph: "sparkle"
+            title: (root.history.length ? "Ask a follow-up: “" : "Ask Huginn AI: “") + root.text.trim() + "”"
+            sub: "Answered " + root.aiWho + " · Ctrl+Enter"
+        }
+    }
+    Isl {   // the web: always last, and only when you choose it
+        visible: root.typing && !root.answering
+        order: 6
+        x: root.lx; y: askIsl.visible ? askIsl.y + askIsl.height + 10 : root.top0 + Math.max(topIsl.visible ? topIsl.height : 0, right.height) + 10; width: root.w; height: 60
+        ResultRow {
+            x: 8; y: 6; width: parent.width - 16
             kind: "web"; item: root.items.length ? root.items[root.items.length - 1].data : ({})
             title: "Search the web for “" + root.text.trim() + "”"; sub: "Opens in Huginn · the only result that leaves this computer"; glyph: "globe"
+        }
+    }
+
+    Isl {   // Huginn AI's answer
+        id: answerIsl
+        visible: root.answering
+        order: 0; title: "Huginn AI"
+        x: root.lx; y: root.top0; width: root.w
+        height: Math.min(root.height - y - 60, answerFlick.contentHeight + 104)
+        Label { x: 18 + 90; y: 14; width: parent.width - 126; elide: Text.ElideRight; text: "Answered " + root.aiWho; color: Theme.t.text_tertiary; font.pixelSize: 11 }
+        Flickable {
+            id: answerFlick
+            x: 22; y: 40; width: parent.width - 44; height: parent.height - 96; clip: true
+            contentHeight: answerText.height; boundsBehavior: Flickable.StopAtBounds
+            onContentHeightChanged: if (root.askJob >= 0 && contentHeight > height) contentY = contentHeight - height   // follow it as it's written
+            TextEdit {
+                id: answerText
+                width: parent.width; readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
+                textFormat: TextEdit.MarkdownText; color: root.askError ? Theme.t.danger : Theme.t.text
+                font.family: Theme.t.font; font.pixelSize: 15; selectionColor: Theme.t.accent; selectedTextColor: Theme.t.onAccent
+                text: root.askError ? root.askError : root.askAnswer !== "" ? root.askAnswer : (root.aiState.provider === "local" ? "Starting the model on this computer…" : "Thinking…")
+            }
+        }
+        Row {
+            x: 18; anchors { bottom: parent.bottom; bottomMargin: 14 } spacing: 8
+            Action { visible: root.askJob >= 0; label: "Stop"; onClicked: root.leaveAnswer() }
+            Action { visible: root.askJob < 0 && root.askAnswer !== ""; primary: true; label: "Copy"; onClicked: SearchData.copy(root.askAnswer) }
+            Action { visible: root.askJob < 0; label: "Back to results"; onClicked: { root.leaveAnswer(); input.forceActiveFocus() } }
+            Label { anchors.verticalCenter: parent.verticalCenter; leftPadding: 6; text: "Type a follow-up, then Ctrl+Enter"; color: Theme.t.text_tertiary; font.pixelSize: 12 }
         }
     }
 
@@ -425,7 +502,7 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         y: root.height - 140; spacing: 8; opacity: root.rise
         Glyph { anchors.verticalCenter: parent.verticalCenter; name: "shield"; size: 14; ink: Theme.t.accent }
-        Label { anchors.verticalCenter: parent.verticalCenter; text: "Searched on this computer. Nothing is sent anywhere until you choose a web result."; font.pixelSize: 12; color: Theme.t.text_secondary }
+        Label { anchors.verticalCenter: parent.verticalCenter; text: "Searched on this computer. Nothing is sent anywhere until you choose a web result" + (root.aiOn && root.aiState.provider !== "local" ? " or ask Huginn AI." : "."); font.pixelSize: 12; color: Theme.t.text_secondary }
     }
 
     AppIsland { id: island; visible: false; z: 50; onDone: { island.visible = false; input.forceActiveFocus() } }

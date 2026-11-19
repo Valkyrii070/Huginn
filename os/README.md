@@ -1475,6 +1475,44 @@ over when the side island would reach them (`GlassWindow.middleX`).
 - **Steam's overlay** (Shift+Tab): nothing in Huginn takes Shift+Tab; the overlay only works in games that draw
   through X11, and SDL 3 picks Wayland on a compositor that offers what Huginn's does. The session now asks SDL games
   for X11 (`SDL_VIDEODRIVER=x11`, overridable per game).
+- **Menus and sheets that did nothing.** In Code's file list, New Folder Here, New File Here, Rename, Show in Files
+  and Move to Trash closed the menu first, which took the clicked row (and what it was about to do) away with it. The
+  same in a dozen other places (Characters, Contacts, Easel, Feeds, Files, Mail, Money, Passwords, Recorder,
+  Settings, Tempo, Today): each now reads what it needs, does it, and closes last.
+
+## Huginn AI (2026-11-19)
+
+One AI service for the whole desktop (`apps/huginn_ai.py`), **off until it's turned on** in Settings › AI, which
+also says where it runs. Nothing is sent anywhere until it's on and a place is chosen; then only what you ask about,
+when you ask.
+
+- **On this computer.** llama.cpp from Ubuntu's archive (`llama.cpp-tools`, with `libggml0-backend-vulkan` and
+  Mesa's Vulkan drivers, so it runs on AMD, Intel or NVIDIA cards, or the processor). Four models, downloaded when
+  chosen (resumable, with the space checked first) into `~/.local/share/huginn/ai-models`: Gemma 4 E2B (3 GB),
+  Gemma 4 E4B (5 GB), gpt-oss 20B (12 GB) and Gemma 4 26B-A4B (15 GB). Settings suggests the one that fits the
+  card's memory (16 GB: gpt-oss 20B). One `llama-server` serves every app: started on the first question, on
+  127.0.0.1 only and with a token, stopped after 15 minutes unused so a game gets the card's memory back; "Use the
+  graphics card" can be turned off.
+- **With an account.** Claude (Anthropic), OpenAI, Gemini, GitHub Models (Copilot's models, with a GitHub token),
+  Azure OpenAI, OpenRouter (Sign In: their PKCE flow, the key comes back by itself) and anything that speaks
+  OpenAI's API (Ollama, LM Studio, your own). Each lists the models the key offers, likeliest first. Keys are kept
+  in Passwords (its "ai" drawer) when it's set up and unlocked, else in a 0600 file; if they're in a locked
+  Passwords, Huginn AI says so. Chat subscriptions (ChatGPT Plus, Claude Pro, Gemini Advanced, Copilot Pro) can't be
+  used by other apps; Settings and Help › Huginn AI say so plainly, and that Gemini's and GitHub's keys have free
+  tiers.
+- **Search**: Ctrl+Enter (or the "Ask Huginn AI" row) asks what's typed; the answer streams into an island under the
+  bar, follow-ups keep the conversation, Escape goes back to the results.
+- **Writer**: the sparkle on the formatting island: clearer, shorter, friendlier, more formal, simpler, proofread,
+  summarise, carry on writing; on the selection or the whole document; Replace or Insert is one undo.
+- **Mail**: summarise a message, draft a reply (or one saying yes, no, or asking for time) that opens ready to edit;
+  **Improve** while writing rewrites only what you wrote, not the signature or the quoted message.
+- **Code**: the palette's AI: Explain This Code, Fix This Code (told about the problems Code found there), Change
+  This Code… and Write Code…; the code is shown first and Replace or Insert puts it in.
+- Settings › AI › Where it shows turns it off per app; there's a box to try it; Help has a guide.
+- Tested in the nested session against a pretend OpenAI-style and Anthropic-style service (streaming, wrong key,
+  models listed and ranked), a pretend llama-server (started once for every app, reused, stopped), and a pretend
+  Hugging Face (a download cut short, then resumed). The real downloads and the Vulkan backend on the 9070 XT are
+  for the PC.
 
 ## Huginn, the browser
 

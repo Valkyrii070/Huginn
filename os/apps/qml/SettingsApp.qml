@@ -16,6 +16,7 @@ GlassWindow {
         { id: "network", label: "Wi‑Fi & Network", glyph: "wifi", a: "#4DB0FF", b: "#1D63D1", group: "CONNECTIONS", sub: "Wireless and wired networks, VPN and hotspot." },
         { id: "bluetooth", label: "Bluetooth", glyph: "bluetooth", a: "#5B9BFF", b: "#2B4FD6", group: "CONNECTIONS", sub: "Headphones, keyboards, mice and speakers." },
         { id: "accounts", label: "Online Accounts", glyph: "cloud", a: "#40CFE0", b: "#1479A8", group: "CONNECTIONS", sub: "Sign in once for mail, calendars, contacts and files." },
+        { id: "ai", label: "AI", glyph: "sparkle", a: "#A48BFF", b: "#6D3FE0", group: "CONNECTIONS", sub: "Huginn AI: a model on this computer, or your account with Claude, OpenAI, Gemini or Copilot's models." },
         { id: "displays", label: "Displays", glyph: "display", a: "#6D7BFF", b: "#3640C9", group: "THIS COMPUTER", sub: "Resolution, size, arrangement and night light." },
         { id: "sound", label: "Sound", glyph: "volume", a: "#FF6E97", b: "#C2185B", group: "THIS COMPUTER", sub: "Speakers, headphones, microphones and each app's volume." },
         { id: "power", label: "Battery & Power", glyph: "battery", a: "#4BDB97", b: "#109F5E", group: "THIS COMPUTER", sub: "Battery health, power mode and when to sleep." },
@@ -29,7 +30,7 @@ GlassWindow {
         { id: "about", label: "About", glyph: "info", a: "#A3B1C4", b: "#475569", group: "SYSTEM", sub: "This computer and the version of Huginn OS." }
     ]
     readonly property var files: ({ appearance: "SetAppearance", desktop: "SetDesktop", notifications: "SetNotifications", network: "SetNetwork", bluetooth: "SetBluetooth",
-                                    accounts: "SetAccounts", displays: "SetDisplays", sound: "SetSound", power: "SetPower", input: "SetInput", time: "SetTime",
+                                    accounts: "SetAccounts", ai: "SetAI", displays: "SetDisplays", sound: "SetSound", power: "SetPower", input: "SetInput", time: "SetTime",
                                     language: "SetLanguage", users: "SetUsers", defaults: "SetDefaults", privacy: "SetPrivacy", updates: "SetUpdates", about: "SetAbout",
                                     a11y: "SetAccessibility" })
     readonly property var index: [
@@ -51,6 +52,9 @@ GlassWindow {
         ["network", "Hotspot", "share internet tether"], ["network", "IP address", "mac address dns gateway details"], ["network", "Ethernet", "wired cable lan"],
         ["bluetooth", "Bluetooth", "pair headphones keyboard mouse speaker devices"],
         ["accounts", "Online Accounts", "google microsoft icloud nextcloud sign in sync calendar contacts mail files"],
+        ["ai", "Huginn AI", "artificial intelligence assistant chat llm model claude anthropic openai chatgpt gpt gemini google copilot github azure openrouter ollama llama local"],
+        ["ai", "Model on this computer", "local offline private llama.cpp gemma gpt-oss download graphics card gpu"],
+        ["ai", "API key", "claude openai gemini copilot github token key connect account"],
         ["displays", "Resolution", "screen size monitor pixels"], ["displays", "Scale", "bigger text size zoom hidpi"], ["displays", "Refresh rate", "hz smooth"],
         ["displays", "Night light", "blue light warm evening colour temperature"], ["displays", "Brightness", "dim screen"], ["displays", "Arrange screens", "multiple monitors position main primary rotate"],
         ["sound", "Output", "speakers headphones volume"], ["sound", "Input", "microphone mic recording"], ["sound", "App volume", "per app mixer"],
@@ -101,6 +105,7 @@ GlassWindow {
     function refresh() {
         if (["network", "bluetooth", "displays", "sound", "notifications", "power", "input", "time", "language", "users", "defaults", "privacy", "about", "a11y"].indexOf(page) >= 0) Backend.load(page)
         if (page === "accounts" && typeof Accounts !== "undefined") Accounts.refresh()
+        if (page === "ai" && typeof AI !== "undefined" && AI) AI.refresh()
         if (page === "updates" && typeof Updates !== "undefined") Updates.look(false)
     }
     Timer {   // pages that change by themselves are read again while they're open

@@ -5352,6 +5352,11 @@ def main() -> int:
             accounts = huginn_accounts.Accounts(args.demo)
             ctx.setContextProperty("Accounts", accounts)
         updates.said.connect(lambda msg, bad: backend.said.emit(msg, bad) if hasattr(backend, "said") else None)
+    ai = None
+    if args.app in ("settings", "writer", "mail", "code"):   # Huginn AI (Settings › AI); off until it's turned on
+        import huginn_ai
+        ai = huginn_ai.make(bool(args.demo), args.app)
+    ctx.setContextProperty("AI", ai)
     menu = None
     if not (args.shot or args.demo):                     # the top bar's one menu asks the app for its menus
         from huginn_menu import AppMenu

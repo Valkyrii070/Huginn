@@ -21,6 +21,29 @@ GlassWindow {
     function unlock(box, why) { var w = Backend.unlockVault(box.text); box.text = ""; why.text = w; if (w === "" && sheet && sheet.kind === "unlock") sheet = null }
     function compose(d) { reply = d; cTo.text = d.to || ""; cCc.text = d.cc || ""; cSubject.text = d.subject || ""; cBody.many = (d.body || "") + (d.title === undefined ? Backend.signatureBlock : ""); files = (d.files || []).map(function (p) { return Backend.fileInfo(p) }).filter(function (f) { return f.name })
         cWhy.text = ""; composing = true; if (cTo.text === "") cTo.focusIn(); else cBody.focusIn() }
+    // Huginn AI (Settings › AI): summarise the message, draft a reply, or improve what's being written
+    function aiMessage() { var c = win.cur; return "From: " + (c.from || "") + " <" + (c.addr || "") + ">\nSubject: " + (c.subject || "") + "\n\n" + (c.body || "") }
+    function ownPart(body) {     // what's being written: before the signature and the quoted message
+        var cut = body.length, sig = body.indexOf("\n-- \n"), quote = body.search(/\n\nOn [^\n]*wrote:\n/)
+        if (sig >= 0) cut = Math.min(cut, sig)
+        if (quote >= 0) cut = Math.min(cut, quote)
+        return [body.slice(0, cut), body.slice(cut)]
+    }
+    function ai(key) {
+        if (!win.cur.id || win.cur.loading) return
+        var id = win.cur.id, task = key.split(":")[0], want = key.split(":")[1] || ""
+        if (task === "summarise") { aiPanel.run({ task: "summarise", text: aiMessage(), heading: "Summary" }); return }
+        var says = ({ yes: "yes, gladly", no: "no, kindly", later: "that I need a little more time and will answer properly soon" })[want] || ""
+        aiPanel.run({ task: "reply", text: aiMessage(), extra: { intent: says }, heading: "Reply", accept: "Use It",
+                      onAccept: function (t) { var d = Backend.replyDraft(id, false); d.body = t + (d.body || ""); win.compose(d) } })
+    }
+    function improve() {
+        var parts = ownPart(cBody.many)
+        if (parts[0].trim() === "") { toast.say("Write something first, then Improve makes it clearer.", false); return }
+        aiPanel.run({ task: "improve", text: parts[0], heading: "Improved", accept: "Use It",
+                      onAccept: function (t) { var now = ownPart(cBody.many); if (now[0] !== parts[0]) { aiPanel.copyIt(); toast.say("It changed meanwhile, so the improved text is copied: paste it in.", false); return }
+                                               cBody.many = t + now[1] } })
+    }
     function form() { return { to: cTo.text, cc: cCc.text, subject: cSubject.text, body: cBody.many, files: files.map(function (f) { return f.path }), replyId: reply.replyId || "", refs: reply.refs || "", replyTo: reply.replyTo || "", title: reply.title || "New message", event: reply.event || null } }
     function attach(path) { var f = Backend.fileInfo(path); if (f.name && !files.some(function (x) { return x.path === f.path })) files = files.concat([f]) }
     function step(by) { var m = Backend.messages; if (!m.length) return; var at = -1; for (var i = 0; i < m.length; i++) if (m[i].id === Backend.openId) at = i
@@ -75,6 +98,7 @@ GlassWindow {
             Seg { text: "Reply"; on: true; onClicked: win.compose(Backend.replyDraft(win.cur.id, false)) }
             Seg { text: "Reply All"; onClicked: win.compose(Backend.replyDraft(win.cur.id, true)) }
             Seg { text: "Forward"; onClicked: win.compose(Backend.forwardDraft(win.cur.id)) }
+            Seg { visible: aiPanel.on("mail"); icon: "sparkle"; tip: mailAi.visible ? "" : "Huginn AI"; tipAbove: true; on: mailAi.visible; onClicked: mailAi.visible = !mailAi.visible }
             IslandGap {}
             Seg { icon: "star"; on: !!win.cur.starred; tip: win.cur.starred ? "Remove the star" : "Star"; tipAbove: true; onClicked: Backend.toggleStar(win.cur.id) }
             Seg { icon: "mail"; tip: "Mark as unread"; tipAbove: true; onClicked: Backend.markUnread(win.cur.id) }
@@ -161,6 +185,7 @@ GlassWindow {
                     text: win.reply.event ? "Goes as an invitation: " + win.reply.event.title + ". Everyone in To and Cc can answer." : "" }
                 Label { id: cWhy; x: 22; anchors { bottom: parent.bottom; bottomMargin: 26 } width: parent.width - 330; elide: Text.ElideRight; color: Theme.t.danger; font.pixelSize: 12 }
                 Row { anchors { right: parent.right; rightMargin: 22; bottom: parent.bottom; bottomMargin: 18 } spacing: 8
+                    Btn { visible: aiPanel.on("mail"); text: "Improve"; onClicked: win.improve() }
                     Btn { text: "Attach"; onClicked: picker.visible = !picker.visible }
                     Btn { text: "Discard"; onClicked: { win.composing = false; win.files = []; Backend.clearDraft() } }
                     Btn { text: "Later"; onClicked: { Backend.keepDraft(win.form()); win.composing = false; toast.say("Kept. It comes back when you open Mail or press New Message.", false) } }
@@ -172,7 +197,12 @@ GlassWindow {
                         Repeater { model: picker.choices
                             Pressable { required property var modelData; width: parent.width; height: 30; radius: 8; onClicked: { win.attach(modelData.path); picker.visible = false }
                                 Label { x: 8; width: parent.width - 130; elide: Text.ElideMiddle; anchors.verticalCenter: parent.verticalCenter; text: modelData.name; font.pixelSize: 12 }
-                                Label { anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter } text: modelData.where + " · " + modelData.size; secondary: true; font.pixelSize: 10 } } } } } } }
+                                Label { anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter } text: modelData.where + " · " + modelData.size; secondary: true; font.pixelSize: 10 } } } } } } },
+        AiMenu { id: mailAi; z: 25; anchors { right: parent.right; rightMargin: 14; bottom: parent.bottom; bottomMargin: 62 }
+            items: [["summarise", "Summarise this message", ""], ["", "", ""], ["reply", "Draft a reply", ""], ["reply:yes", "Draft a reply saying yes", ""],
+                    ["reply:no", "Draft a reply saying no", ""], ["reply:later", "Draft a reply asking for time", ""]]
+            onChosen: function (key) { win.ai(key) } },
+        AiPanel { id: aiPanel; z: 30; x: (win.width - width) / 2; anchors { bottom: parent.bottom; bottomMargin: win.composing ? 112 : 62 } maxHeight: win.height * 0.6 }
     ]
 
     // ---------------- signing in

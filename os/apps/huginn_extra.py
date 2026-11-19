@@ -111,7 +111,7 @@ class Phone(Worker):
         self._ready = demo or shutil.which(self.TOOL) is not None
         self._waiting = self._paths(target)
         if demo:
-            self._devices = [{"id": "a1", "name": "Val's Pixel", "paired": True, "here": True, "battery": 82, "charging": False},
+            self._devices = [{"id": "a1", "name": "Astrid's Pixel", "paired": True, "here": True, "battery": 82, "charging": False},
                              {"id": "b2", "name": "Old tablet", "paired": True, "here": False, "battery": -1, "charging": False},
                              {"id": "c3", "name": "Sam's phone", "paired": False, "here": True, "battery": -1, "charging": False}]
             self._picked = "a1"

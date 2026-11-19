@@ -12,14 +12,14 @@ HERE = Path(__file__).resolve().parent
 GUIDES = HERE / "help"
 TOKENS = [HERE.parent / "tokens" / "tokens.json", Path("/usr/share/huginn-os/tokens.json")]
 ICONS = [HERE.parent / "config/overlay/usr/share/icons/hicolor/scalable/apps", Path("/usr/share/icons/hicolor/scalable/apps")]
-APP_OF = {"privacy-report": "privacy", "video": "video", "updates": "settings", "accounts": "settings", "installer": "os"}                    # guide name -> app key, where they differ
+APP_OF = {"privacy-report": "privacy", "video": "video", "updates": "settings", "accounts": "settings", "ai": "settings", "installer": "os"}                    # guide name -> app key, where they differ
 START = ["getting-started", "privacy", "passwords", "sharing"]               # shown first, as "Start here"
 SHELF = {"Talk and plan": ["mail", "messages", "calendar", "contacts", "reminders", "phone"],
          "Write and work": ["writer", "sheets", "slides", "documents", "scan", "code", "notes", "translate", "print"],
          "Look, listen, play": ["photos", "easel", "music", "video", "podcasts", "books", "feeds", "games", "clips", "tempo", "camera", "recorder"],
          "Keep things safe": ["passwords", "authenticator", "privacy-report", "backup", "money"],
          "Find your way": ["maps", "weather", "clock", "calculator"],
-         "Tools": ["files", "archives", "disks", "screenshot", "terminal", "machines", "monitor", "store", "settings", "updates", "accounts", "shortcuts", "characters", "fonts", "sharing", "welcome", "installer", "help"]}
+         "Tools": ["files", "archives", "disks", "screenshot", "terminal", "machines", "monitor", "store", "settings", "updates", "accounts", "ai", "shortcuts", "characters", "fonts", "sharing", "welcome", "installer", "help"]}
 
 
 def read_guide(text: str) -> dict:

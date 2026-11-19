@@ -9,6 +9,29 @@ GlassWindow {
     property string exported: ""
     function refresh() { st = Backend.state(editor.selectionStart) }
     function apply(what) { Backend.style(editor.selectionStart, editor.selectionEnd, what); refresh(); editor.forceActiveFocus() }
+    // Huginn AI (Settings › AI): on what's selected, or on the whole document when nothing is
+    readonly property var aiChoices: [["rewrite:clearer", "Make it clearer", ""], ["rewrite:shorter", "Make it shorter", ""], ["rewrite:friendlier", "Make it friendlier", ""],
+                                      ["rewrite:formal", "Make it more formal", ""], ["rewrite:simpler", "Make it simpler", ""], ["", "", ""],
+                                      ["proofread", "Proofread", ""], ["summarise", "Summarise", ""], ["continue", "Carry on writing", "at the cursor"]]
+    function ai(key) {
+        var a = editor.selectionStart, b = editor.selectionEnd, all = a === b
+        var task = key.split(":")[0], style = key.split(":")[1] || ""
+        if (task === "continue") { b = a = editor.cursorPosition; all = false }
+        var text = task === "continue" ? Backend.textOf(0, a > 0 ? a : editor.length) : all ? Backend.textOf(0, 0) : Backend.textOf(a, b)
+        if (text.trim() === "") { win.notice = "Write something first."; hide.restart(); return }
+        if (all) { a = 0; b = editor.length }
+        var asked = task === "continue" ? "" : text
+        function stillThere() { return task === "continue" || (all ? Backend.textOf(0, 0) : Backend.textOf(a, b)) === asked }
+        function put(answer, at, till, lead) {
+            if (!stillThere()) { aiPanel.copyIt(); win.notice = "The document changed meanwhile, so the answer is copied: paste it where you want it."; hide.restart(); return }
+            var end = Backend.putText(at, till, (lead || "") + answer); editor.cursorPosition = end; editor.forceActiveFocus()
+        }
+        var head = { "rewrite": ({ clearer: "Clearer", shorter: "Shorter", friendlier: "Friendlier", formal: "More formal", simpler: "Simpler" })[style], proofread: "Proofread",
+                     summarise: "Summary", "continue": "Carried on" }[task]
+        if (task === "summarise") aiPanel.run({ task: task, text: text, heading: head, accept: "Insert Below", onAccept: function (t) { put(t, b, b, "\n") } })
+        else if (task === "continue") aiPanel.run({ task: task, text: text, heading: head, accept: "Insert", onAccept: function (t) { put(t, a, a, a > 0 ? "\n" : "") } })
+        else aiPanel.run({ task: task, text: text, extra: { style: style }, heading: head, accept: all ? "Replace the Document" : "Replace", onAccept: function (t) { put(t, a, b, "") } })
+    }
     Connections { target: Backend
         function onFailed(msg) { win.notice = msg; hide.restart() }
         function onLoaded() { editor.cursorPosition = 0; win.refresh(); top.restart() } }
@@ -53,8 +76,14 @@ GlassWindow {
             Repeater { model: ["#15181C", "#D93A3F", "#C46A00", "#0A8071", "#2361AE", "#563AD1"]
                 Rectangle { required property string modelData; width: 20; height: 20; radius: 10; color: modelData; border.width: 1; border.color: Theme.t.islandLine; anchors.verticalCenter: parent.verticalCenter
                     MouseArea { anchors.fill: parent; onClicked: win.apply(parent.modelData) } } }
+            Gap { visible: aiPanel.on("writer") }
+            Tool { visible: aiPanel.on("writer"); icon: "sparkle"; tip: aiMenu.visible || aiPanel.visible ? "" : "Huginn AI"; on: aiMenu.visible || aiPanel.visible; onClicked: aiMenu.visible = !aiMenu.visible }
             Item { width: 2; height: 1 }
-        }
+        },
+        AiMenu { id: aiMenu; z: 9; items: win.aiChoices; anchors { right: bar.right; bottom: bar.top; bottomMargin: 8 }
+            note: editor.selectedText !== "" ? "On what's selected." : "On the whole document (select some to work on just that)."
+            onChosen: function (key) { win.ai(key) } },
+        AiPanel { id: aiPanel; z: 9; x: bar.x + (bar.width - width) / 2; anchors { bottom: bar.top; bottomMargin: 8 } maxHeight: win.height * 0.55 }
     ]
     component Tool: Pressable { id: t; property string icon: ""; property string text: ""; property bool on: false; property string tip: ""; property int span: 30
         width: span; height: 30; radius: 11; anchors.verticalCenter: parent ? parent.verticalCenter : undefined; color: on ? Theme.t.accent : (hovered ? Theme.t.hover : "transparent")

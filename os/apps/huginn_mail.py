@@ -1110,7 +1110,7 @@ class Mail(QObject):
         self._call.connect(lambda fn: fn())
         if demo:
             self._demo_rows = _demo_messages()
-            self._accounts = [{"id": "demo", "name": "Val", "email": "val@example.com"}]
+            self._accounts = [{"id": "demo", "name": "Astrid", "email": "astrid@example.com"}]
             self._acct, self._folder, self._open = "demo", "INBOX", "1:INBOX"
             return
         try:
@@ -2304,7 +2304,7 @@ def _demo_messages() -> list:
             (2, "INBOX", "Ubuntu Security", "security@lists.example", "Notices for resolute, week 46", 26, 0, 0, 0, "Three packages in your image have updates this week. Rebuild from a newer snapshot to pick them up."),
             (3, "INBOX", "Ingrid Halvorsen", "ingrid@example.com", "Icon sketches, round two", 74, 1, 0, 1, "Attached are the line icons at 1.7 px stroke. I kept the corners soft to match the tiles."),
             (4, "INBOX", "Lakeside Vets", "hello@lakesidevets.example", "Reminder: Biscuit's check-up on Friday", 98, 1, 0, 0, "This is a reminder that Biscuit is booked in for 10:15 on Friday. Reply to this message if you need to move it."),
-            (5, "Sent", "Val", "val@example.com", "Re: Icon sketches, round two", 70, 1, 0, 0, "These are lovely. Go with the second set.")]
-    return [{"uid": u, "folder": f, "from_name": n, "from_addr": a, "rcpt": "val@example.com", "cc": "", "subject": s, "stamp": now - h * 3600, "seen": seen, "starred": star,
+            (5, "Sent", "Astrid", "astrid@example.com", "Re: Icon sketches, round two", 70, 1, 0, 0, "These are lovely. Go with the second set.")]
+    return [{"uid": u, "folder": f, "from_name": n, "from_addr": a, "rcpt": "astrid@example.com", "cc": "", "subject": s, "stamp": now - h * 3600, "seen": seen, "starred": star,
              "answered": 0, "attach": att, "size": len(b), "snippet": " ".join(b.split())[:160], "body": b, "was_html": 0, "msgid": f"<{u}@example.com>", "refs": "",
              "files": json.dumps([{"name": "icons-round-two.zip", "size": 482133, "kind": "application/zip", "index": 2}]) if att else "[]"} for u, f, n, a, s, h, seen, star, att, b in rows]

@@ -280,6 +280,27 @@ class Writer(FileList):
         cursor.setPosition(max(0, min(end, self._doc.characterCount() - 1)), QTextCursor.KeepAnchor)
         return cursor
 
+    # -- for Huginn AI: the text of a stretch (or all of it), and putting text in its place
+    @Slot(int, int, result=str)
+    def textOf(self, start: int, end: int) -> str:
+        if self._doc is None:
+            return ""
+        if start == end:
+            return self._doc.toPlainText()
+        return self._cursor(start, end).selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+
+    @Slot(int, int, str, result=int)
+    def putText(self, start: int, end: int, text: str) -> int:
+        """Replace a stretch (start == end: insert there) with text, keeping the formatting where it goes; one undo.
+        Returns where the new text ends."""
+        if self._doc is None:
+            return start
+        cursor = self._cursor(start, end)
+        cursor.beginEditBlock()
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        return cursor.position()
+
     @Slot(int, int, str)
     def style(self, start: int, end: int, what: str) -> None:
         if self._doc is None:

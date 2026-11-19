@@ -1,0 +1,6 @@
+# Huginn AI's model on this computer (Settings › AI): llama.cpp's server, and its Vulkan backend, which runs on any
+# graphics card (AMD and Intel through Mesa's Vulkan drivers, NVIDIA through its own). The models aren't in the image:
+# each is downloaded when it's chosen. Mesa's Vulkan drivers also serve games (Steam's Proton) and Machines.
+llama.cpp-tools
+libggml0-backend-vulkan
+mesa-vulkan-drivers

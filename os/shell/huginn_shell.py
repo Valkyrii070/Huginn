@@ -1090,6 +1090,16 @@ def main() -> int:
     from huginn_search import Search
     search = Search(apps, tabs, demo=args.preview)               # Search everything (Super+Space)
     ctx.setContextProperty("SearchData", search)
+    ai = None
+    try:                                                              # Huginn AI: Search's "Ask" (Settings › AI)
+        for d in (HERE.parent / "apps", Path("/usr/share/huginn-apps")):
+            if (d / "huginn_ai.py").exists() and str(d) not in sys.path:
+                sys.path.append(str(d))
+        import huginn_ai
+        ai = huginn_ai.make(bool(args.preview), "search")
+    except Exception as err:                                          # noqa: BLE001  (Search works without it)
+        print("Huginn AI isn't available:", err, file=sys.stderr)
+    ctx.setContextProperty("AI", ai)
     ctx.setContextProperty("Settings", settings)
     ctx.setContextProperty("startOpen", args.open)
     ctx.setContextProperty("startMenus", args.menus)
