@@ -6,6 +6,8 @@ GlassWindow {
     id: win
     title: "Backup"; width: 940; height: 640; glow: "centre"; glowY: 0.4
     property var sheet: null                   // { kind: "drive", why }
+    function backUpNow() { if (!Backend.busy && Backend.dest !== "" && Backend.connected) Backend.backUpNow() }
+    function chooseDrive() { sheet = { kind: "drive", why: "" } }
     readonly property var st: Backend.status
     readonly property bool browsing: Backend.snapshot !== ""
     Connections { target: Backend

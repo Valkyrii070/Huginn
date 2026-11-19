@@ -10,6 +10,8 @@ GlassWindow {
     property var sheet: null            // { kind: "add" | "edit", tab, why, code }
     property string flash: ""           // the dial that was just copied
     function tryDoor() { doorWhy = Backend.exists ? Backend.unlock(door.text) : Backend.create(door.text, door2.text); door.text = ""; door2.text = "" }
+    function addCode() { sheet = { kind: "add", tab: Backend.canScan ? "scan" : "paste", why: "" } }
+    function lockNow() { Backend.lock() }
     function addDone(why) { if (why === "") win.sheet = null; else win.sheet = { kind: "add", tab: win.sheet ? win.sheet.tab : "paste", why: why } }
     function edit(c) { win.sheet = { kind: "edit", code: c, why: "" }; eIssuer.text = c.issuer; eAccount.text = c.account; eSite.text = c.site }
     Connections { target: Backend

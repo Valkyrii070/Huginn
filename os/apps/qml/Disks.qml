@@ -7,6 +7,7 @@ GlassWindow {
     property var sheet: null                   // { kind: "rename" | "erase", dev, name, fs }
     property string eraseFs: "exfat"
     property bool sure: false
+    function refresh() { if (typeof Backend.refresh === "function") Backend.refresh() }
     Connections { target: Backend
         function onFailed(msg) { toast.say(msg, true) }
         function onSaid(msg) { toast.say(msg, false) } }

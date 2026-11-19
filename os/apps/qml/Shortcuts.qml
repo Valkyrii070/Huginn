@@ -11,6 +11,8 @@ GlassWindow {
     readonly property var swatches: ["#FF4FC3", "#FF5A36", "#FF9F1C", "#FFC53D", "#3DDC6E", "#10B981", "#22B8CF", "#3D7BFF", "#7C9CFF", "#A855F7", "#FB7185", "#94A3B8"]
     readonly property var glyphs: ["play", "sun", "moon", "home", "image", "phone", "wifi", "bell", "music", "doc", "edit", "star", "clock", "download", "shield", "gamepad"]
     property bool addingStep: false
+    function newShortcut() { Backend.create() }
+    function runNow() { if (win.cur && win.cur.id) Backend.runNow(win.cur.id) }
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong) } }
     function setWhen(extra) { var w = JSON.parse(JSON.stringify(win.cur.whenData || { kind: "manual" })); for (var k in extra) w[k] = extra[k]; Backend.setWhen(win.cur.id, w) }
 

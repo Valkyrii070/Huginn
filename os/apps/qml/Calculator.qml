@@ -7,6 +7,7 @@ GlassWindow {
     property string sum: ""
     property string answer: ""
     property bool showHistory: false
+    function toggleHistory() { showHistory = !showHistory }
     readonly property string live: answer === "" ? Backend.preview(sum) : ""
     function press(k) {
         if (k === "C") { sum = ""; answer = "" }

@@ -13,6 +13,9 @@ GlassWindow {
     property string loaded: ""
     function clock(ms) { var s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (x < 10 ? "0" : "") + x }
     function start(id) { Backend.play(id) }
+    function follow() { finding = true; finder.text = ""; Backend.find(""); finder.focusIn() }
+    function playPause() { if (playing) player.pause(); else if (player.source != "") player.play() }
+    function skip(ms) { player.position = Math.max(0, Math.min(player.duration, player.position + Number(ms))) }
     onNowChanged: { if (!now.url || demo || now.id === loaded) return; loaded = now.id; outLoader.active = true; player.source = now.url; player.play() }
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong) } }
     Loader { id: outLoader; active: false; sourceComponent: AudioOutput {} }

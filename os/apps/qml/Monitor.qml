@@ -6,6 +6,7 @@ GlassWindow {
     title: "System Monitor"; heading: mine ? "Your Programs" : "All Processes"
     width: 1160; sidebarWidth: 300; glow: "left"; padTop: 58; padRight: 6
     property bool mine: true
+    function setMine(v) { mine = String(v) === "true" }
     property string filter: ""
     property string sortKey: "cpu"
     property int picked: -1

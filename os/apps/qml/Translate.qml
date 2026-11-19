@@ -7,6 +7,11 @@ GlassWindow {
     readonly property color pick: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.18)
     property var sheet: null                   // "from" | "to" | "packs"
     function nameOf(list, code) { for (var i = 0; i < list.length; i++) if (list[i].code === code) return list[i].name; return "" }
+    // the top bar's menu
+    function swapLanguages() { var t = Backend.result; if (Backend.swap() && t !== "") { src.many = t; soon.restart() } }
+    function copyTranslation() { if (Backend.result !== "") { out.selectAll(); out.copy(); out.deselect() } }
+    function languages() { sheet = "packs"; Backend.lookForPacks() }
+    function clearText() { src.many = ""; src.focusIn() }
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong) } }
     Timer { id: soon; interval: 650; onTriggered: Backend.translate(src.many) }
     Component.onCompleted: { if (typeof demo !== "undefined" && demo) src.many = "Good morning. The coffee is ready, and the snow has settled over the fjord."; src.focusIn() }

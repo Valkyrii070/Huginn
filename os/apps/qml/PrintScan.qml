@@ -6,6 +6,7 @@ GlassWindow {
     title: "Print & Scan"; width: 940; height: 640; glow: "top"
     readonly property color pick: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.18)
     property string tab: Backend.file !== "" || Backend.scanners.length === 0 ? "print" : "print"
+    function setTab(t) { tab = t === "scan" ? "scan" : "print" }
     property string printer: ""
     property string scanner: ""
     property int copies: 1

@@ -10,6 +10,11 @@ GlassWindow {
     property string why: ""
     function open(kind, extra) { why = ""; var s = extra || {}; s.kind = kind; sheet = s }
     function done(result) { if (result === "") { sheet = null; why = "" } else why = result }
+    // the top bar's menu
+    function setView(v) { Backend.setView(v) }
+    function importStatement() { open("import", { files: Backend.statementChoices(), account: Backend.accounts.length ? Backend.accounts[0].id : "" }) }
+    function addPayment() { open(Backend.accounts.length ? "cash" : "account") }
+    function addAccount() { open("account") }
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong) } }
     DropArea { anchors.fill: parent; onDropped: function (d) { if (d.hasUrls) Backend.importFile(d.urls[0], Backend.accounts.length ? Backend.accounts[0].id : "") } }
 

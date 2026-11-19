@@ -8,6 +8,8 @@ GlassWindow {
     title: "Screen Sharing"; width: 1040; height: 700; minimumWidth: 860; minimumHeight: 600; glow: "centre"
     property string why: ""
     property bool full: false
+    function startSharing() { if (!win.on && Backend.canShare) Backend.start() }
+    function stopSharing() { if (win.on) Backend.stop() }
     readonly property bool on: Backend.sharing
     Connections { target: Backend; function onSaid(msg, wrong) { toast.say(msg, wrong) } }
 

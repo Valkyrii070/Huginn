@@ -6,6 +6,8 @@ GlassWindow {
     title: "Archives"; heading: Backend.isOpen ? Backend.name : ""; glow: "bottom"; sidebarWidth: 240; padTop: 60; padBottom: 66
     property string picked: ""
     property string notice: ""
+    function extractAll() { Backend.extract("") }
+    function showFolder() { if (Backend.lastFolder !== "") Backend.showFolder() }
     Connections { target: Backend; function onFailed(msg) { win.notice = msg; hide.restart() } function onChanged() { win.picked = "" } }
     Timer { id: hide; interval: 7000; onTriggered: win.notice = "" }
     sidebar: [

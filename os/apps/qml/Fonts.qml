@@ -7,6 +7,7 @@ GlassWindow {
     id: win
     title: "Fonts"; width: 1100; height: 760; minimumWidth: 780; minimumHeight: 540; glow: "top"
     property var sheet: null
+    function addFonts() { sheet = { kind: "files", list: Backend.fileChoices() } }
     property string why: ""
     readonly property color paper: Theme.t.dark ? "#211D18" : "#FBF7EF"
     readonly property color ink: Theme.t.dark ? "#F2EADF" : "#2A2118"

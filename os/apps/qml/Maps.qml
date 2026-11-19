@@ -6,6 +6,8 @@ GlassWindow {
     title: "Maps"; width: 1060; height: 700; glow: "none"
     readonly property color pick: Qt.rgba(tintColor.r, tintColor.g, tintColor.b, 0.18)
     readonly property bool routing: !!Backend.origin.name || !!Backend.goal.name
+    function find() { finder.focusIn() }
+    function flipUnits() { Backend.flipUnits() }
     readonly property var pane: mapLoader.item
     readonly property var pins: { var p = [], i; for (i = 0; i < Backend.saved.length; i++) p.push({ lat: Backend.saved[i].lat, lon: Backend.saved[i].lon, name: Backend.saved[i].name, detail: Backend.saved[i].detail, kind: "kept" })
         for (i = 0; i < Backend.results.length; i++) p.push({ lat: Backend.results[i].lat, lon: Backend.results[i].lon, name: Backend.results[i].name, detail: Backend.results[i].detail, kind: "found" })
