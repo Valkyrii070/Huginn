@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mail
+Comment=Read and send email
+Exec=python3 /usr/share/huginn-apps/huginn_app.py mail %u
+Icon=huginn-mail
+Categories=Network;Email;
+MimeType=x-scheme-handler/mailto;
+StartupWMClass=huginn-mail

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Clips
+Comment=Edit video: tracks, colour, titles, sound and transitions
+GenericName=Video Editor
+Keywords=video;editor;nle;final cut;premiere;kdenlive;shotcut;movie;
+Exec=python3 /usr/share/huginn-apps/huginn_app.py clips %f
+Icon=huginn-clips
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/webm;video/x-matroska;video/quicktime;video/x-msvideo;application/x-mlt;
+StartupWMClass=huginn-clips

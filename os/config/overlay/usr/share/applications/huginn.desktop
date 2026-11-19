@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Huginn
+GenericName=Web Browser
+Comment=A quiet, private browser
+Exec=huginn %U
+Icon=huginn
+Terminal=false
+StartupNotify=true
+StartupWMClass=huginn
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+Keywords=browser;web;internet;private;
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=huginn
+
+[Desktop Action new-private-window]
+Name=New Private Window
+Exec=huginn --private-window

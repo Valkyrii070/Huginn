@@ -1,0 +1,9 @@
+#!/bin/sh
+# The installation drive signs you in by itself (casper writes SDDM's [Autologin]); casper picks Plasma's session
+# when it's installed, so this points it at Huginn's before the sign-in screen starts.
+conf=/etc/sddm.conf
+[ -f "$conf" ] || exit 0
+if grep -q '^\[Autologin\]' "$conf"; then
+    sed -i -e '/^\[Autologin\]/,/^\[/ s/^Session=.*/Session=huginn.desktop/' "$conf"
+    grep -q '^Session=huginn.desktop' "$conf" || sed -i '/^\[Autologin\]/a Session=huginn.desktop' "$conf"
+fi

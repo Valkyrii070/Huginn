@@ -1,0 +1,27 @@
+diff --git a/src/server/event.rs b/src/server/event.rs
+index acf51d9..914fea0 100644
+--- a/src/server/event.rs
++++ b/src/server/event.rs
+@@ -1005,7 +1005,8 @@ impl Event for client::wl_touch::Event {
+ pub(super) struct OnOutput(pub Entity);
+ struct OutputName(String);
+ fn get_output_name(output: Option<&OnOutput>, world: &World) -> Option<String> {
+-    output.map(|o| world.get::<&OutputName>(o.0).unwrap().0.clone())
++    // wl_output before version 4 (Qt's compositor) has no names
++    output.and_then(|o| world.get::<&OutputName>(o.0).ok().map(|n| n.0.clone()))
+ }
+ 
+ #[derive(Copy, Clone, PartialEq, Debug)]
+diff --git a/src/server/mod.rs b/src/server/mod.rs
+index a436331..b6d9871 100644
+--- a/src/server/mod.rs
++++ b/src/server/mod.rs
+@@ -509,7 +509,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
+         let qh = queue.handle();
+ 
+         let xdg_wm_base = global_list
+-            .bind::<XdgWmBase, _, _>(&qh, 2..=6, ())
++            .bind::<XdgWmBase, _, _>(&qh, 1..=6, ())
+             .expect("Could not bind xdg_wm_base");
+ 
+         if xdg_wm_base.version() < 3 {

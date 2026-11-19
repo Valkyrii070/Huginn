@@ -1,0 +1,33 @@
+# Scan: (SANE, which talks to scanners, is in 45.) Tesseract reads the text (English, plus the languages most used
+# in Europe; more are one package away: tesseract-ocr-<language>); OpenCV finds a page's corners in a photo.
+tesseract-ocr
+tesseract-ocr-eng
+tesseract-ocr-deu
+tesseract-ocr-fra
+tesseract-ocr-spa
+tesseract-ocr-ita
+tesseract-ocr-nor
+python3-opencv
+# Machines: QEMU with KVM, its disk tools, UEFI firmware (with Secure Boot) and a software TPM for Windows 11.
+qemu-system-x86
+qemu-utils
+ovmf
+swtpm
+swtpm-tools
+# Tempo: FluidSynth renders the General MIDI instruments from a sound font; numpy (already in) and SciPy's filters
+# do the rest (the effects, the mixer's EQ and compressor run through scipy.signal.lfilter).
+python3-scipy
+fluidsynth
+fluid-soundfont-gm
+# Tempo's plugins (LV2, hosted through lilv: apps/huginn_tempo_lv2.py): LSP's studio effects, Calf's (and its
+# synth and organ), x42's, Dragonfly's reverbs, AVL's sampled drum kits and setBfree's tonewheel organ.
+# (ZAM's are left out: 165 MB for effects these already cover.)
+python3-lilv
+# LV2's own descriptions (what a reverb, an instrument, an analyser is): Ubuntu has them only in lv2-dev (1 MB).
+lv2-dev
+lsp-plugins-lv2
+calf-plugins
+x42-plugins
+dragonfly-reverb-lv2
+avldrums.lv2
+setbfree

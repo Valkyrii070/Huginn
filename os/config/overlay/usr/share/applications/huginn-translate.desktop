@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Translate
+Comment=Translate text on this computer, offline
+Exec=python3 /usr/share/huginn-apps/huginn_app.py translate 
+Icon=huginn-translate
+Categories=Utility;
+StartupWMClass=huginn-translate

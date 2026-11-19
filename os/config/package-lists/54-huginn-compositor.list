@@ -1,0 +1,24 @@
+# Huginn's own pieces that replaced KDE's:
+#  - Open and Save windows (apps/huginn_portal.py) through the desktop portal
+#  - Huginn's own compositor (compositor/, built on Smithay; the "own compositor" session at the sign-in screen):
+#    what it needs at run time (the build installs Rust and the headers only while building it, then takes them out)
+#  - the earlier preview compositor in Python (shell/huginn_compositor.py + qml/Compositor.qml), still there for
+#    `huginn_shell.py --compositor` until the Rust one takes over everywhere
+xdg-desktop-portal
+# screen sharing and recording for apps on Huginn's own compositor (PipeWire, through the portal)
+xdg-desktop-portal-wlr
+# the on-screen keyboard there (input-method-v2; KWin's session uses Plasma's)
+squeekboard
+libseat1
+libinput10
+libdisplay-info3
+libgbm1
+libxkbcommon0
+libpixman-1-0
+qml6-module-qtwayland-compositor
+qml6-module-qtquick-effects
+qml6-module-qtcore
+xwayland
+# xrdb: X11 apps told to draw at the screens' scale (Xft.dpi)
+x11-xserver-utils
+libxcb-cursor0

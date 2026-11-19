@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Fonts
+Comment=See, try and install typefaces
+Exec=python3 /usr/share/huginn-apps/huginn_app.py fonts %f
+Icon=huginn-fonts
+Categories=Graphics;Utility;
+MimeType=font/ttf;font/otf;font/collection;font/woff;font/woff2;application/x-font-ttf;application/x-font-otf;application/vnd.ms-opentype;
+StartupWMClass=huginn-fonts

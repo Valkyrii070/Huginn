@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Authenticator
+Comment=Two-factor sign-in codes, kept in your vault
+Exec=python3 /usr/share/huginn-apps/huginn_app.py authenticator
+Icon=huginn-authenticator
+Categories=Utility;Security;
+StartupWMClass=huginn-authenticator

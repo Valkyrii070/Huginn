@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Notes
+Comment=Write and keep plain-text notes
+Exec=python3 /usr/share/huginn-apps/huginn_app.py notes %f
+Icon=huginn-notes
+Categories=Utility;TextEditor;
+StartupWMClass=huginn-notes
+MimeType=text/plain;text/markdown;

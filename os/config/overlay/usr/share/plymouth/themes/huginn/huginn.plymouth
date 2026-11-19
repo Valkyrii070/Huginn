@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Huginn
+Description=Huginn OS's boot screen: the realm's scene, soft and dark, the mark, a thin line of the realm's light as it starts, and a glass pill when a disk needs its password.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/huginn
+ScriptFile=/usr/share/plymouth/themes/huginn/huginn.script

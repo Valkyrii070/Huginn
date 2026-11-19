@@ -1,0 +1,4 @@
+# Games: the performance overlay and GameMode switches in a game's profile.
+# Steam and Wine are not in the image (Steam needs Ubuntu's multiverse and 32-bit packages); see "Games" in the README.
+mangohud
+gamemode

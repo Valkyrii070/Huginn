@@ -1,0 +1,16 @@
+# Huginn Shell: our own desktop shell (Python host + QML) on KWin
+layer-shell-qt
+qml6-module-org-kde-layershell
+qml6-module-qtquick
+qml6-module-qtquick-window
+qml6-module-qtquick-layouts
+qml6-module-qtquick-effects
+qml6-module-qtquick-shapes
+qml6-module-qtqml-workerscript
+qml6-module-org-kde-networkmanager
+qml6-module-org-kde-bluezqt
+python3-pyside6.qtcore
+python3-pyside6.qtgui
+python3-pyside6.qtqml
+python3-pyside6.qtquick
+python3-pyside6.qtdbus

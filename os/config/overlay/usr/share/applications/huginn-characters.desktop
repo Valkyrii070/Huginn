@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Characters
+Comment=Every emoji and symbol, found by name
+Exec=python3 /usr/share/huginn-apps/huginn_app.py characters
+Icon=huginn-characters
+Categories=Utility;
+Keywords=emoji;symbol;unicode;special characters;
+StartupWMClass=huginn-characters

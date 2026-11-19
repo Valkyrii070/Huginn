@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sheets
+Comment=Tables, sums and budgets
+Exec=python3 /usr/share/huginn-apps/huginn_app.py sheets %f
+Icon=huginn-sheets
+Categories=Office;Spreadsheet;
+StartupWMClass=huginn-sheets
+MimeType=text/csv;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.oasis.opendocument.spreadsheet;application/vnd.ms-excel;

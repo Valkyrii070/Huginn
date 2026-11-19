@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Exec=huginn-terminal
+Icon=huginn-terminal
+X-KDE-Shortcuts=Ctrl+Alt+T

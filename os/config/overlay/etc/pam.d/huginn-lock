@@ -1,0 +1,3 @@
+# Huginn's lock screen in its own compositor's session: the person's own password (KDE's locker has its own file, kde).
+@include common-auth
+@include common-account

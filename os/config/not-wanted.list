@@ -1,0 +1,29 @@
+# Packages Huginn OS has its own app for. If a dependency ever pulls one in, the build takes it out again
+# (and stops if that would take anything we asked for with it).
+ark
+dolphin
+gwenview
+kate
+kde-spectacle
+konsole
+okular
+systemsettings
+calamares
+polkit-kde-agent-1
+sddm-theme-breeze
+plymouth-theme-spinner
+# Plasma's background services: Huginn's session daemon does their work (notifications, power and idle, keys and
+# levels, Wi‑Fi secrets, Bluetooth pairing)
+plasma-nm
+plasma-pa
+powerdevil
+bluedevil
+# KWin and Plasma's workspace: Huginn's own compositor draws the desktop and the sign-in screen
+kwin-wayland
+kwin-x11
+kwin-common
+plasma-workspace
+plasma-session-wayland
+kscreen
+# Papirus: replaced by Huginn's own icon theme (2026-11-19)
+papirus-icon-theme

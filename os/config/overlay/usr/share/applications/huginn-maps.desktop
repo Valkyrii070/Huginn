@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Maps
+Comment=Find places and directions
+Exec=python3 /usr/share/huginn-apps/huginn_app.py maps %u
+Icon=huginn-maps
+Categories=Utility;Maps;
+MimeType=x-scheme-handler/geo;
+StartupWMClass=huginn-maps

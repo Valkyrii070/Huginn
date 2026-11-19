@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Games
+Comment=Your games from Steam, Epic, GOG and Amazon, and your own
+Exec=python3 /usr/share/huginn-apps/huginn_app.py games %f
+Icon=huginn-games
+Categories=Game;
+MimeType=application/x-ms-dos-executable;application/vnd.microsoft.portable-executable;application/x-msdownload;
+StartupWMClass=huginn-games

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Screenshot
+Comment=Take a picture of your screen and mark it up
+Exec=python3 /usr/share/huginn-apps/huginn_app.py screenshot 
+Icon=huginn-screenshot
+Categories=Utility;Graphics;
+StartupWMClass=huginn-screenshot

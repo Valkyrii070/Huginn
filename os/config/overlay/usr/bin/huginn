@@ -1,0 +1,32 @@
+#!/usr/bin/python3
+# Starts Huginn, the browser, from /usr/share/huginn with the system's Python and Qt WebEngine.
+#
+# This must stay a Python script run through its "#!" line, not a shell script that starts python3:
+# Ubuntu only lets a program build the browser engine's sandbox (unprivileged user namespaces) when
+# AppArmor has a profile for it, and /etc/apparmor.d/huginn is attached to this file's path. Started
+# any other way, the engine stops at once with "credentials.cc: Check failed: Permission denied".
+# Imported rather than run as a script, so Python uses its compiled copy and starts sooner.
+import os
+import sys
+
+
+def _date(folder):
+    """The "date:" line of a copy's SOURCE file ("" if it has none)."""
+    try:
+        with open(os.path.join(folder, "SOURCE"), encoding="utf-8") as f:
+            return next((l.split(":", 1)[1].strip() for l in f if l.startswith("date:")), "")
+    except OSError:
+        return ""
+
+
+# Software Update may have fetched a newer Huginn into your home folder (no password needed, and the previous copy
+# is kept for "Go Back"). Start whichever copy is newer; HUGINN_SYSTEM_BROWSER=1 always starts the system's.
+_mine = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "huginn-os", "browser", "current")
+_home = "/usr/share/huginn"
+if not os.environ.get("HUGINN_SYSTEM_BROWSER") and os.path.isfile(os.path.join(_mine, "safari_browser.py")) and _date(_mine) > _date(_home):
+    _home = os.path.realpath(_mine)
+sys.path.insert(0, _home)
+sys.argv[0] = "huginn"
+import safari_browser  # noqa: E402
+
+sys.exit(safari_browser.main())

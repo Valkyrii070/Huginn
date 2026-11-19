@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Browse your folders and files
+Exec=python3 /usr/share/huginn-apps/huginn_app.py files %f
+Icon=huginn-files
+Categories=System;FileManager;
+StartupWMClass=huginn-files
+MimeType=inode/directory;

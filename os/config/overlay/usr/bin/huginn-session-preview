@@ -1,0 +1,4 @@
+#!/bin/sh
+# The own-compositor preview session is now Huginn OS's session (huginn-session); this name is kept for anyone
+# who still starts it by hand.
+exec /usr/bin/huginn-session "$@"

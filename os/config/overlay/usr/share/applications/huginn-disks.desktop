@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Disks
+Comment=See, erase and rename drives
+Exec=python3 /usr/share/huginn-apps/huginn_app.py disks 
+Icon=huginn-disks
+Categories=Utility;System;
+StartupWMClass=huginn-disks

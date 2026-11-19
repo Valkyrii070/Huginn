@@ -1,0 +1,11 @@
+# Code: Git and project search, and the Python language server (completions, problems, go-to-definition).
+# Other languages' servers (clangd, rust-analyzer, gopls, typescript-language-server…) are used when installed.
+git
+ripgrep
+python3-pylsp
+python3-pyflakes
+# Format Document and formatting when saving, for Python (pylsp hands it to autopep8).
+python3-autopep8
+# Debugging: debugpy for Python, GDB (14 and later speak the Debug Adapter Protocol) for C, C++, Rust and Go.
+python3-debugpy
+gdb

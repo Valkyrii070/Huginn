@@ -1,0 +1,7 @@
+// The live system only (the installer deletes this file from the system it installs): the live user may run the
+// installer's engine without a password, the way the live session has no password at all.
+polkit.addRule(function (action, subject) {
+    if (action.id === "org.huginn.installer" && subject.user === "huginn" && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

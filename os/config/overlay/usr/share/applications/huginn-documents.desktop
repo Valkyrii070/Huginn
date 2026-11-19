@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Documents
+Comment=Read PDFs, and edit text and code files
+Exec=python3 /usr/share/huginn-apps/huginn_app.py documents %f
+Icon=huginn-documents
+Categories=Office;Viewer;TextEditor;
+StartupWMClass=huginn-documents
+MimeType=application/pdf;text/plain;text/x-python;application/x-shellscript;application/json;application/xml;application/x-yaml;application/toml;text/x-csrc;text/x-chdr;text/x-c++src;text/javascript;text/css;text/x-log;text/x-qml;application/x-desktop;

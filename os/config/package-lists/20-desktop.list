@@ -1,0 +1,47 @@
+# Display manager. The compositor is Huginn's own (54-huginn-compositor.list), for the desktop and for the sign-in
+# screen alike: KWin and Plasma are no longer in the image (config/not-wanted.list).
+sddm
+xwayland
+xdg-desktop-portal-kde
+xdg-user-dirs
+# Once brought in by Plasma's workspace, still used: KDE's look and file dialogs for Qt apps (QT_QPA_PLATFORMTHEME=kde),
+# location for Weather and Maps (the Privacy settings), screen makers' names in Displays.
+plasma-integration
+geoclue-2.0
+hwdata
+# Shell services. Notifications, power, the hardware keys, Wi‑Fi passwords and Bluetooth pairing are Huginn's own
+# session daemon (apps/huginn_sessiond.py); Plasma's (plasma-nm, plasma-pa, powerdevil, bluedevil) are not-wanted.
+kde-cli-tools
+kio-extras
+libnotify-bin
+wireplumber
+bluez
+upower
+# Theming
+breeze
+breeze-gtk-theme
+kde-config-gtk-style
+qt6-style-kvantum
+qt-style-kvantum-themes
+# Icons: Huginn's own theme (scripts/make-icons.py, in the overlay), with Breeze's underneath for anything it doesn't draw
+breeze-icon-theme
+fonts-inter-variable
+fonts-jetbrains-mono
+fonts-noto-core
+fonts-noto-color-emoji
+# Native apps (deliberately few)
+udisks2
+ffmpeg
+gvfs-backends
+gvfs-fuse
+avahi-utils
+# App delivery (no snapd): Flatpak, driven by the Huginn App Store
+flatpak
+# Huginn runtime (Phase 2 replaces this with the huginn .deb)
+python3
+python3-pyqt6
+python3-pyqt6.qtwebengine
+# Installer
+# Huginn's password prompt (apps/huginn_polkit.py) speaks to polkit through its own GObject bindings
+gir1.2-polkit-1.0
+pkexec

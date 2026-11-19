@@ -1,0 +1,33 @@
+# Boot, live session and hardware
+linux-generic
+linux-firmware
+casper
+systemd-sysv
+systemd-resolved
+systemd-timesyncd
+dbus-user-session
+sudo
+locales
+ca-certificates
+network-manager
+iw
+wpasupplicant
+bluez
+fwupd
+apparmor
+ufw
+plymouth
+plymouth-label        # text on Huginn's own boot screen (its theme is in the overlay)
+grub-efi-amd64-signed
+shim-signed
+grub-pc-bin
+# Audio / video
+pipewire
+pipewire-pulse
+wireplumber
+# CLI basics
+bash-completion
+nano
+less
+curl
+zstd

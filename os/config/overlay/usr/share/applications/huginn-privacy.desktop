@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Privacy Report
+Comment=Who used your camera, microphone, screen and location, and what went online
+Exec=python3 /usr/share/huginn-apps/huginn_app.py privacy
+Icon=huginn-privacy
+Categories=System;Security;
+StartupWMClass=huginn-privacy

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Welcome
+Comment=A short tour of Huginn OS
+Exec=python3 /usr/share/huginn-apps/huginn_app.py welcome 
+Icon=huginn-welcome
+Categories=Utility;
+StartupWMClass=huginn-welcome

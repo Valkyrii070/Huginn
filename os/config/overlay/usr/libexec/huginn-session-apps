@@ -1,0 +1,49 @@
+#!/bin/sh
+# Runs inside KWin: start the session services, then the shell. The session ends when the shell exits.
+# With --services (Huginn's own compositor starts it once it's listening): the services only, since the shell is
+# drawn inside the compositor.
+dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_MENU_PREFIX QT_QPA_PLATFORM \
+    QT_QPA_PLATFORMTHEME PLASMA_INTEGRATION_USE_PORTAL GTK_USE_PORTAL GDK_DEBUG
+# Desktop, Documents, Downloads, Pictures… in the home folder (and in the user's language), as other desktops make
+# them from their autostart folder, which this session doesn't run.
+command -v xdg-user-dirs-update >/dev/null && xdg-user-dirs-update
+# Huginn's own password prompt answers polkit (installing software, changing the time, pkexec…).
+python3 /usr/share/huginn-apps/huginn_polkit.py &
+# Huginn's session daemon: notifications, Settings › Battery & Power (dim, screen off, lock, sleep, the lid, the power
+# button, the battery), the volume, brightness and media keys with their level, Wi‑Fi passwords and Bluetooth pairing.
+python3 /usr/share/huginn-apps/huginn_sessiond.py &
+# Started from the installation drive: the installer opens (it can be closed to try Huginn OS, and is in the dock).
+# The Welcome tour is the shell's: it shows itself once, at the first sign-in (after the installer, on the drive).
+if [ -f /cdrom/casper/filesystem.squashfs ] && [ -x /usr/libexec/huginn-install-engine ]; then
+    (sleep 2; python3 /usr/share/huginn-apps/huginn_app.py installer) &
+fi
+# Mail keeps an eye on the inbox without a window (it leaves at once if there is no account or you turned that off).
+(sleep 6; python3 /usr/share/huginn-apps/huginn_app.py mail --background) &
+# Messages the same way, when you're signed in and keep it on.
+(sleep 8; python3 /usr/share/huginn-apps/huginn_app.py messages --background) &
+# Shortcuts' watcher (times, logins, drives, phones, Wi-Fi, battery) and Privacy Report's notebook. Each leaves at once
+# if another copy is already running. Both are light: they look every few seconds and sleep in between.
+(sleep 10; python3 /usr/share/huginn-apps/huginn_shortcuts.py agent) &
+(sleep 12; python3 /usr/share/huginn-apps/huginn_privacy.py watch) &
+# Software Update looks for updates every few hours (and, with automatic updates on, puts them in).
+python3 /usr/share/huginn-apps/huginn_updates.py watch &
+# Online Accounts keeps calendars and contacts in step with Google, Microsoft, iCloud and Nextcloud.
+(sleep 20; python3 /usr/share/huginn-apps/huginn_accounts.py watch) &
+if [ "$1" = "--services" ]; then
+    wait
+else
+    # The shell, started again if it stops on its own (a crash): the desktop carries on, windows and all. Five
+    # times in a minute and it's left stopped (the compositor then ends the session). Signing out ends everything.
+    tries=0 since=$(date +%s)
+    while :; do
+        python3 /usr/share/huginn-shell/huginn_shell.py
+        code=$?
+        [ "$code" -eq 0 ] && exit 0
+        now=$(date +%s)
+        if [ $((now - since)) -gt 60 ]; then tries=0 since=$now; fi
+        tries=$((tries + 1))
+        [ "$tries" -gt 5 ] && exit "$code"
+        echo "huginn-session: the shell stopped ($code); starting it again" >&2
+        sleep 1
+    done
+fi

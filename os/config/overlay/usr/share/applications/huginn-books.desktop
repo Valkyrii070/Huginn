@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Books
+Comment=Your ebooks, and where you left off
+Exec=python3 /usr/share/huginn-apps/huginn_app.py books %f
+Icon=huginn-books
+Categories=Office;Viewer;
+MimeType=application/epub+zip;
+StartupWMClass=huginn-books

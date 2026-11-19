@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=App Store
+Comment=Find, install and remove apps
+Exec=python3 /usr/share/huginn-apps/huginn_app.py store
+Icon=huginn-store
+Categories=System;PackageManager;
+StartupWMClass=huginn-store

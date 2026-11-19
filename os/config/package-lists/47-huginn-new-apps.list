@@ -1,0 +1,17 @@
+# The eleventh round of apps: what each leans on.
+# Authenticator: reading QR codes from a screenshot or picture
+zbar-tools
+# Messages: Matrix, with end-to-end encryption
+python3-matrix-nio
+python3-olm
+# Screen Sharing: KDE's RDP server (sharing this screen) and FreeRDP's viewer (seeing another one)
+krdp
+freerdp-sdl
+# Privacy Report: who has the camera, microphone and screen (pw-dump), who went online (ss), location in use (busctl)
+pipewire-bin
+iproute2
+systemd
+# Fonts: listing and installing (fc-list, fc-query, fc-cache)
+fontconfig
+# Characters: Unicode's own emoji list; a bundled copy is used when it's missing
+unicode-data

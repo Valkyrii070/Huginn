@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Print & Scan
+Comment=Printers, print jobs and scanning
+Exec=python3 /usr/share/huginn-apps/huginn_app.py print 
+Icon=huginn-print
+Categories=Utility;
+StartupWMClass=huginn-print

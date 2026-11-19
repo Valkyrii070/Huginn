@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Clock
+Comment=World clock, stopwatch and timer
+Exec=python3 /usr/share/huginn-apps/huginn_app.py clock 
+Icon=huginn-clock
+Categories=Utility;Clock;
+StartupWMClass=huginn-clock

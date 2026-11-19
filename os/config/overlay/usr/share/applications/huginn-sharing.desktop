@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Screen Sharing
+Comment=Let someone see this screen, or see another computer's
+Exec=python3 /usr/share/huginn-apps/huginn_app.py sharing
+Icon=huginn-sharing
+Categories=Network;RemoteAccess;
+Keywords=remote desktop;rdp;remote help;vnc;
+StartupWMClass=huginn-sharing

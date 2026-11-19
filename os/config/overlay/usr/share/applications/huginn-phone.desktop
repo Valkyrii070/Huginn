@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Phone
+Comment=Your phone and this computer, working together
+Exec=python3 /usr/share/huginn-apps/huginn_app.py phone 
+Icon=huginn-phone
+Categories=Utility;
+StartupWMClass=huginn-phone

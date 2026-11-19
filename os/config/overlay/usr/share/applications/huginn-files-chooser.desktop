@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Open and Save
+Comment=Part of Huginn OS (not started on its own)
+Exec=true
+NoDisplay=true

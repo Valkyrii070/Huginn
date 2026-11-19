@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Reminders
+Comment=Things to do, and when
+Exec=python3 /usr/share/huginn-apps/huginn_app.py reminders 
+Icon=huginn-reminders
+Categories=Utility;
+StartupWMClass=huginn-reminders

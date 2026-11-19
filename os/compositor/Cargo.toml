@@ -1,0 +1,72 @@
+[package]
+name = "huginn-compositor"
+version = "0.1.0"
+edition = "2024"
+description = "Huginn OS's own Wayland compositor, built on Smithay (started from Smithay's example compositor, Anvil)"
+# Huginn's own parts are under Huginn's licence (LICENSE.md at the top of the repository); the parts that come from
+# Smithay's example compositor keep Smithay's MIT licence (LICENSE-Smithay.txt).
+publish = false
+
+[dependencies]
+bitflags = "2.2.1"
+image = { version = "0.25.1", default-features = false, optional = true, features = ["png"] }
+tracing = { version = "0.1.37", features = ["max_level_trace", "release_max_level_debug"] }
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+thiserror = "1"
+xcursor = { version = "0.3.3", optional = true }
+xkbcommon = "0.8.0"
+profiling = { version = "1.0" }
+serde_json = "1"
+serde = "1"
+libc = "0.2"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+ab_glyph = "0.2"
+
+# Smithay's main branch, pinned (its last release, 0.7.0, is from June 2025)
+# Smithay at fd8e3f50, vendored with Huginn OS's patch for tearing page flips (third_party/smithay)
+[dependencies.smithay]
+path = "../third_party/smithay"
+default-features = false
+features = ["desktop", "wayland_frontend"]
+
+[dependencies.smithay-drm-extras]
+path = "../third_party/smithay/smithay-drm-extras"
+optional = true
+
+[dependencies.x11rb]
+default-features = false
+features = ["composite"]
+optional = true
+version = "0.14.0"
+
+[features]
+default = ["egl", "winit", "udev", "xwayland"]
+egl = ["smithay/use_system_lib", "smithay/backend_egl"]
+udev = [
+  "smithay-drm-extras",
+  "smithay/backend_libinput",
+  "smithay/backend_udev",
+  "smithay/backend_drm",
+  "smithay/backend_gbm",
+  "smithay/backend_vulkan",
+  "smithay/backend_egl",
+  "smithay/backend_session_libseat",
+  "image",
+  "smithay/renderer_gl",
+  "smithay/renderer_pixman",
+  "smithay/renderer_multi",
+  "xcursor",
+]
+winit = ["smithay/backend_winit", "smithay/backend_drm"]
+xwayland = ["smithay/xwayland", "x11rb", "smithay/x11rb_event_source", "xcursor"]
+renderer_sync = []
+
+[profile.release]
+# Function names stay in (a crash's backtrace names them); the rest of the debugging information doesn't (it's 80 MB).
+debug = false
+strip = "debuginfo"
+lto = "thin"
+
+[lints.rust]
+# The example compositor this started from has blocks for a "debug" build (an FPS counter, RenderDoc) not kept here.
+unexpected_cfgs = "allow"

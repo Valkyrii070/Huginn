@@ -1,0 +1,16 @@
+[SddmGreeterTheme]
+Name=Huginn
+Description=Huginn OS's own sign-in screen: the realm's live wallpaper, a quiet clock, and one frosted island for you and your password.
+Author=Huginn OS
+Copyright=Huginn OS
+License=GPL-3.0-or-later
+Type=sddm-theme
+Version=1.0
+Website=https://github.com/Valkyrii070/Huginn
+Screenshot=preview.png
+MainScript=Main.qml
+ConfigFile=theme.conf
+TranslationsDirectory=translations
+Theme-Id=huginn
+Theme-API=2.0
+QtVersion=6

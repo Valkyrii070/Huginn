@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Feeds
+Comment=News from the sites you follow, laid out like a morning paper
+Exec=python3 /usr/share/huginn-apps/huginn_app.py feeds %u
+Icon=huginn-feeds
+Categories=Network;News;Feed;
+MimeType=x-scheme-handler/feed;application/rss+xml;application/atom+xml;application/feed+json;
+StartupWMClass=huginn-feeds

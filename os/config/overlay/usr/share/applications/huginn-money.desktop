@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Money
+Comment=See where your money goes, from your bank's statement files
+Exec=python3 /usr/share/huginn-apps/huginn_app.py money %f
+Icon=huginn-money
+Categories=Office;Finance;
+MimeType=application/x-ofx;application/vnd.intu.qfx;application/x-qfx;
+StartupWMClass=huginn-money

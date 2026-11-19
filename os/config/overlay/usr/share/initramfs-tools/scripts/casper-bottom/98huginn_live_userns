@@ -1,0 +1,24 @@
+#!/bin/sh
+# Live session only. A live boot does not load AppArmor profiles, but Ubuntu still blocks unprivileged
+# user namespaces for anything without one, so Huginn's browser engine and Flatpak apps could not build
+# their sandboxes. Ubuntu's own live images lift the block for the live session in the same way.
+# An installed system is not touched: there /etc/apparmor.d/huginn is loaded and the block stays on.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+    prereqs) prereqs; exit 0 ;;
+esac
+mkdir -p /root/etc/sysctl.d
+cat > /root/etc/sysctl.d/20-apparmor.conf <<CONF
+# Written at boot by the live session (casper). Not present on an installed system.
+kernel.apparmor_restrict_unprivileged_userns = 0
+CONF
+
+# The live user has no password, so an idle lock would leave people at an unlock prompt.
+mkdir -p /root/etc/xdg
+cat > /root/etc/xdg/kscreenlockerrc <<CONF
+[Daemon]
+Autolock=false
+LockOnResume=false
+CONF
+exit 0

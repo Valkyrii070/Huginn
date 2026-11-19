@@ -24647,14 +24647,27 @@ class BrowserWindow(QWidget):
         return bool(mark) and self.settings.value("welcomeInstall", "", type=str) != mark
 
     def first_run_welcome(self) -> bool:
-        """Opens the tour by itself when it's due (More Tools > Welcome Tour brings it back any time)."""
+        """Opens the tour by itself when it's due (More Tools > Welcome Tour brings it back any time).
+
+        It counts as shown once it has been on screen a moment, not when it's asked for: a first start that ends
+        before the tour appears (Huginn restarting itself to finish setting up, say) leaves it due for the next."""
         if not self.welcome_due():
             return False
-        self.settings.setValue("welcomeShown", True)
+        view = self.show_welcome()
         mark = fresh_install_mark()
-        if mark:
-            self.settings.setValue("welcomeInstall", mark)
-        self.show_welcome()
+
+        def seen(ok: bool = True) -> None:
+            if not ok:
+                return
+            def remember() -> None:
+                self.settings.setValue("welcomeShown", True)
+                if mark:
+                    self.settings.setValue("welcomeInstall", mark)
+            QTimer.singleShot(1500, remember)
+        try:
+            view.loadFinished.connect(seen)
+        except (AttributeError, RuntimeError):
+            seen()
         return True
 
     def show_welcome(self, *_) -> "WebView":
