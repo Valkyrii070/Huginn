@@ -777,27 +777,62 @@ DEFAULT_REALM = "aurora"
 # How the window itself is drawn. "classic" is the realm's gradient with white pills on it. "islands" is the
 # Huginn OS look: a plain glass frame lit from below in the realm's colour, the toolbar groups, the tabs and the
 # page floating on it as islands, and the open tab picked out in the accent. Purely a matter of taste: every
-# feature works the same in both, and Classic stays the default.
+# feature works the same in both. Classic is the default, except on Huginn OS itself, where the browser starts in
+# Islands like every other app there (and follows the desktop's light or dark and its realm until you choose your own).
 LOOKS = {"classic": "Classic", "islands": "Islands"}
+ISLANDS_TINT = 0.11          # how much of the accent is in the glass, and how bright the light under it is at its
+ISLANDS_GLOW = (0.40, 0.26)  # brightest (dark, light): Huginn OS's numbers for its own apps (its tokens.json, app_glass)
 
 
 def islands_look(theme: dict) -> None:
-    """Turn a built theme into the islands look, in place."""
+    """Turn a built theme into the islands look, in place: the same glass Huginn OS's own apps are made of."""
     dark, a = theme["dark"], QColor(theme["accent"])
-    glass = "#0E1115" if dark else "#EDF0F4"
+    base = QColor("#111417" if dark else "#F6F7F9")     # the desktop's app glass, tinted a little with the accent
+    glass = QColor(round(a.red() * ISLANDS_TINT + base.red() * (1 - ISLANDS_TINT)), round(a.green() * ISLANDS_TINT + base.green() * (1 - ISLANDS_TINT)),
+                   round(a.blue() * ISLANDS_TINT + base.blue() * (1 - ISLANDS_TINT))).name()
     rgba = lambda alpha: f"rgba({a.red()}, {a.green()}, {a.blue()}, {alpha})"      # noqa: E731
     theme.update({
         "tint_a": glass, "tint_b": glass, "chrome": glass, "frame": glass,
-        "capsule": "rgba(255, 255, 255, 17)" if dark else "rgba(255, 255, 255, 238)",
-        "capsule_border": "rgba(255, 255, 255, 36)" if dark else "rgba(20, 30, 40, 44)",
+        "capsule": "rgba(26, 30, 35, 209)" if dark else "rgba(255, 255, 255, 224)",
+        "capsule_border": "rgba(255, 255, 255, 33)" if dark else "rgba(20, 30, 40, 41)",
         "capsule_shadow": "rgba(0, 0, 0, 90)" if dark else "rgba(20, 40, 60, 40)",
-        "track": "rgba(255, 255, 255, 9)" if dark else "rgba(20, 30, 40, 13)",
+        "track": "rgba(255, 255, 255, 15)" if dark else "rgba(255, 255, 255, 166)",
         "tab_active": rgba(64 if dark else 44), "tab_border": rgba(170 if dark else 150),
         "tab_hover": "rgba(255, 255, 255, 16)" if dark else "rgba(255, 255, 255, 190)",
         "tab_text": "#B9C1CA" if dark else "#2E343B",
-        "card_border": rgba(80 if dark else 70), "card_shadow": "rgba(0, 0, 0, 130)" if dark else "rgba(20, 40, 60, 46)",
+        "card_border": "rgba(255, 255, 255, 33)" if dark else "rgba(20, 30, 40, 41)",
+        "card_shadow": "rgba(0, 0, 0, 130)" if dark else "rgba(20, 40, 60, 46)",
         "segment_bg": "rgba(255, 255, 255, 12)" if dark else "rgba(20, 30, 40, 22)",
     })
+
+
+def on_huginn_desktop() -> bool:
+    """True in a Huginn OS session (its own desktop, or its compositor run by hand)."""
+    return IS_LINUX and ("huginn" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower() or bool(os.environ.get("HUGINN_COMPOSITOR")))
+
+
+def desktop_settings_file() -> str:
+    """Where Huginn OS's desktop keeps what's chosen in its Settings (light or dark, the realm)."""
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "huginn-shell", "settings.json")
+
+
+def desktop_look() -> dict:
+    """What the Huginn OS desktop is wearing: {"dark": bool, "realm": str}, each only if it says so. {} anywhere else."""
+    if not on_huginn_desktop():
+        return {}
+    try:
+        with open(desktop_settings_file(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    found = {}
+    if str(data.get("dark", "")).lower() in ("true", "false"):
+        found["dark"] = str(data["dark"]).lower() == "true"
+    if data.get("realm") in REALMS:
+        found["realm"] = data["realm"]
+    return found
 
 
 def build_theme(dark: bool, realm: str, look: str = "classic") -> dict:
@@ -12103,6 +12138,12 @@ def start_page_colours(theme: dict) -> dict:
     """The Start Page's background and mountains. In dark mode they're the theme's own; in
     light mode the page takes a breath of the realm: a wash of the frame's tint at the top
     fading to a tinted white, and mountains in the accent colour (not grey)."""
+    if theme.get("look") == "islands":                 # the window's own glass carries on into the page, lit from below
+        accent = QColor(theme["accent"])
+        rgb = f"{accent.red()}, {accent.green()}, {accent.blue()}"
+        strength = (0.20, 0.10) if theme["dark"] else (0.16, 0.085)
+        return {"bg": theme["tint_a"], "bg_top": theme["tint_a"],
+                "ridge_a": f"rgba({rgb}, {strength[0]})", "ridge_b": f"rgba({rgb}, {strength[1]})"}
     if theme["dark"]:
         return {"bg": theme["start_bg"], "bg_top": theme["start_bg"],
                 "ridge_a": theme["ridge_a"], "ridge_b": theme["ridge_b"]}
@@ -13950,13 +13991,14 @@ class ChromeFrame(QWidget):
                 offset = widget.mapTo(self, QPoint(0, 0))
             except RuntimeError:
                 pass
-        if self.theme.get("look") == "islands":       # plain glass, lit from below the window in the accent
+        if self.theme.get("look") == "islands":       # the desktop's app glass, lit from below the window in the accent
             base, glow, dark = qc(self.theme["tint_a"]), qc(self.theme["accent"]), self.theme["dark"]
             mix = lambda t: QColor.fromRgbF(base.redF() + (glow.redF() - base.redF()) * t, base.greenF() + (glow.greenF() - base.greenF()) * t,      # noqa: E731
                                             base.blueF() + (glow.blueF() - base.blueF()) * t)
-            light = QRadialGradient(QPointF(self.width() * 0.5 - offset.x(), self.height() * 1.1 - offset.y()), max(self.width(), self.height()) * 0.8)
-            light.setColorAt(0.0, mix(0.40 if dark else 0.34))
-            light.setColorAt(0.5, mix(0.13 if dark else 0.12))
+            peak = ISLANDS_GLOW[0 if dark else 1]
+            light = QRadialGradient(QPointF(self.width() * 0.5 - offset.x(), self.height() * 1.1 - offset.y()), max(self.width() * 0.48, self.height() * 0.8))
+            light.setColorAt(0.0, mix(peak))
+            light.setColorAt(0.55, mix(peak * 0.28))
             light.setColorAt(1.0, base)
             return QBrush(light)
         gradient = QLinearGradient(QPointF(-offset.x(), -offset.y()),
@@ -20900,10 +20942,11 @@ class BrowserWindow(QWidget):
         self.theme = LIGHT_THEME
         self.tab_style = SafariTabStyle()
         self.appearance = str(self.settings.value("appearance", "system"))
-        self.look = str(self.settings.value("look", "classic"))
+        home_look = "islands" if on_huginn_desktop() else "classic"     # on Huginn OS: dressed like its other apps
+        self.look = str(self.settings.value("look", home_look))
         if self.look not in LOOKS:
-            self.look = "classic"
-        self.realm = str(self.settings.value("realm", DEFAULT_REALM))
+            self.look = home_look
+        self.realm = str(self.settings.value("realm", desktop_look().get("realm", DEFAULT_REALM)))   # the desktop's, until one is picked here
         if self.realm not in REALMS:
             self.realm = DEFAULT_REALM
         self.always_show_tab_bar = self.settings.value("alwaysShowTabBar", False, type=bool)
@@ -20969,6 +21012,15 @@ class BrowserWindow(QWidget):
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):                     # Qt 6.5+
             hints.colorSchemeChanged.connect(self._on_system_color_scheme_changed)
+        if on_huginn_desktop():                                      # light or dark, or the realm, changed in the desktop's Settings
+            self._desk_timer = QTimer(self)
+            self._desk_timer.setSingleShot(True)
+            self._desk_timer.setInterval(200)
+            self._desk_timer.timeout.connect(self._on_desktop_look_changed)
+            self._desk_watch = QFileSystemWatcher(self)
+            self._watch_desktop_look()
+            self._desk_watch.fileChanged.connect(lambda *_: self._desk_timer.start())
+            self._desk_watch.directoryChanged.connect(lambda *_: self._desk_timer.start())
         apply_spellcheck(profile, self.spellcheck)
         self.apply_privacy_prefs()
         if app is not None:
@@ -21343,6 +21395,9 @@ class BrowserWindow(QWidget):
             service = self.weather_service()
             cache = service.cached() if service is not None else None
             return not is_daylight(cache.get("forecast") if cache else None, self.local_time())
+        desk = desktop_look()                          # Huginn OS: what its Settings say, straight from the desktop
+        if "dark" in desk:
+            return desk["dark"]
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorScheme"):
             scheme = hints.colorScheme()
@@ -21466,6 +21521,23 @@ class BrowserWindow(QWidget):
             window.realm = realm
             window.apply_theme()
         self._sync_welcome()
+
+    def _watch_desktop_look(self) -> None:
+        """Keep an eye on the desktop's settings file (and its folder: the file is replaced, not rewritten)."""
+        path = desktop_settings_file()
+        for wanted in (path, os.path.dirname(path)):
+            if os.path.exists(wanted) and wanted not in self._desk_watch.files() + self._desk_watch.directories():
+                self._desk_watch.addPath(wanted)
+
+    def _on_desktop_look_changed(self) -> None:
+        self._watch_desktop_look()
+        realm = desktop_look().get("realm")
+        if realm and realm != self.realm and not self.settings.contains("realm"):    # no realm chosen here: wear the desktop's
+            self.realm = realm
+            self.apply_theme()
+            self._sync_welcome()
+        elif self.appearance == "system" and self._effective_dark() != self.theme["dark"]:
+            self.apply_theme()
 
     def _on_system_color_scheme_changed(self, *_) -> None:
         # Windows sends this on many unrelated setting changes; restyling the whole window
@@ -28086,6 +28158,120 @@ class DesktopService(QDBusVirtualObject):
         window.activateWindow()
 
 
+APP_MENU_PATH = "/org/huginn/App"
+APP_MENU_INTERFACE = "org.huginn.App"
+
+
+class DesktopMenuService(QDBusVirtualObject):
+    """Huginn OS's top bar keeps one menu under the name of the app in front, and asks that app what goes in it:
+    it calls org.huginn.App.p<pid> (/org/huginn/App): Menus() answers with the menus as JSON, Trigger(id) does one.
+    Huginn answers with the same File, Edit, View, History, Bookmarks, Window and Help it gives a Mac's menu bar.
+    Nothing is sent anywhere: the desktop asks, on this computer's own session bus."""
+
+    def __init__(self, window: "BrowserWindow") -> None:
+        super().__init__(window)
+        self.window = window
+        self.bus = QDBusConnection.sessionBus()
+        self.name = f"{APP_MENU_INTERFACE}.p{os.getpid()}"
+        self.registered = False
+        self.bar: QMenuBar | None = None
+        self.actions: dict[str, QAction] = {}
+
+    def start(self) -> bool:
+        if self.registered or not self.bus.isConnected():
+            return self.registered
+        if not self.bus.registerVirtualObject(APP_MENU_PATH, self, QDBusConnection.VirtualObjectRegisterOption.SingleNode):
+            return False
+        self.registered = self.bus.registerService(self.name)
+        return self.registered
+
+    def _source(self) -> QMenuBar:
+        if self.bar is None:
+            self.bar = self.window.global_menu_bar
+        if self.bar is None:                         # a bar nobody sees: only its menus are read
+            self.bar = self.window.build_mac_menu_bar(parent=self.window, mac=False)
+            self.bar.setNativeMenuBar(False)
+            self.bar.hide()
+        return self.bar
+
+    def _rows(self, menu: QMenu, where: str) -> list:
+        rows: list = []
+        for n, action in enumerate(menu.actions()):
+            if not action.isVisible():
+                continue
+            if action.isSeparator():
+                if rows and not rows[-1].get("sep"):
+                    rows.append({"sep": True})
+                continue
+            key, label = f"m:{where}.{n}", action.text().replace("&", "")
+            if action.isCheckable() and action.isChecked():
+                label = "\u2713 " + label
+            sub = action.menu()
+            if sub is not None:
+                sub.aboutToShow.emit()               # History and Bookmarks fill themselves in as they open
+                children = self._rows(sub, f"{where}.{n}")
+                if children:
+                    rows.append({"label": label, "id": "", "keys": "", "enabled": True, "children": children})
+                continue
+            self.actions[key] = action
+            rows.append({"label": label, "id": key, "enabled": action.isEnabled(),
+                         "keys": action.shortcut().toString(QKeySequence.SequenceFormat.PortableText)})
+        while rows and rows[-1].get("sep"):
+            rows.pop()
+        return rows
+
+    def menus(self) -> dict:
+        self.actions = {}
+        groups, own = [], []
+        for n, head in enumerate(self._source().actions()):
+            menu = head.menu()
+            if menu is None:
+                continue
+            menu.aboutToShow.emit()
+            name, rows = head.text().replace("&", ""), self._rows(menu, str(n))
+            if name == BROWSER_NAME:
+                own = [r for r in rows if not r.get("sep")]
+            elif rows:
+                if name == "Window":
+                    rows += [{"sep": True}, {"label": "Keep on Top", "id": "shell:ontop", "keys": "Super+Ctrl+T", "enabled": True}]
+                groups.append({"name": name, "items": rows})
+        quits = [r for r in own if r["label"].startswith("Quit")]
+        return {"app": BROWSER_NAME, "key": "browser", "settings": True, "groups": groups,
+                "top": [r for r in own if r not in quits],
+                "bottom": [{"label": "Minimise", "id": "shell:minimise", "keys": "", "enabled": True},
+                           {"label": "Close window", "id": "shell:close", "keys": "", "enabled": True}] + quits}
+
+    def trigger(self, key: str) -> None:
+        action = self.actions.get(key)
+        if action is None:
+            return
+        try:
+            if action.isEnabled():
+                action.trigger()
+        except RuntimeError:                         # its menu was rebuilt since the bar read it
+            pass
+
+    def introspect(self, path: str) -> str:
+        return (f'<interface name="{APP_MENU_INTERFACE}"><method name="Menus"><arg name="json" type="s" direction="out"/></method>'
+                '<method name="Trigger"><arg name="id" type="s" direction="in"/></method></interface>')
+
+    def handleMessage(self, message, connection) -> bool:
+        if message.interface() not in ("", APP_MENU_INTERFACE):
+            return False
+        if message.member() == "Menus":
+            try:
+                text = json.dumps(self.menus())
+            except Exception as err:  # noqa: BLE001: never leave the bar waiting
+                print("menus:", err, file=sys.stderr)
+                text = "{}"
+            return _dbus_reply(message, connection, text)
+        if message.member() == "Trigger":
+            key = str((message.arguments() or [""])[0])
+            QTimer.singleShot(150, self, partial(self.trigger, key))     # once the bar's menu has closed and the window is in front again
+            return _dbus_reply(message, connection)
+        return False
+
+
 def start_desktop_services(window: BrowserWindow) -> None:
     """Linux: the media controls (MPRIS) always; Huginn OS's hooks when that switch is on."""
     set_media_session_script(window.profile)
@@ -28095,6 +28281,9 @@ def start_desktop_services(window: BrowserWindow) -> None:
     window.desktop_service = DesktopService(window)
     if window.prefs.get("shareWithDesktop"):
         window.desktop_service.start()
+    if on_huginn_desktop():                           # its top bar's menu, under Huginn's name
+        window.desktop_menu = DesktopMenuService(window)
+        QTimer.singleShot(0, window.desktop_menu.start)
 
 
 def create_app_window(main: BrowserWindow, app: dict) -> BrowserWindow:
