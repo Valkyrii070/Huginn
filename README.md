@@ -33,6 +33,13 @@ instead of bringing its own, so the package is under 1 MB, plays H.264, and gets
 updates. On Linux, Huginn's menus appear in a global menu bar where the desktop has one, and settings sheets
 open inside the window (Wayland included). See *Huginn on Linux* in [README.txt](README.txt).
 
+**On Huginn OS** the browser dresses like the desktop's own apps. It starts in the Islands window look, made of the
+same glass (their tint, light and island colours); with Appearance on *System* it follows the desktop's light or
+dark, and until a realm is picked in the browser it wears the desktop's, both changing as you change them in the
+desktop's Settings, and pages are told the same (a site's dark side, the "can't be reached" page). The toolbar's
+groups are the size and shape of the desktop's islands. Its menus are in the top bar's menu under its name. Anything you choose in the browser's own
+Settings still wins, and Classic is one click away (Settings > Appearance > Window Look).
+
 The Windows installer has one optional switch, **Build H.264 video support**, off by default. Huginn's standard
 engine plays YouTube (VP9/AV1), but Twitch, Reddit, X and many news sites use H.264. With the switch on, Huginn
 compiles its own engine with H.264 and AAC in the background after install. That takes a few hours at low
