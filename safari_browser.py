@@ -139,6 +139,31 @@ SEARCH_URL = "https://www.google.com/search?q={}"
 
 TOOLBAR_HEIGHT = 50
 CAPSULE_HEIGHT = 32
+ISLAND_HEIGHT = 40           # the Islands look: toolbar groups the size and shape of Huginn OS's own apps' islands,
+ISLAND_RADIUS = 16           # 12 from the window's edge
+ISLAND_TOOLBAR_HEIGHT = 64
+
+
+def capsule_height(theme: dict | None) -> int:
+    return ISLAND_HEIGHT if theme and theme.get("look") == "islands" else CAPSULE_HEIGHT
+
+
+def toolbar_height(theme: dict | None) -> int:
+    return ISLAND_TOOLBAR_HEIGHT if theme and theme.get("look") == "islands" else TOOLBAR_HEIGHT
+
+
+def capsule_radius(theme: dict | None, height: float) -> float:
+    """A pill in Classic; in Islands a rounded island (a pill again once it is too low for that)."""
+    return min(ISLAND_RADIUS, height / 2) if theme and theme.get("look") == "islands" else height / 2
+
+
+def toolbar_bottom(window) -> int:
+    """How far down a window its toolbar ends."""
+    bar = getattr(window, "toolbar", None)
+    try:
+        return bar.height() if bar is not None else TOOLBAR_HEIGHT
+    except RuntimeError:
+        return TOOLBAR_HEIGHT
 TAB_TRACK_HEIGHT = 30                     # the rounded tab strip
 TAB_ROW_HEIGHT = TAB_TRACK_HEIGHT + 7     # strip + gap above the page
 TAB_SIDE_INSET = 10
@@ -887,6 +912,7 @@ QLineEdit#AddressEdit {
 
 /* ---------- tab strip (tabs are painted by SafariTabStyle) ---------- */
 QTabBar QToolButton { background: transparent; border: none; }
+QTabBar::tear { width: 0px; border: none; image: none; }   /* (the jagged white edge Qt draws where tabs run off the strip) */
 QToolButton#TabClose { background: transparent; border: none; border-radius: 9px; padding: 0px; }
 QToolButton#TabClose:hover { background: $pressed; }
 
@@ -1152,7 +1178,7 @@ def _cached_pixmap(key: tuple, width: float, height: float, dpr: float, draw) ->
 
 def _draw_capsule(p: QPainter, rect: QRectF, theme: dict) -> QRectF:
     body = rect.adjusted(0.5, 0.5, -0.5, -1.5)
-    radius = body.height() / 2
+    radius = capsule_radius(theme, body.height())
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(qc(theme["capsule_shadow"]))
     p.drawRoundedRect(body.translated(0, 1.0), radius, radius)
@@ -1168,7 +1194,7 @@ def paint_capsule(p: QPainter, rect: QRectF, theme: dict) -> QRectF:
     if p.transform().isScaling() or p.transform().isRotating():
         return _draw_capsule(p, rect, theme)
     dpr = _paint_dpr(p)
-    key = ("capsule", round(rect.width(), 2), round(rect.height(), 2), dpr,
+    key = ("capsule", round(rect.width(), 2), round(rect.height(), 2), dpr, theme.get("look"),
            theme["capsule_shadow"], theme["capsule"], theme["capsule_border"])
     local = QRectF(0, 0, rect.width(), rect.height())
     pixmap = _cached_pixmap(key, rect.width(), rect.height(), dpr, lambda q: _draw_capsule(q, local, theme))
@@ -13013,7 +13039,7 @@ class TrafficLights(QWidget):
         """Islands look: close, minimise and zoom sit together in a pill, like every other toolbar group."""
         self._pill = theme
         wide = 3 * self.DIAMETER + 2 * self.GAP + 2
-        self.setFixedSize(wide + (2 * self.PAD if theme else 0), CAPSULE_HEIGHT if theme else self.DIAMETER + 8)
+        self.setFixedSize(wide + (2 * self.PAD if theme else 0), capsule_height(theme) if theme else self.DIAMETER + 8)
         self.update()
 
     def set_window_active(self, active: bool) -> None:
@@ -13146,7 +13172,7 @@ class WindowButtons(QWidget):
     def set_theme(self, theme: dict) -> None:
         self.theme = theme
         pill = theme.get("look") == "islands"     # Islands look: the three share a pill
-        self.setFixedSize(3 * self.BUTTON.width() + 2 * self.GAP + (8 if pill else 0), CAPSULE_HEIGHT if pill else self.BUTTON.height())
+        self.setFixedSize(3 * self.BUTTON.width() + 2 * self.GAP + (8 if pill else 0), capsule_height(theme) if pill else self.BUTTON.height())
         self.update()
 
     def set_dark(self, dark: bool) -> None:               # TrafficLights' API; colours come from the theme
@@ -13206,7 +13232,8 @@ class WindowButtons(QWidget):
         for i in range(3):
             rect = self._rect(i)
             if pill:
-                rect = rect.adjusted(0, 2, 0, -3)
+                inset = (rect.height() - (CAPSULE_HEIGHT - 5)) / 2      # the highlight stays the size it is in a pill
+                rect = rect.adjusted(0, inset, 0, -inset - 1)
             lit = self._hover == i or self._pressed == i
             glyph = qc(t["icon"] if self._active else t["text_tertiary"])
             if lit:
@@ -13284,6 +13311,9 @@ class Capsule(QWidget):
 
     def set_theme(self, theme: dict) -> None:
         self.theme = theme
+        pad = (capsule_height(theme) - (CAPSULE_HEIGHT - 4)) // 2      # the buttons keep their size; the island grows round them
+        self.layout().setContentsMargins(pad, pad, pad, pad)
+        self.setFixedHeight(capsule_height(theme))
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -13441,6 +13471,7 @@ class AddressField(QWidget):
     # -- appearance -------------------------------------------------------------------------
     def set_style(self, icons: IconFactory, theme: dict) -> None:
         self._icons, self._theme = icons, theme
+        self.setFixedHeight(capsule_height(theme))
         self._update_buttons()
         self.update()
 
@@ -13550,12 +13581,12 @@ class AddressField(QWidget):
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         body = paint_capsule(p, QRectF(self.rect()), self._theme)
-        radius = body.height() / 2
+        radius = capsule_radius(self._theme, body.height())
         if self.edit.hasFocus():
             ring = body.adjusted(1.2, 1.2, -1.2, -1.2)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(qc(self._theme["focus_ring"]), 2.4))
-            p.drawRoundedRect(ring, ring.height() / 2, ring.height() / 2)
+            p.drawRoundedRect(ring, max(1.0, radius - 1.2), max(1.0, radius - 1.2))
         if self._opacity > 0.01 and self._progress > 0:
             clip = QPainterPath()
             clip.addRoundedRect(body, radius, radius)
@@ -14307,6 +14338,8 @@ class Sidebar(QWidget):
         store.historyChanged.connect(self._history_changed)
 
     def show_page(self, index: int) -> None:
+        if self._group.button(index) is None:          # no such section
+            return
         self._group.button(index).setChecked(True)
         self.stack.setCurrentIndex(index)
         self.search.show()
@@ -16189,6 +16222,9 @@ class Toolbar(QWidget):
                 button.setIcon(icons.icon(name))
         for capsule in self.capsules:
             capsule.set_theme(theme)
+        self.setFixedHeight(toolbar_height(theme))
+        edge = 12 if theme.get("look") == "islands" else 16            # Islands: 12 from the window's edge, as the desktop's apps
+        self.layout().setContentsMargins(edge, 0, 12, 0)
         self.downloads_ring.color, self.downloads_ring.track = theme["accent"], theme["divider"]
         self.downloads_ring.update()
         self.lights.set_dark(theme["dark"])
@@ -16517,7 +16553,7 @@ def fit_sheet(dialog: QWidget, again: bool = True) -> None:
 
 
 def _centre_in_window(dialog: QWidget, window: QWidget) -> None:
-    top = TOOLBAR_HEIGHT + 6
+    top = toolbar_bottom(window) + 6
     dialog.setMaximumHeight(max(160, window.height() - top - 14))
     if dialog.height() > dialog.maximumHeight():
         dialog.resize(dialog.width(), dialog.maximumHeight())
@@ -16557,7 +16593,7 @@ def place_sheet(dialog: QWidget, window: QWidget) -> None:
         dialog.raise_()
         QTimer.singleShot(0, dialog, partial(_focus_sheet, dialog))
         return
-    anchor = window.mapToGlobal(QPoint(window.width() // 2, TOOLBAR_HEIGHT + 6))
+    anchor = window.mapToGlobal(QPoint(window.width() // 2, toolbar_bottom(window) + 6))
     dialog.move(anchor.x() - dialog.width() // 2, anchor.y())
     if IS_WIN11:
         hwnd = int(dialog.winId())                    # native window, still hidden
@@ -17355,7 +17391,7 @@ class PrivacySettingsDialog(QDialog):
         scroll.setWidget(page)
         width = 540 - 40
         wanted = max(page.heightForWidth(width) if page.hasHeightForWidth() else 0, page.sizeHint().height())
-        available = max(300, window.height() - TOOLBAR_HEIGHT - 170)      # title, Done and margins
+        available = max(300, window.height() - toolbar_bottom(window) - 170)      # title, Done and margins
         scroll.setFixedHeight(min(max(wanted, page.minimumSizeHint().height()), available))
         self.settings_scroll = scroll
         self.stack.addWidget(scroll)
@@ -20413,7 +20449,7 @@ class CommandBar(QWidget):
         self.setFixedWidth(self.WIDTH)
         self.adjustSize()
         parent = self.parentWidget()
-        self.move((parent.width() - self.width()) // 2, TOOLBAR_HEIGHT - 4)
+        self.move((parent.width() - self.width()) // 2, toolbar_bottom(parent.window()) - 4)
 
     def activate(self, row: int) -> None:
         if 0 <= row < len(self.list.items):
@@ -21431,6 +21467,13 @@ class BrowserWindow(QWidget):
         theme = self._resolve_theme()
         self.theme = theme
         app = QApplication.instance()
+        if on_huginn_desktop():
+            # Huginn OS: pages are told light or dark as the browser itself is (the desktop's, unless one is chosen
+            # here), so "can't be reached" and sites with a dark side aren't white in a dark window. Qt 6.8+.
+            hints = QGuiApplication.styleHints()
+            wanted = Qt.ColorScheme.Dark if theme["dark"] else Qt.ColorScheme.Light
+            if hasattr(hints, "setColorScheme") and hints.colorScheme() != wanted:
+                hints.setColorScheme(wanted)             # (_on_system_color_scheme_changed then tells the open pages)
         qss = QSS_TEMPLATE.substitute(theme)
         if app.styleSheet() != qss:                     # app-wide: every window after the first has nothing to do
             app.setPalette(build_palette(theme))
@@ -21540,6 +21583,9 @@ class BrowserWindow(QWidget):
             self.apply_theme()
 
     def _on_system_color_scheme_changed(self, *_) -> None:
+        if on_huginn_desktop():                          # pages already open hear it when their settings are next sent
+            for view in self.all_views() + ([self.split.view] if self.split.view else []):
+                self._apply_dark(view)
         # Windows sends this on many unrelated setting changes; restyling the whole window
         # (and redrawing Start Pages) only when light/dark really changed avoids a flicker.
         if self.appearance == "system" and self._effective_dark() != self.theme["dark"]:
@@ -27261,6 +27307,8 @@ class BrowserWindow(QWidget):
 
     def show_app_menu(self) -> None:
         app, view = self.app, self.current_view()
+        if app is None:                                # only a web app's window has this menu
+            return
         sec = self.theme["text_secondary"]
         menu = prepare_menu(QMenu(self))
         self._add_action(menu, "Back", self.go_back, view is not None and view.history().canGoBack())
@@ -27592,12 +27640,23 @@ def create_application(argv: list[str]) -> QApplication:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{ORG_NAME}.{APP_NAME}")
         except Exception:
             pass
+    if on_huginn_desktop():
+        # Qt's plain Linux theme only hears the desktop say "dark" when that changes, never at the start, so pages
+        # were told "light" on a dark desktop ("can't be reached" in white, sites' dark sides unused). Its GNOME
+        # theme asks the desktop's portal as it starts, and can be told (apply_theme does). Nothing else of it shows:
+        # the font, style and palette are set below.
+        borrowed_theme = "QT_QPA_PLATFORMTHEME" not in os.environ
+        os.environ.setdefault("QT_QPA_PLATFORMTHEME", "gnome")
+    else:
+        borrowed_theme = False
     register_start_scheme()
     dictionaries = os.path.join(APP_DIR, DICTIONARIES_DIR)
     if os.path.isdir(dictionaries):                     # read by WebEngine when it starts
         os.environ.setdefault("QTWEBENGINE_DICTIONARIES_PATH", dictionaries)
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = HuginnApplication(argv)
+    if borrowed_theme:                                   # read by now; programs Huginn starts later mustn't inherit it
+        os.environ.pop("QT_QPA_PLATFORMTHEME", None)
     # Huginn.app's launcher sets CFProcessPath so macOS treats this Python as Huginn.app. macOS
     # has read it by now; the page processes started later mustn't think they're Huginn too.
     os.environ.pop("CFProcessPath", None)
@@ -28232,8 +28291,14 @@ class DesktopMenuService(QDBusVirtualObject):
             if name == BROWSER_NAME:
                 own = [r for r in rows if not r.get("sep")]
             elif rows:
-                if name == "Window":
-                    rows += [{"sep": True}, {"label": "Keep on Top", "id": "shell:ontop", "keys": "Super+Ctrl+T", "enabled": True}]
+                if name == "Window":                 # the desktop's own words and order: Minimise, Zoom, ..., Keep on Top
+                    zoom = next((r for r in rows if r.get("label") in ("Maximize", "Zoom")), None)
+                    rows = [r for r in rows if r.get("label") not in ("Minimize", "Maximize", "Zoom")]
+                    while rows and rows[0].get("sep"):
+                        rows.pop(0)
+                    rows = ([{"label": "Minimise", "id": "shell:minimise", "keys": "Super+Down", "enabled": True}]
+                            + ([dict(zoom, label="Zoom", keys="Super+Up")] if zoom else []) + [{"sep": True}] + rows
+                            + [{"sep": True}, {"label": "Keep on Top", "id": "shell:ontop", "keys": "Super+Ctrl+T", "enabled": True}])
                 groups.append({"name": name, "items": rows})
         quits = [r for r in own if r["label"].startswith("Quit")]
         return {"app": BROWSER_NAME, "key": "browser", "settings": True, "groups": groups,
