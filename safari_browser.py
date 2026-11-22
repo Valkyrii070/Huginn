@@ -20657,6 +20657,73 @@ class TabManager(QDialog):
         self.refresh()
 
 
+class InspectorWindow(QWidget):
+    """Huginn OS: the Web Inspector in a window of the desktop's own kind (glass, the three lights in an island, no
+    title bar) rather than the plain frame Qt draws for itself there. Drag it by its top; resize from the corner."""
+
+    def __init__(self, browser: "BrowserWindow") -> None:
+        super().__init__(browser, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.browser = browser
+        self.setObjectName("Inspector")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowTitle("Web Inspector")
+        self.setMinimumSize(480, 300)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 0, 1, 1)
+        layout.setSpacing(0)
+        self.bar = QWidget()
+        self.bar.setObjectName("InspectorBar")
+        h = QHBoxLayout(self.bar)
+        h.setContentsMargins(12, 0, 12, 0)
+        h.setSpacing(12)
+        self.lights = TrafficLights()
+        self.title = QLabel("Web Inspector")
+        self.title.setObjectName("RowSubtitle")
+        h.addWidget(self.lights)
+        h.addWidget(self.title, 1)
+        layout.addWidget(self.bar)
+        self.view = QWebEngineView()
+        layout.addWidget(self.view, 1)
+        self._grip = QSizeGrip(self)
+        self._grip.setFixedSize(14, 14)
+        self.lights.closeClicked.connect(self.close)
+        self.lights.minimizeClicked.connect(self.showMinimized)
+        self.lights.zoomClicked.connect(self._zoom)
+        self.resize(1000, 640)
+        self.set_theme(browser.theme)
+
+    def page(self) -> QWebEnginePage:                     # (as the plain view this stands in for)
+        return self.view.page()
+
+    def set_theme(self, theme: dict) -> None:
+        islands = theme.get("look") == "islands"
+        self.bar.setFixedHeight(toolbar_height(theme) - 8)
+        self.lights.set_dark(theme["dark"])
+        self.lights.set_pill(theme if islands else None)
+        self.setStyleSheet(f"QWidget#Inspector {{ background: {theme['chrome']}; border: 1px solid {theme['capsule_border']}; }}"
+                           f"QWidget#InspectorBar {{ background: transparent; }}")
+
+    def _zoom(self) -> None:
+        self.showNormal() if self.isMaximized() else self.showMaximized()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._grip.move(self.width() - self._grip.width(), self.height() - self._grip.height())
+        self._grip.raise_()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.bar.geometry().contains(event.position().toPoint()):
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.startSystemMove()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self.bar.geometry().contains(event.position().toPoint()):
+            self._zoom()
+        super().mouseDoubleClickEvent(event)
+
+
 class PopOutPlayer(QWidget):
     """A small player that stays on top of other windows: the video from a tab, playing on
     while you do something else. Drag it by its top bar; resize it from the corner."""
@@ -21001,7 +21068,7 @@ class BrowserWindow(QWidget):
         self._sleep_timer.timeout.connect(self.sleep_idle_tabs)
         self._sleep_timer.start()
         self.clock = time.monotonic                       # tests move time forward
-        self._inspector: QWebEngineView | None = None
+        self._inspector: QWidget | None = None
         self._qwindow: QWindow | None = None
         self._edge_cursor_active = False
         self._resize_drag: tuple | None = None            # (edges, start point, start geometry)
@@ -21484,6 +21551,8 @@ class BrowserWindow(QWidget):
         HuginnStyle.icon_source = self.icons
         self.chrome.set_theme(theme)
         self.toolbar.refresh_style(self.icons, theme)
+        if isinstance(getattr(self, "_inspector", None), InspectorWindow):
+            self._inspector.set_theme(theme)
         for view in self.views():                  # no white flash behind dark pages
             self._sync_page_background(view)
         self.tabs.bar.set_close_icon(self.icons.icon("close", theme["text_secondary"]))
@@ -26372,11 +26441,15 @@ class BrowserWindow(QWidget):
         view = self.current_view()
         if view is None:
             return
-        if self._inspector is None:
+        if self._inspector is None and on_huginn_desktop():
+            self._inspector = InspectorWindow(self)
+        elif self._inspector is None:
             self._inspector = QWebEngineView(self)
             self._inspector.setWindowFlag(Qt.WindowType.Window)
             self._inspector.setWindowTitle("Web Inspector")
             self._inspector.resize(1000, 640)
+        if isinstance(self._inspector, InspectorWindow):
+            self._inspector.set_theme(self.theme)
         view.page().setDevToolsPage(self._inspector.page())
         self._inspector.show()
         self._inspector.raise_()
@@ -27641,10 +27714,11 @@ def create_application(argv: list[str]) -> QApplication:
         except Exception:
             pass
     if on_huginn_desktop():
-        # Qt's plain Linux theme only hears the desktop say "dark" when that changes, never at the start, so pages
-        # were told "light" on a dark desktop ("can't be reached" in white, sites' dark sides unused). Its GNOME
-        # theme asks the desktop's portal as it starts, and can be told (apply_theme does). Nothing else of it shows:
-        # the font, style and palette are set below.
+        # Huginn OS's session names KDE's Qt theme, which knows the desktop's light or dark. Started some other way
+        # (its compositor run by hand, a session that names none), Qt falls back to its plain Linux theme, which
+        # never learns it: pages were told "light" in a dark window. There, borrow Qt's GNOME theme, which asks the
+        # desktop's portal as it starts and can be told (apply_theme does). Nothing else of it shows: the font,
+        # style and palette are set below.
         borrowed_theme = "QT_QPA_PLATFORMTHEME" not in os.environ
         os.environ.setdefault("QT_QPA_PLATFORMTHEME", "gnome")
     else:
