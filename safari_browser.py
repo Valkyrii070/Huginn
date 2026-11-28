@@ -139,6 +139,8 @@ SEARCH_URL = "https://www.google.com/search?q={}"
 
 TOOLBAR_HEIGHT = 50
 CAPSULE_HEIGHT = 32
+ISLAND_TAB_MIN, ISLAND_TAB_MAX = 88, 220      # Islands: a tab as wide as its title, between these,
+ISLAND_TAB_TRACK, ISLAND_TAB_SIDE = 24, 18      # and thinner than Classic's (30 high), with less room each side
 ISLAND_HEIGHT = 40           # the Islands look: toolbar groups the size and shape of Huginn OS's own apps' islands,
 ISLAND_RADIUS = 16           # 12 from the window's edge
 ISLAND_TOOLBAR_HEIGHT = 64
@@ -2081,6 +2083,7 @@ class IconFactory:
         "forward": '<path d="M9.5 5.5 L16 12 L9.5 18.5"/>',
         "sidebar": ('<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M9.5 5 V19"/>'
                     '<path d="M5.6 8.5 H7.3 M5.6 11 H7.3 M5.6 13.5 H7.3" stroke-width="1.3"/>'),
+        "split": '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M12 5 V19"/>',
         "chevron_down": '<path d="M6.5 9.5 L12 15 L17.5 9.5"/>',
         "chevron_up": '<path d="M6.5 14.5 L12 9 L17.5 14.5"/>',
         "share": ('<path d="M8.6 9.5 H7.4 A2 2 0 0 0 5.4 11.5 V18.7 A2 2 0 0 0 7.4 20.7 H16.6 '
@@ -13580,8 +13583,18 @@ class AddressField(QWidget):
     # -- painting -----------------------------------------------------------------------------
     def paintEvent(self, event) -> None:
         p = QPainter(self)
-        body = paint_capsule(p, QRectF(self.rect()), self._theme)
-        radius = capsule_radius(self._theme, body.height())
+        if getattr(self, "inner", False):                # Islands: a field inside the address's island, not a pill of its own
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            fill = qc(self._theme["text"])
+            fill.setAlphaF(0.07)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(body, body.height() / 2, body.height() / 2)
+            radius = body.height() / 2
+        else:
+            body = paint_capsule(p, QRectF(self.rect()), self._theme)
+            radius = capsule_radius(self._theme, body.height())
         if self.edit.hasFocus():
             ring = body.adjusted(1.2, 1.2, -1.2, -1.2)
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -13638,8 +13651,14 @@ class SafariTabStyle(QProxyStyle):
             if element == SE.SE_TabWidgetTabBar:
                 if not has_bar:
                     return QRect()
-                return QRect(r.left() + TAB_SIDE_INSET, r.top(), r.width() - 2 * TAB_SIDE_INSET, TAB_TRACK_HEIGHT)
-            top = TAB_ROW_HEIGHT if has_bar else 0
+                room = r.width() - 2 * TAB_SIDE_INSET
+                bar = widget.tabBar() if isinstance(widget, QTabWidget) else None
+                if self.theme.get("look") == "islands" and bar is not None and bar.count():
+                    wide = min(room, sum(bar.tabSizeHint(i).width() for i in range(bar.count())) + 4)
+                    return QRect(r.left() + (r.width() - wide) // 2, r.top(), wide, ISLAND_TAB_TRACK)   # an island of tabs, centred
+                return QRect(r.left() + TAB_SIDE_INSET, r.top(), room, TAB_TRACK_HEIGHT)
+            row = ISLAND_TAB_TRACK + 6 if self.theme.get("look") == "islands" else TAB_ROW_HEIGHT
+            top = row if has_bar else 0
             pane = QRect(r.left(), r.top() + top, r.width(), r.height() - top)
             if element == SE.SE_TabWidgetTabPane or not self.inset:
                 return pane
@@ -13721,7 +13740,7 @@ class SafariTabStyle(QProxyStyle):
             return
         # Favicon + title: centred when they fit, else left-aligned and elided (as Safari does).
         fm = QFontMetricsF(p.font())
-        icon_size, gap, side = 16.0, 6.0, 28.0
+        icon_size, gap, side = 16.0, 6.0, (float(ISLAND_TAB_SIDE) if t.get("look") == "islands" else 28.0)
         has_icon = not opt.icon.isNull()
         lead = (icon_size + gap) if has_icon else 0.0
         available = max(10.0, r.width() - 2 * side)
@@ -13796,14 +13815,20 @@ class SafariTabBar(QTabBar):
         self._pinned_memo: tuple = (None, 0)
 
     def tabSizeHint(self, index: int) -> QSize:
+        islands = self.tab_style.theme.get("look") == "islands"
         if self.is_pinned(index):
-            return QSize(self.PINNED_WIDTH, TAB_TRACK_HEIGHT)
+            return QSize(self.PINNED_WIDTH, ISLAND_TAB_TRACK if islands else TAB_TRACK_HEIGHT)
+        if islands:                                         # Islands: each tab as wide as its favicon and title, and thin
+            text = self.fontMetrics().horizontalAdvance(self.tabText(index))
+            return QSize(max(ISLAND_TAB_MIN, min(ISLAND_TAB_MAX, 16 + 6 + text + 2 * ISLAND_TAB_SIDE + 2)), ISLAND_TAB_TRACK)
         width = self.width() if self.width() > 0 else 800   # re-asked on every resize
         pinned = self.pinned_count()
         rest = max(1, self.count() - pinned)
         return QSize(max(TAB_MIN_WIDTH, (width - pinned * self.PINNED_WIDTH) // rest), TAB_TRACK_HEIGHT)
 
     def minimumTabSizeHint(self, index: int) -> QSize:
+        if self.tab_style.theme.get("look") == "islands":
+            return QSize(self.PINNED_WIDTH if self.is_pinned(index) else ISLAND_TAB_MIN, ISLAND_TAB_TRACK)
         return QSize(self.PINNED_WIDTH if self.is_pinned(index) else TAB_MIN_WIDTH, TAB_TRACK_HEIGHT)
 
     def tabRemoved(self, index: int) -> None:
@@ -13912,7 +13937,155 @@ class SafariTabBar(QTabBar):
         super().paintEvent(event)                           # tabs via SafariTabStyle
 
 
+class SplitSide(QWidget):
+    """One side of a split tab: the page, a ring in the accent round the side you're in, and a label in its corner
+    that closes this side."""
+
+    def __init__(self, view: "WebView", split: "SplitPage") -> None:
+        super().__init__(split)
+        self.view, self.split = view, split
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.addWidget(view)
+        view.show()                                  # (the tabs' stack hid it when it wasn't the tab in front)
+        self.label = QToolButton(self)
+        self.label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.label.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.label.setToolTip("Close this side")
+        self.label.setStyleSheet("QToolButton { background: rgba(17,20,23,0.80); color: #ECEFF3; border: none; border-radius: 13px;"
+                                 " padding: 4px 12px; font-size: 12px } QToolButton:hover { background: rgba(17,20,23,0.95) }")
+        self.label.clicked.connect(lambda *_: split.closeSide.emit(self.view))
+        view.titleChanged.connect(lambda *_: self.relabel())
+        self.relabel()
+
+    def relabel(self) -> None:
+        title = self.view.title() or self.view.url().host() or "New Tab"
+        self.label.setText(QFontMetrics(self.label.font()).elidedText(title, Qt.TextElideMode.ElideRight, 150) + "   \u00d7")
+        self.label.adjustSize()
+        self._place()
+
+    def _place(self) -> None:
+        self.label.move(self.width() - self.label.width() - 12, self.height() - self.label.height() - 12)
+        self.label.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place()
+
+    def paintEvent(self, event) -> None:
+        if self.split.focused is not self.view:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(qc(self.split.accent), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 10, 10)
+        p.end()
+
+
+class SplitPage(QWidget):
+    """A tab of two pages side by side (Islands' side by side). The side you're in is the tab's page as far as the
+    rest of the window is concerned: its address, back and forward, find, zoom. The divider moves."""
+    focusMoved = Signal(object)                    # this page: the side you're in changed
+    closeSide = Signal(object)                     # the view whose side's label was clicked
+
+    def __init__(self, left: "WebView", right: "WebView", accent: str) -> None:
+        super().__init__()
+        self.accent = accent
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.setHandleWidth(8)
+        self.splitter.setChildrenCollapsible(False)
+        self.sides = [SplitSide(left, self), SplitSide(right, self)]
+        for side in self.sides:
+            self.splitter.addWidget(side)
+        self.splitter.setSizes([600, 600])
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.splitter)
+        self.focused = left
+        QApplication.instance().focusChanged.connect(self._focus_changed)
+
+    @property
+    def views(self) -> list:
+        return [side.view for side in self.sides]
+
+    def other(self, view: "WebView") -> "WebView":
+        return self.views[1] if view is self.views[0] else self.views[0]
+
+    def set_focused(self, view: "WebView") -> None:
+        if view in self.views and view is not self.focused:
+            self.focused = view
+            for side in self.sides:
+                side.update()
+            self.focusMoved.emit(self)
+
+    def _focus_changed(self, _old, new) -> None:
+        if new is None:
+            return
+        for side in self.sides:
+            if new is side.view or side.view.isAncestorOf(new):
+                self.set_focused(side.view)
+                return
+
+    def release(self) -> list:
+        """The two pages taken out (for tabs of their own again); this page is left empty."""
+        try:
+            QApplication.instance().focusChanged.disconnect(self._focus_changed)
+        except (RuntimeError, TypeError):
+            pass
+        views = self.views
+        for view in views:
+            view.setParent(None)
+        return views
+
+
 class BrowserTabWidget(QTabWidget):
+    """Tabs, each a page; a tab of two pages side by side is a SplitPage, which widget() and currentWidget() answer
+    for with the side you're in (so everything that works on "the page" works on it), and indexOf() finds from
+    either side. page_at() is the tab itself."""
+
+    def page_at(self, index: int):
+        return super().widget(index)
+
+    def widget(self, index: int):
+        page = super().widget(index)
+        return page.focused if isinstance(page, SplitPage) else page
+
+    def currentWidget(self):
+        page = super().currentWidget()
+        return page.focused if isinstance(page, SplitPage) else page
+
+    def indexOf(self, widget) -> int:
+        index = super().indexOf(widget)
+        if index < 0 and widget is not None:
+            holder = widget.parentWidget()
+            while holder is not None and not isinstance(holder, SplitPage):
+                holder = holder.parentWidget()
+            if holder is not None:
+                index = super().indexOf(holder)
+        return index
+
+    def setTabText(self, index: int, text: str) -> None:
+        page = super().widget(index)
+        if isinstance(page, SplitPage):                 # both titles: "Fjord Weekly + Maps"
+            text = " + ".join((v.title() or v.url().host() or "New Tab")[:40] for v in page.views)
+        if text != self.tabText(index):
+            super().setTabText(index, text)
+            self._remeasure()
+
+    def _remeasure(self) -> None:
+        """Islands: the island of tabs is as wide as its tabs, so it's placed again when one comes, goes or is renamed."""
+        if self.tab_style.theme.get("look") == "islands":
+            QTimer.singleShot(0, self.relayout)
+
+    def tabInserted(self, index: int) -> None:
+        super().tabInserted(index)
+        self._remeasure()
+
+    def tabRemoved(self, index: int) -> None:
+        super().tabRemoved(index)
+        self._remeasure()
+
     def __init__(self, style: SafariTabStyle, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         styled(self, "Tabs")
@@ -16128,6 +16301,9 @@ class Toolbar(QWidget):
         self.forward_button = capsule_button("forward", f"Go forward ({FORWARD_KEY})")
         self.address = AddressField()
         self.share_button = capsule_button("share", "Share")
+        self.split_button = capsule_button("split", "Side by Side (Ctrl+Alt+S)")
+        self.split_button.setCheckable(True)
+        self.name_label = QLabel(BROWSER_NAME)            # Islands: the app's name beside the three, as Huginn OS's apps have
         self.new_tab_button = capsule_button("plus", "New Tab (Ctrl+T)")
         self.overview_button = capsule_button("tabs", "Show All Tabs (Ctrl+Shift+\\)")
         self.overview_button.setCheckable(True)
@@ -16189,6 +16365,84 @@ class Toolbar(QWidget):
         layout.addWidget(self.address)
         layout.addStretch(1)
         layout.addWidget(right)
+        # Islands (Huginn OS's look): three groups float apart, as in its own apps. The name and the three on the
+        # left (with the sidebar), back, forward and the address in the middle, side by side, share and a new tab
+        # on the right. Classic keeps Safari's arrangement. arrange() moves the same buttons between the two.
+        self.name_island = Capsule([])
+        self.nav_island = Capsule([])
+        self.act_island = Capsule([])
+        for island in (self.name_island, self.nav_island, self.act_island):
+            island.hide()
+        self.split_button.hide()
+        self.name_label.hide()
+        self._arranged = "classic"
+
+    @staticmethod
+    def _take(widget: QWidget) -> None:
+        holder = widget.parentWidget()
+        if holder is not None and holder.layout() is not None:
+            holder.layout().removeWidget(widget)
+
+    @staticmethod
+    def _fill(layout, items: list) -> None:
+        """A layout emptied (its widgets kept) and filled again: widgets, ("space", n) and "stretch"."""
+        while layout.count():
+            layout.takeAt(0)
+        for item in items:
+            if item == "stretch":
+                layout.addStretch(1)
+            elif isinstance(item, tuple):
+                layout.addSpacing(item[1])
+            else:
+                layout.addWidget(item)
+
+    def _hold(self, capsule: "Capsule", widgets: list, dividers: tuple = ()) -> None:
+        self._fill(capsule.layout(), widgets)
+        capsule.buttons, capsule.dividers = widgets, dividers
+
+    def arrange(self, look: str) -> None:
+        """Put the buttons in the groups of the look: "islands" or "classic"."""
+        islands = look == "islands"
+        if self._arranged == ("islands" if islands else "classic"):
+            return
+        self._arranged = "islands" if islands else "classic"
+        downloads = not self.downloads_capsule.isHidden()
+        moving = [self.lights, self.name_label, self.sidebar_button, self.sidebar_menu_button, self.back_button, self.forward_button,
+                  self.address, self.split_button, self.share_button, self.new_tab_button, self.overview_button]
+        for widget in moving:
+            self._take(widget)
+        lights = [self.lights] if self.button_style == "mac" else []
+        if islands:
+            self._hold(self.name_island, lights + [self.name_label, self.sidebar_button])
+            self._hold(self.nav_island, [self.back_button, self.forward_button, self.address], dividers=(1,))
+            self._hold(self.act_island, [self.split_button, self.share_button, self.new_tab_button])
+            for hidden in (self.capsules[0], self.capsules[1], self.capsules[2], self.sidebar_menu_button, self.overview_button, self._lights_gap):
+                hidden.hide()
+            for shown in (self.name_island, self.nav_island, self.act_island, self.name_label, self.split_button, self.sidebar_button,
+                          self.back_button, self.forward_button, self.address, self.share_button, self.new_tab_button):
+                shown.show()
+            self._fill(self._left.layout(), [self.name_island, "stretch"])
+            self._fill(self._right.layout(), ["stretch", self.downloads_capsule, ("space", 8), self.act_island, self._buttons_gap, self.window_buttons])
+            self._fill(self.layout(), [self._left, "stretch", self.nav_island, "stretch", self._right])
+        else:
+            self._hold(self.capsules[0], [self.sidebar_button, self.sidebar_menu_button])
+            self._hold(self.capsules[1], [self.back_button, self.forward_button], dividers=(0,))
+            self._hold(self.capsules[2], [self.split_button, self.share_button, self.new_tab_button, self.overview_button])
+            for hidden in (self.name_island, self.nav_island, self.act_island, self.name_label):
+                hidden.hide()
+            for shown in (self.capsules[0], self.capsules[1], self.capsules[2], self.sidebar_menu_button, self.overview_button, self.split_button,
+                          self.sidebar_button, self.back_button, self.forward_button, self.address, self.share_button, self.new_tab_button):
+                shown.show()
+            self._fill(self._left.layout(), lights + ([self._lights_gap] if lights else []) + [self.capsules[0], ("space", 8), self.capsules[1], "stretch"])
+            self._fill(self._right.layout(), ["stretch", self.downloads_capsule, ("space", 8), self.capsules[2], self._buttons_gap, self.window_buttons])
+            self._fill(self.layout(), [self._left, "stretch", self.address, "stretch", self._right])
+        self.downloads_capsule.setVisible(downloads)
+        self._lights_gap.setVisible(not islands and self.button_style == "mac")
+        self._buttons_gap.setVisible(self.button_style != "mac")
+        self.window_buttons.setVisible(self.button_style != "mac")
+        self.lights.setVisible(self.button_style == "mac")
+        self._fit_sides()
+        self._fit_address()
 
     def _fit_sides(self) -> None:
         """Both side clusters as wide as the wider one (downloads button included, shown or
@@ -16212,25 +16466,37 @@ class Toolbar(QWidget):
         self.window_buttons.setVisible(not mac)
         self._buttons_gap.setVisible(not mac)
         self.layout().setContentsMargins(16 if mac else 12, 0, 12 if mac else 6, 0)
+        if self._arranged == "islands":
+            self._arranged = None
+            self.arrange("islands")
         self._fit_sides()
         self._fit_address()
 
     def refresh_style(self, icons: IconFactory, theme: dict) -> None:
+        self.arrange(theme.get("look", "classic"))
         for button in self.findChildren(QToolButton):
             name = button.property("iconName")
             if name:
                 button.setIcon(icons.icon(name))
-        for capsule in self.capsules:
+        for capsule in self.capsules + [self.name_island, self.nav_island, self.act_island]:
             capsule.set_theme(theme)
+        self.name_label.setStyleSheet(f"color: {theme['text']}; font-weight: 600; font-size: 13px; padding: 0 2px 0 8px; background: transparent")
         self.setFixedHeight(toolbar_height(theme))
         edge = 12 if theme.get("look") == "islands" else 16            # Islands: 12 from the window's edge, as the desktop's apps
         self.layout().setContentsMargins(edge, 0, 12, 0)
         self.downloads_ring.color, self.downloads_ring.track = theme["accent"], theme["divider"]
         self.downloads_ring.update()
         self.lights.set_dark(theme["dark"])
-        self.lights.set_pill(theme if theme.get("look") == "islands" else None)
+        self.lights.set_pill(None)                     # Islands: the name island is the pill round them
         self.window_buttons.set_theme(theme)
         self.address.set_style(icons, theme)
+        islands = self._arranged == "islands"
+        self.address.inner = islands
+        self.address.setFixedHeight(CAPSULE_HEIGHT - 4 if islands else CAPSULE_HEIGHT)
+        font = QFont(self.name_label.font())
+        font.setPixelSize(13)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.name_label.setFixedWidth(QFontMetrics(font).horizontalAdvance(self.name_label.text()) + 14)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -16240,6 +16506,8 @@ class Toolbar(QWidget):
         # Safari's field takes ~40% of the window, centred, shrinking when space runs out.
         margins = self.layout().contentsMargins()
         available = self.width() - 2 * self._side - margins.left() - margins.right() - 32
+        if getattr(self, "_arranged", "classic") == "islands":      # back and forward share the address's island
+            available -= self.back_button.sizeHint().width() + self.forward_button.sizeHint().width() + 16
         target = min(760, max(300, int(self.width() * 0.40)))
         self.address.setFixedWidth(max(220, min(target, available)))
 
@@ -21231,6 +21499,7 @@ class BrowserWindow(QWidget):
         tb.forward_button.clicked.connect(lambda *_: self.go_forward())
         tb.share_button.clicked.connect(lambda *_: self.show_share_menu())
         tb.new_tab_button.clicked.connect(lambda *_: self.new_tab())
+        tb.split_button.clicked.connect(lambda *_: self.toggle_split())
         tb.overview_button.clicked.connect(lambda *_: self.toggle_overview())
         tb.downloads_button.clicked.connect(lambda *_: self.show_downloads())
         self.address.readerRequested.connect(self.toggle_reader)
@@ -21321,6 +21590,7 @@ class BrowserWindow(QWidget):
             bind("Ctrl+M", self.toggle_mute)
         bind(["Ctrl+K", "Ctrl+E"], self.show_command_bar)
         bind("Ctrl+Shift+D", self.add_to_reading_list)
+        bind("Ctrl+Alt+S", self.toggle_split)
         bind("Shift+Esc", self.show_tab_manager)
         bind("Ctrl+Alt+N", self.new_burner_tab)
         bind(["Ctrl+=", "Ctrl++"], self.zoom_in)
@@ -21429,6 +21699,7 @@ class BrowserWindow(QWidget):
         item(view, "Show Reader", "toggle_reader", READER_KEY)
         item(view, "Show Sidebar", "toggle_sidebar", "Ctrl+Shift+L")
         item(view, "Show All Tabs", "toggle_overview", "Ctrl+Shift+\\")
+        item(view, "Side by Side", "toggle_split", "Ctrl+Alt+S")
         view.addSeparator()
         item(view, "Enter Full Screen", "toggle_window_fullscreen", "Meta+Ctrl+F")
         view.addSeparator()
@@ -21723,7 +21994,83 @@ class BrowserWindow(QWidget):
 
     # ---------------------------------------------------------------------------- tabs
     def views(self) -> list[WebView]:
-        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+        out = []
+        for i in range(self.tabs.count()):                 # (both pages of a tab side by side)
+            page = self.tabs.page_at(i)
+            out += page.views if isinstance(page, SplitPage) else [page]
+        return out
+
+    # ---------------------------------------------------------------------------- side by side
+    def toggle_split(self) -> None:
+        """Side by side: the tab you're in and the one next to it share the window as one tab (a new tab's Start Page
+        when there's no other); again, and they're tabs of their own."""
+        index = self.tabs.currentIndex()
+        if index < 0:
+            return
+        if isinstance(self.tabs.page_at(index), SplitPage):
+            self._unsplit(index)
+            return
+        view = self.current_view()
+        if view is None or self._fullscreen_view is not None:
+            return
+        neighbour = index + 1 if index + 1 < self.tabs.count() else index - 1
+        other = self.tabs.page_at(neighbour) if neighbour >= 0 else None
+        before = isinstance(other, WebView) and neighbour < index       # the pages keep their order: the one before on the left
+        self._switching_group = True
+        try:
+            if isinstance(other, WebView):
+                self.tabs.removeTab(neighbour)
+                if neighbour < index:
+                    index -= 1
+            else:
+                other = self._new_view()
+                other.setUrl(QUrl(START_URL))
+            other.load_pending()
+            self.tabs.removeTab(index)
+            split = SplitPage(other, view, self.theme["accent"]) if before else SplitPage(view, other, self.theme["accent"])
+            split.focused = view
+            split.focusMoved.connect(self._split_focus_moved)
+            split.closeSide.connect(self._close_split_side)
+            self.tabs.insertTab(index, split, self._tab_icon(view), "")
+            self.tabs.setTabText(index, "")
+            self.tabs.setCurrentIndex(index)
+        finally:
+            self._switching_group = False
+        self._on_current_tab_changed(index)
+        self.tabs.update_caps()
+        self.schedule_session_save()
+
+    def _unsplit(self, index: int) -> None:
+        """A tab side by side made two tabs again, in their order, the one you were in still in front."""
+        split = self.tabs.page_at(index)
+        if not isinstance(split, SplitPage):
+            return
+        focused = split.focused
+        self._switching_group = True
+        try:
+            self.tabs.removeTab(index)
+            left, right = split.release()
+            for offset, view in enumerate((left, right)):
+                self.tabs.insertTab(index + offset, view, self._tab_icon(view), self._tab_title(view))
+            self.tabs.setCurrentIndex(self.tabs.indexOf(focused))
+        finally:
+            self._switching_group = False
+        split.deleteLater()
+        self._on_current_tab_changed(self.tabs.currentIndex())
+        self.tabs.update_caps()
+        self.schedule_session_save()
+
+    def _split_focus_moved(self, split: "SplitPage") -> None:
+        index = self.tabs.indexOf(split)
+        if index == self.tabs.currentIndex():           # the side you're in is the tab's page now: its address and buttons
+            self._on_current_tab_changed(index)
+
+    def _close_split_side(self, view: "WebView") -> None:
+        index = self.tabs.indexOf(view)
+        split = self.tabs.page_at(index)
+        if isinstance(split, SplitPage):
+            split.focused = view
+            self.close_tab(index)
 
     def current_view(self) -> WebView | None:
         view = self.tabs.currentWidget()
@@ -21776,6 +22123,11 @@ class BrowserWindow(QWidget):
         QTimer.singleShot(0, self.focus_address_bar)    # Safari puts the cursor in the field
 
     def close_tab(self, index: int) -> None:
+        split = self.tabs.page_at(index)
+        if isinstance(split, SplitPage):                 # side by side: the side you're in closes, the other stays as a tab
+            closing = split.focused
+            self._unsplit(index)
+            index = self.tabs.indexOf(closing)
         view = self.tabs.widget(index)
         if view is None:
             return
@@ -22024,6 +22376,12 @@ class BrowserWindow(QWidget):
         if self._switching_group:
             return
         self._desktop_changed()
+        split = self.tabs.page_at(index)
+        self.toolbar.split_button.setChecked(isinstance(split, SplitPage))
+        if isinstance(split, SplitPage) and split.accent != self.theme["accent"]:     # (the realm or the hour moved on)
+            split.accent = self.theme["accent"]
+            for side in split.sides:
+                side.update()
         view = self.tabs.widget(index)
         if not isinstance(view, WebView):
             return
